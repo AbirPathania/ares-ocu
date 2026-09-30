@@ -15,10 +15,11 @@ hold, not a dialog.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QListView,
     QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
@@ -41,6 +42,13 @@ from ocu.ui.widgets import HoldToConfirmButton
 TICK_MS = 100
 DEFAULT_RALLY_ALTITUDE_M = 20.0
 DEFAULT_SPACING_M = MIN_AIRCRAFT_SEPARATION_M * 2
+
+# Section 6.2's own descriptions of what each formation is for.
+PATTERN_PURPOSE = {
+    "vee": "forward push",
+    "line": "wide sweep",
+    "column": "tight trail",
+}
 
 
 def short_label(unit_id: str) -> str:
@@ -96,6 +104,9 @@ class LaunchConsole(QWidget):
             box = QCheckBox(short_label(unit_id))
             box.setChecked(True)
             box.toggled.connect(self._on_params_changed)
+            # A stylesheet-drawn indicator is not included in the widget's own
+            # size hint, so without this the label clips to "TRI-".
+            box.setMinimumWidth(box.fontMetrics().horizontalAdvance("TRI-0 \u00b7 out") + 30)
             self.checkboxes[unit_id] = box
             checkbox_row.addWidget(box)
         checkbox_row.addStretch(1)
@@ -111,8 +122,14 @@ class LaunchConsole(QWidget):
         form.addRow("Bearing", self.bearing_spin)
 
         self.pattern_combo = QComboBox()
-        self.pattern_combo.addItems(FORMATION_PATTERNS)
-        self.pattern_combo.currentTextChanged.connect(self._on_params_changed)
+        # A plain QListView takes the stylesheet; the native popup ignores it,
+        # renders its own check column and clips the longest entry.
+        self.pattern_combo.setView(QListView())
+        self.pattern_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        for value in FORMATION_PATTERNS:
+            self.pattern_combo.addItem(f"{value.upper()}  \u00b7  {PATTERN_PURPOSE[value]}", value)
+        self.pattern_combo.currentIndexChanged.connect(self._on_params_changed)
+        self._fit_popup_to_contents(self.pattern_combo)
         form.addRow("Pattern", self.pattern_combo)
 
         self.spacing_spin = QDoubleSpinBox()
@@ -182,6 +199,33 @@ class LaunchConsole(QWidget):
             self.previewCleared.emit()
         self._update_button_states()
 
+    @staticmethod
+    def _fit_popup_to_contents(combo: QComboBox) -> None:
+        """Size the popup to its longest entry.
+
+        The popup is a separate top-level widget whose width follows the
+        closed combo, not its own contents, so the longest option elides
+        unless the view is widened explicitly.
+        """
+        view = combo.view()
+        # Measure with the view's own font, and leave room for the item
+        # padding, the view border and a possible scrollbar, none of which
+        # the text width accounts for.
+        metrics = view.fontMetrics()
+        widest = max(
+            (metrics.horizontalAdvance(combo.itemText(i)) for i in range(combo.count())), default=0
+        )
+        view.setTextElideMode(Qt.ElideNone)
+        view.setMinimumWidth(widest + 72)
+
+    def current_pattern(self) -> str:
+        return self.pattern_combo.currentData() or FORMATION_PATTERNS[0]
+
+    def set_pattern(self, value: str) -> None:
+        index = self.pattern_combo.findData(value)
+        if index >= 0:
+            self.pattern_combo.setCurrentIndex(index)
+
     def selected_ids(self) -> list[str]:
         return [
             unit_id
@@ -205,7 +249,7 @@ class LaunchConsole(QWidget):
             self._origin[0],
             self._origin[1],
             self.bearing_spin.value(),
-            self.pattern_combo.currentText(),
+            self.current_pattern(),
             self.spacing_spin.value(),
             self.rally_altitude_spin.value(),
         )
@@ -238,7 +282,7 @@ class LaunchConsole(QWidget):
         self.stage_label.setText(self._sequencer.stage.value)
         self.stageChanged.emit(self._sequencer.stage.value)
         self.eventLogged.emit(
-            f"Formation staged: {len(selected)} aircraft, {self.pattern_combo.currentText()} "
+            f"Formation staged: {len(selected)} aircraft, {self.current_pattern()} "
             f"at bearing {self.bearing_spin.value():.0f}°, spacing {self.spacing_spin.value():.1f} m, "
             f"rally {self.rally_altitude_spin.value():.0f} m"
         )

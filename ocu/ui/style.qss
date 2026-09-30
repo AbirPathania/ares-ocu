@@ -173,13 +173,136 @@ QDoubleSpinBox, QComboBox {
     background-color: #0d1114;
     border: 1px solid #2f3d44;
     border-radius: 3px;
-    padding: 5px;
+    padding: 5px 8px;
     color: #cfe0dd;
     font-size: 11px;
+    min-height: 20px;
 }
 
 QDoubleSpinBox:focus, QComboBox:focus {
     border-color: #5ec9c2;
+}
+
+QDoubleSpinBox:hover, QComboBox:hover {
+    border-color: #3d4f57;
+}
+
+/* The popup is a separate top-level widget and inherits none of the styling
+   above unless it is named explicitly, which is why it rendered as a cramped
+   native list that clipped its longest entry. */
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 20px;
+    border-left: 1px solid #2f3d44;
+}
+
+QComboBox::down-arrow {
+    image: none;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #7fb3ac;
+}
+
+QComboBox::down-arrow:disabled {
+    border-top-color: #4a5359;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #12181c;
+    border: 1px solid #3d4f57;
+    color: #cfe0dd;
+    selection-background-color: #1c4441;
+    selection-color: #ffffff;
+    outline: none;
+    padding: 3px;
+}
+
+QComboBox QAbstractItemView::item {
+    min-height: 24px;
+    padding: 4px 10px;
+    border-radius: 2px;
+}
+
+QComboBox QAbstractItemView::item:selected {
+    background-color: #1c4441;
+    color: #ffffff;
+}
+
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    width: 18px;
+    background-color: #182228;
+    border-left: 1px solid #2f3d44;
+}
+
+QDoubleSpinBox::up-button {
+    subcontrol-position: top right;
+    border-top-right-radius: 3px;
+}
+
+QDoubleSpinBox::down-button {
+    subcontrol-position: bottom right;
+    border-bottom-right-radius: 3px;
+}
+
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: #23343c;
+}
+
+QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow {
+    width: 7px;
+    height: 7px;
+    background-color: #7fb3ac;
+}
+
+QDoubleSpinBox::up-arrow {
+    border-top-left-radius: 3px;
+    border-top-right-radius: 3px;
+}
+
+QDoubleSpinBox::down-arrow {
+    border-bottom-left-radius: 3px;
+    border-bottom-right-radius: 3px;
+}
+
+QDoubleSpinBox::up-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
+    background-color: #3a4149;
+}
+
+QCheckBox {
+    color: #cfe0dd;
+    font-size: 10px;
+    font-weight: bold;
+    spacing: 6px;
+}
+
+QCheckBox:disabled {
+    color: #4a5359;
+}
+
+QCheckBox::indicator {
+    width: 13px;
+    height: 13px;
+    border: 1px solid #3d4f57;
+    border-radius: 2px;
+    background-color: #0d1114;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #5ec9c2;
+    border-color: #5ec9c2;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #5ec9c2;
+}
+
+QCheckBox::indicator:disabled {
+    border-color: #24303a;
+    background-color: #12161a;
 }
 
 QLabel#stageLabel {
