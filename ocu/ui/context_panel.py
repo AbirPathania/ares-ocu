@@ -194,6 +194,11 @@ class RoverPanel(QWidget):
         self.manual_btn.clicked.connect(self.manualToggled.emit)
         layout.addWidget(self.manual_btn)
 
+        self.manual_hint = QLabel("W / S  drive      A / D  steer")
+        self.manual_hint.setObjectName("manualHint")
+        self.manual_hint.setVisible(False)
+        layout.addWidget(self.manual_hint)
+
         layout.addStretch(1)
         self._last_pos = (0.0, 0.0)
 
@@ -207,6 +212,7 @@ class RoverPanel(QWidget):
 
     def set_manual(self, is_holder: bool) -> None:
         self.manual_btn.setText("RELEASE MANUAL" if is_holder else "TAKE MANUAL CONTROL")
+        self.manual_hint.setVisible(is_holder)
 
 
 class AircraftPanel(QWidget):
@@ -267,6 +273,11 @@ class AircraftPanel(QWidget):
         self.manual_btn.clicked.connect(self.manualToggled.emit)
         layout.addWidget(self.manual_btn)
 
+        self.manual_hint = QLabel("W / S  fly      A / D  yaw      R / F  altitude")
+        self.manual_hint.setObjectName("manualHint")
+        self.manual_hint.setVisible(False)
+        layout.addWidget(self.manual_hint)
+
         layout.addStretch(1)
 
     def show_unit(self, unit_id: str) -> None:
@@ -307,6 +318,7 @@ class AircraftPanel(QWidget):
 
     def set_manual(self, is_holder: bool) -> None:
         self.manual_btn.setText("RELEASE MANUAL" if is_holder else "TAKE MANUAL CONTROL")
+        self.manual_hint.setVisible(is_holder)
 
 
 class ContextPanel(QStackedWidget):

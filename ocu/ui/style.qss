@@ -46,6 +46,22 @@ QLabel#sectionLabel {
     border-top: 1px solid #1c252b;
 }
 
+QLabel#manualHint {
+    color: #f4d78a;
+    font-size: 9px;
+    font-weight: bold;
+    background-color: #241f14;
+    border: 1px solid #4a3f22;
+    border-radius: 3px;
+    padding: 5px;
+}
+
+QPushButton#returnButton {
+    background-color: #2a2418;
+    border-color: #5c4a2a;
+    color: #f4d78a;
+}
+
 QLabel#mutedNote {
     color: #6c7a80;
     font-size: 9px;

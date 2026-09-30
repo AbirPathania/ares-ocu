@@ -85,19 +85,38 @@ def test_aircraft_dock_one_at_a_time():
 
 def test_return_to_base_drives_rover_home_then_docks_everyone():
     director = make_director(n=3, rover_x=60.0, rover_y=40.0)
-    director.return_rover_to_base(0.0, 0.0)
+    director.return_rover_to_base(0.0, 0.0, 60.0, 40.0, 0.0)
     assert director.rover_mode == RoverMode.RETURNING
     assert director.owns_rover()
 
     rover_x, rover_y = 60.0, 40.0
-    for _ in range(3000):
+    elapsed = 0.0
+    for _ in range(6000):
         _, rover_pose, _ = director.tick(0.1, rover_x, rover_y, 0.0)
+        elapsed += 0.1
         if rover_pose:
             rover_x, rover_y = rover_pose[0], rover_pose[1]
 
     assert director.rover_mode == RoverMode.AT_BASE
     assert math.hypot(rover_x, rover_y) < 0.5
     assert all(a.mode == AircraftMode.DOCKED for a in director.aircraft.values())
+
+
+def test_return_to_base_actually_takes_time_to_drive():
+    """72 m at 15 km/h cannot happen in under ~17 s, however the state machine
+    is arranged. Guards against the rover teleporting home because its body
+    was never seeded with where it actually was."""
+    director = FlightDirector()
+    director.return_rover_to_base(0.0, 0.0, 60.0, 40.0, 0.0)
+    rover_x, rover_y = 60.0, 40.0
+    elapsed = 0.0
+    while director.rover_mode != RoverMode.AT_BASE and elapsed < 300:
+        _, rover_pose, _ = director.tick(0.1, rover_x, rover_y, 0.0)
+        elapsed += 0.1
+        if rover_pose:
+            rover_x, rover_y = rover_pose[0], rover_pose[1]
+    assert director.rover_mode == RoverMode.AT_BASE
+    assert elapsed > 17.0, f"drove 72 m in {elapsed:.1f}s, faster than its own top speed"
 
 
 def test_in_flight_altitude_change_is_obeyed():
@@ -137,3 +156,77 @@ def test_zero_dt_tick_is_a_noop():
     director = make_director(n=1)
     poses, rover, events = director.tick(0.0, 0.0, 0.0, 0.0)
     assert poses == {} and rover is None and events == []
+
+
+def test_manual_input_accelerates_rather_than_jumping():
+    director = make_director(n=1)
+    director.take_manual("tricopter-1", 0.0, 0.0, 0.0)
+    assert director.aircraft["tricopter-1"].mode == AircraftMode.MANUAL
+    director.set_manual_input("tricopter-1", forward=1.0, turn=0.0, vertical=0.0)
+    before = director.aircraft["tricopter-1"].body.speed_ms
+    director.tick(0.1, 0.0, 0.0, 0.0)
+    after = director.aircraft["tricopter-1"].body.speed_ms
+    assert after > before
+    assert after < 1.0  # one tick of acceleration, not an instant jump to cruise
+
+
+def test_manual_flight_cannot_break_the_tether():
+    director = make_director(n=1)
+    director.take_manual("tricopter-1", 0.0, 0.0, 0.0)
+    director.set_manual_input("tricopter-1", forward=1.0, turn=0.0, vertical=0.0)
+    for _ in range(2000):
+        director.tick(0.05, 0.0, 0.0, 0.0)
+    state = director.aircraft["tricopter-1"]
+    assert math.hypot(state.x, state.y) <= TETHER_LIMIT_M + 0.5
+
+
+def test_releasing_manual_holds_the_new_position_as_a_slot():
+    director = make_director(n=1)
+    director.take_manual("tricopter-1", 0.0, 0.0, 0.0)
+    director.set_manual_input("tricopter-1", forward=1.0, turn=0.0, vertical=0.0)
+    for _ in range(40):
+        director.tick(0.1, 0.0, 0.0, 0.0)
+    state = director.aircraft["tricopter-1"]
+    flown_to = (state.x, state.y)
+    director.release_manual("tricopter-1", 0.0, 0.0)
+    assert state.mode == AircraftMode.STATION
+    assert abs(state.slot_dx - flown_to[0]) < 0.01
+    assert abs(state.slot_dy - flown_to[1]) < 0.01
+
+
+def test_manual_rover_drives_and_turns_under_limits():
+    director = FlightDirector()
+    director.take_manual("rover", 0.0, 0.0, 0.0)
+    director.set_manual_input("rover", forward=1.0, turn=1.0, vertical=0.0)
+    for _ in range(100):
+        director.tick(0.1, director.rover_body.x, director.rover_body.y, director.rover_body.heading)
+    body = director.rover_body
+    assert body.speed_ms <= body.limits.max_speed_ms + 1e-6
+    assert abs(body.yaw_rate) <= body.limits.max_yaw_rate_deg_s + 1e-6
+    assert math.hypot(body.x, body.y) > 1.0  # it actually went somewhere
+
+
+def test_manual_refused_on_a_docked_aircraft():
+    director = make_director(n=1)
+    director.recall()
+    run(director, 60)
+    state = director.aircraft["tricopter-1"]
+    assert state.mode == AircraftMode.DOCKED
+    assert director.take_manual("tricopter-1", 0.0, 0.0, 0.0) is False
+
+
+def test_docking_descends_gently_through_the_stages():
+    director = make_director(n=1)
+    director.recall()
+    rates = []
+    previous_z = director.aircraft["tricopter-1"].z
+    for _ in range(1500):
+        director.tick(0.1, 0.0, 0.0, 0.0)
+        z = director.aircraft["tricopter-1"].z
+        if director.aircraft["tricopter-1"].mode == AircraftMode.DOCKING:
+            rates.append(abs(z - previous_z) / 0.1)
+        previous_z = z
+    assert director.aircraft["tricopter-1"].mode == AircraftMode.DOCKED
+    assert rates, "never entered the docking descent"
+    # Nothing during recovery may fall faster than the coarse-stage rate.
+    assert max(rates) <= 1.3

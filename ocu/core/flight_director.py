@@ -1,22 +1,23 @@
 """Operator-commanded motion after launch: station keeping, altitude
-changes, recall, return to base, and docking.
+changes, manual flying, recall, return to base, and docking.
 
 The launch sequencer (section 6.3) owns an aircraft from the bay up to
 FORMED. From FORMED onward this module owns it, which is what makes the
 fleet behave like one system rather than four independent icons:
 
+- Everything moves through ocu.core.motion, so every unit accelerates,
+  cruises and decelerates under its own limits. Nothing starts at speed,
+  nothing stops dead, nothing teleports.
 - A formation slot is held *relative to the rover*, so when the rover
   drives, the formation travels with it.
 - No aircraft is ever commanded outside TETHER_LIMIT_M of the rover.
   Section 2 ties the 30-50 m scout radius to the UWB ranging limit, and
   outside it the aircraft lose the relative positioning that precision
-  landing depends on. Commands beyond the tether are clamped along the
-  same bearing, not rejected.
-- Docking waits for a stationary rover. The ArUco fiducial and the funnel
-  pad in section 7 are both fixed to the deck, so the deck has to stop
-  moving before stage 2 can mean anything. Return-to-base therefore
-  recalls the aircraft, drives the rover home, stops it, and only then
-  works through the docking queue one aircraft at a time.
+  landing depends on.
+- Docking waits for a stationary rover and then descends through the four
+  stages of section 7, slowing as it closes, with each stage entered when
+  the aircraft has actually achieved that stage's precision rather than
+  when a timer says so.
 
 No Qt import belongs in this file.
 """
@@ -29,22 +30,64 @@ from enum import Enum
 
 from ocu.core.constants import (
     ARES_A_CEILING_M,
+    DESCENT_RATE_COARSE_MS,
+    DESCENT_RATE_FINE_MS,
+    DESCENT_RATE_MECHANICAL_MS,
+    DESCENT_RATE_TOUCHDOWN_MS,
     HOLD_ALTITUDE_M,
     RECALL_RING_RADIUS_M,
+    RECOVERY_STAGE_2_PRECISION_CM,
+    RECOVERY_STAGE_3_PRECISION_CM,
+    ROVER_ACCEL_MS2,
+    ROVER_DECEL_MS2,
     ROVER_STATIONARY_SPEED_MS,
     ROVER_TOP_SPEED_MS,
-    STATION_KEEP_TOLERANCE_M,
+    ROVER_TURN_ACCEL_DEG_S2,
+    ROVER_TURN_RATE_DEG_S,
     TETHER_LIMIT_M,
+    TRICOPTER_ACCEL_MS2,
     TRICOPTER_CLIMB_RATE_MS,
+    TRICOPTER_DECEL_MS2,
+    TRICOPTER_DESCEND_RATE_MS,
     TRICOPTER_TRANSIT_SPEED_MS,
+    TRICOPTER_TURN_ACCEL_DEG_S2,
     TRICOPTER_TURN_RATE_DEG_S,
+    TRICOPTER_VERTICAL_ACCEL_MS2,
 )
 from ocu.core.formation import clamp_to_tether
-from ocu.core.recovery_sequencer import RecoverySequencer, RecoveryStage
+from ocu.core.motion import KinematicBody, MotionLimits
+from ocu.core.recovery_sequencer import RecoveryStage
+
+TOUCHDOWN_ALTITUDE_M = 0.06
+
+
+def tricopter_limits() -> MotionLimits:
+    return MotionLimits(
+        max_speed_ms=TRICOPTER_TRANSIT_SPEED_MS,
+        max_accel_ms2=TRICOPTER_ACCEL_MS2,
+        max_decel_ms2=TRICOPTER_DECEL_MS2,
+        max_climb_ms=TRICOPTER_CLIMB_RATE_MS,
+        max_descend_ms=TRICOPTER_DESCEND_RATE_MS,
+        max_vertical_accel_ms2=TRICOPTER_VERTICAL_ACCEL_MS2,
+        max_yaw_rate_deg_s=TRICOPTER_TURN_RATE_DEG_S,
+        max_yaw_accel_deg_s2=TRICOPTER_TURN_ACCEL_DEG_S2,
+    )
+
+
+def rover_limits() -> MotionLimits:
+    return MotionLimits(
+        max_speed_ms=ROVER_TOP_SPEED_MS,
+        max_accel_ms2=ROVER_ACCEL_MS2,
+        max_decel_ms2=ROVER_DECEL_MS2,
+        max_yaw_rate_deg_s=ROVER_TURN_RATE_DEG_S,
+        max_yaw_accel_deg_s2=ROVER_TURN_ACCEL_DEG_S2,
+        heading_couples_to_speed=True,
+    )
 
 
 class AircraftMode(str, Enum):
     STATION = "STATION"
+    MANUAL = "MANUAL"
     RETURNING = "RETURNING"
     HOLDING = "HOLDING"
     DOCKING = "DOCKING"
@@ -53,86 +96,77 @@ class AircraftMode(str, Enum):
 
 class RoverMode(str, Enum):
     NORMAL = "NORMAL"
+    MANUAL = "MANUAL"
     RETURNING = "RETURNING"
     AT_BASE = "AT_BASE"
 
 
 @dataclass
+class ManualInput:
+    """Normalised stick input, each axis in [-1, 1]."""
+
+    forward: float = 0.0
+    turn: float = 0.0
+    vertical: float = 0.0
+
+    @property
+    def active(self) -> bool:
+        return bool(self.forward or self.turn or self.vertical)
+
+
+@dataclass
 class AircraftState:
     unit_id: str
+    body: KinematicBody
     mode: AircraftMode = AircraftMode.STATION
-    slot_dx: float = 0.0  # formation slot, as an offset from the rover
+    slot_dx: float = 0.0
     slot_dy: float = 0.0
     commanded_altitude_m: float = 20.0
-    x: float = 0.0
-    y: float = 0.0
-    z: float = 0.0
-    heading: float = 0.0
-    recovery: RecoverySequencer | None = None
+    manual: ManualInput = field(default_factory=ManualInput)
+    recovery_stage: RecoveryStage = RecoveryStage.APPROACHING
 
+    @property
+    def x(self) -> float:
+        return self.body.x
 
-def _turn_toward(current: float, target: float, dt_s: float) -> float:
-    difference = (target - current + 180.0) % 360.0 - 180.0
-    max_step = TRICOPTER_TURN_RATE_DEG_S * dt_s
-    if abs(difference) <= max_step:
-        return target % 360.0
-    return (current + math.copysign(max_step, difference)) % 360.0
+    @property
+    def y(self) -> float:
+        return self.body.y
 
+    @property
+    def z(self) -> float:
+        return self.body.z
 
-def _move_toward(
-    x: float, y: float, tx: float, ty: float, speed_ms: float, dt_s: float
-) -> tuple[float, float, bool]:
-    dx, dy = tx - x, ty - y
-    distance = math.hypot(dx, dy)
-    step = speed_ms * dt_s
-    if distance <= max(step, 1e-9):
-        return tx, ty, True
-    return x + dx / distance * step, y + dy / distance * step, False
-
-
-def _climb_toward(z: float, target_z: float, dt_s: float) -> float:
-    delta = target_z - z
-    step = TRICOPTER_CLIMB_RATE_MS * dt_s
-    if abs(delta) <= step:
-        return target_z
-    return z + math.copysign(step, delta)
+    @property
+    def heading(self) -> float:
+        return self.body.heading
 
 
 class FlightDirector:
     def __init__(self) -> None:
         self.aircraft: dict[str, AircraftState] = {}
         self.rover_mode = RoverMode.NORMAL
-        self.rover_pose: tuple[float, float, float] = (0.0, 0.0, 0.0)  # x, y, heading
+        self.rover_body = KinematicBody(limits=rover_limits())
+        self.rover_manual = ManualInput()
         self._base: tuple[float, float] = (0.0, 0.0)
         self._dock_queue: list[str] = []
         self._rover_speed_ms = 0.0
+        self._rover_velocity: tuple[float, float] = (0.0, 0.0)
         self._last_rover_xy: tuple[float, float] | None = None
 
     # --- ownership ---
 
     def adopt(
-        self,
-        unit_id: str,
-        x: float,
-        y: float,
-        z: float,
-        heading: float,
-        rover_x: float,
-        rover_y: float,
+        self, unit_id: str, x: float, y: float, z: float, heading: float, rover_x: float, rover_y: float
     ) -> None:
-        """Take over an aircraft at the end of its launch, holding wherever it
-        ended up as a slot offset from the rover."""
-        dx, dy = clamp_to_tether(x, y, rover_x, rover_y)
+        slot_x, slot_y = clamp_to_tether(x, y, rover_x, rover_y)
         self.aircraft[unit_id] = AircraftState(
             unit_id=unit_id,
+            body=KinematicBody(x=x, y=y, z=z, heading=heading, limits=tricopter_limits()),
             mode=AircraftMode.STATION,
-            slot_dx=dx - rover_x,
-            slot_dy=dy - rover_y,
+            slot_dx=slot_x - rover_x,
+            slot_dy=slot_y - rover_y,
             commanded_altitude_m=max(z, 1.0),
-            x=x,
-            y=y,
-            z=z,
-            heading=heading,
         )
 
     def release(self, unit_id: str) -> None:
@@ -144,7 +178,10 @@ class FlightDirector:
         self.aircraft.clear()
         self._dock_queue.clear()
         self.rover_mode = RoverMode.NORMAL
+        self.rover_body = KinematicBody(limits=rover_limits())
+        self.rover_manual = ManualInput()
         self._rover_speed_ms = 0.0
+        self._rover_velocity = (0.0, 0.0)
         self._last_rover_xy = None
 
     @property
@@ -152,21 +189,61 @@ class FlightDirector:
         return [a.unit_id for a in self.aircraft.values() if a.mode != AircraftMode.DOCKED]
 
     def owns_rover(self) -> bool:
-        return self.rover_mode in (RoverMode.RETURNING, RoverMode.AT_BASE)
+        return self.rover_mode in (RoverMode.RETURNING, RoverMode.AT_BASE, RoverMode.MANUAL)
 
     # --- operator commands ---
 
     def set_commanded_altitude(self, unit_id: str, altitude_m: float) -> None:
-        """In-flight altitude change, allowed while the aircraft is flying its
-        slot or transiting home, but not once it has committed to a dock."""
         state = self.aircraft.get(unit_id)
         if state is None or state.mode in (AircraftMode.DOCKING, AircraftMode.DOCKED):
             return
         state.commanded_altitude_m = max(1.0, min(altitude_m, ARES_A_CEILING_M))
 
+    def take_manual(self, unit_id: str, rover_x: float, rover_y: float, rover_heading: float) -> bool:
+        """Hand a unit to the sticks. Only one at a time is the caller's rule
+        (section 4.2); this just switches the mode."""
+        if unit_id == "rover":
+            if self.rover_mode != RoverMode.MANUAL:
+                self.rover_body.x, self.rover_body.y = rover_x, rover_y
+                self.rover_body.heading = rover_heading
+                self.rover_body.vx = self.rover_body.vy = 0.0
+            self.rover_mode = RoverMode.MANUAL
+            return True
+        state = self.aircraft.get(unit_id)
+        if state is None or state.mode in (AircraftMode.DOCKING, AircraftMode.DOCKED):
+            return False
+        state.mode = AircraftMode.MANUAL
+        return True
+
+    def release_manual(self, unit_id: str, rover_x: float, rover_y: float) -> None:
+        if unit_id == "rover":
+            if self.rover_mode == RoverMode.MANUAL:
+                self.rover_mode = RoverMode.NORMAL
+                self.rover_manual = ManualInput()
+            return
+        state = self.aircraft.get(unit_id)
+        if state is not None and state.mode == AircraftMode.MANUAL:
+            # Hold wherever the operator left it, as a fresh slot on the rover.
+            slot_x, slot_y = clamp_to_tether(state.x, state.y, rover_x, rover_y)
+            state.slot_dx, state.slot_dy = slot_x - rover_x, slot_y - rover_y
+            state.commanded_altitude_m = max(state.z, 1.0)
+            state.mode = AircraftMode.STATION
+            state.manual = ManualInput()
+
+    def set_manual_input(self, unit_id: str, forward: float, turn: float, vertical: float) -> None:
+        clamped = ManualInput(
+            forward=max(-1.0, min(forward, 1.0)),
+            turn=max(-1.0, min(turn, 1.0)),
+            vertical=max(-1.0, min(vertical, 1.0)),
+        )
+        if unit_id == "rover":
+            self.rover_manual = clamped
+            return
+        state = self.aircraft.get(unit_id)
+        if state is not None:
+            state.manual = clamped
+
     def recall(self, unit_ids: list[str] | None = None) -> list[str]:
-        """Send aircraft home. They fly to a holding ring above the rover and
-        wait there; docking only begins once the rover is stationary."""
         targets = unit_ids if unit_ids is not None else self.airborne_ids
         recalled = []
         for unit_id in targets:
@@ -179,15 +256,33 @@ class FlightDirector:
             ):
                 continue
             state.mode = AircraftMode.RETURNING
+            state.manual = ManualInput()
             recalled.append(unit_id)
         return recalled
 
-    def return_rover_to_base(self, base_x: float = 0.0, base_y: float = 0.0) -> list[str]:
-        """Return to base. Any aircraft still out is recalled at the same time
-        and travels home with the rover, because it cannot dock to a moving
-        deck and must not be left outside the tether."""
+    def return_rover_to_base(
+        self,
+        base_x: float = 0.0,
+        base_y: float = 0.0,
+        rover_x: float | None = None,
+        rover_y: float | None = None,
+        rover_heading: float | None = None,
+    ) -> list[str]:
+        """Drive the rover home, recalling anything still airborne to come with it.
+
+        The rover's position must be seeded here rather than assumed: until
+        the director owns the rover its body is only a mirror of whoever does,
+        and starting a return from a stale (0, 0) makes it believe it is
+        already home and arrive instantly.
+        """
         self._base = (base_x, base_y)
+        if rover_x is not None and rover_y is not None:
+            self.rover_body.x, self.rover_body.y = rover_x, rover_y
+            if rover_heading is not None:
+                self.rover_body.heading = rover_heading
+            self.rover_body.vx = self.rover_body.vy = 0.0
         self.rover_mode = RoverMode.RETURNING
+        self.rover_manual = ManualInput()
         return self.recall()
 
     def cancel_return(self) -> None:
@@ -198,14 +293,9 @@ class FlightDirector:
 
     def tick(
         self, dt_s: float, rover_x: float, rover_y: float, rover_heading: float
-    ) -> tuple[dict[str, tuple[float, float, float, float]], tuple[float, float, float] | None, list[tuple[str, str]]]:
-        """Advance every owned unit.
-
-        Returns (aircraft poses, rover pose or None if not owned, events).
-        The caller passes the rover's current position whoever owns it, so
-        station keeping tracks a scripted rover just as well as one the
-        director is driving itself.
-        """
+    ) -> tuple[
+        dict[str, tuple[float, float, float, float]], tuple[float, float, float] | None, list[tuple[str, str]]
+    ]:
         events: list[tuple[str, str]] = []
         if dt_s <= 0:
             return {}, None, events
@@ -226,61 +316,93 @@ class FlightDirector:
     def _update_rover(
         self, dt_s: float, rover_x: float, rover_y: float, rover_heading: float, events: list
     ) -> tuple[float, float, float] | None:
+        body = self.rover_body
+
+        if self.rover_mode == RoverMode.MANUAL:
+            body.apply_yaw_command(self.rover_manual.turn * body.limits.max_yaw_rate_deg_s, dt_s)
+            heading_rad = math.radians(body.heading)
+            demand = self.rover_manual.forward * body.limits.max_speed_ms
+            body.apply_horizontal_command(
+                demand * math.sin(heading_rad), demand * math.cos(heading_rad), dt_s
+            )
+            self._rover_speed_ms = body.speed_ms
+            self._rover_velocity = (body.vx, body.vy)
+            self._last_rover_xy = (body.x, body.y)
+            return (body.x, body.y, body.heading)
+
         if self.rover_mode == RoverMode.RETURNING:
             target_x, target_y = self._base
-            dx, dy = target_x - rover_x, target_y - rover_y
-            heading = math.degrees(math.atan2(dx, dy)) % 360.0 if (dx or dy) else rover_heading
-            new_x, new_y, arrived = _move_toward(
-                rover_x, rover_y, target_x, target_y, ROVER_TOP_SPEED_MS, dt_s
-            )
-            self._rover_speed_ms = 0.0 if arrived else ROVER_TOP_SPEED_MS
+            dx, dy = target_x - body.x, target_y - body.y
+            if math.hypot(dx, dy) > 0.2:
+                body.step_heading(math.degrees(math.atan2(dx, dy)) % 360.0, dt_s)
+            arrived = body.step_toward(target_x, target_y, dt_s)
+            self._rover_velocity = (body.vx, body.vy)
+            self._rover_speed_ms = body.speed_ms
             if arrived:
                 self.rover_mode = RoverMode.AT_BASE
                 events.append(("rover", "AT_BASE"))
-            self.rover_pose = (new_x, new_y, heading)
-            self._last_rover_xy = (new_x, new_y)
-            return self.rover_pose
+            self._last_rover_xy = (body.x, body.y)
+            return (body.x, body.y, body.heading)
 
         if self.rover_mode == RoverMode.AT_BASE:
-            self._rover_speed_ms = 0.0
-            self.rover_pose = (rover_x, rover_y, rover_heading)
-            self._last_rover_xy = (rover_x, rover_y)
-            return self.rover_pose
+            body.halt(dt_s)
+            self._rover_speed_ms = body.speed_ms
+            self._rover_velocity = (body.vx, body.vy)
+            self._last_rover_xy = (body.x, body.y)
+            return (body.x, body.y, body.heading)
 
         # Not owned: observe how fast someone else is moving it, because the
         # docking gate depends on the deck actually being still.
         if self._last_rover_xy is not None:
-            moved = math.hypot(rover_x - self._last_rover_xy[0], rover_y - self._last_rover_xy[1])
-            self._rover_speed_ms = moved / dt_s
+            vx = (rover_x - self._last_rover_xy[0]) / dt_s
+            vy = (rover_y - self._last_rover_xy[1]) / dt_s
+            self._rover_velocity = (vx, vy)
+            self._rover_speed_ms = math.hypot(vx, vy)
         self._last_rover_xy = (rover_x, rover_y)
-        self.rover_pose = (rover_x, rover_y, rover_heading)
+        body.x, body.y, body.heading = rover_x, rover_y, rover_heading
         return None
 
     def _tick_aircraft(
         self, state: AircraftState, dt_s: float, rover_x: float, rover_y: float, events: list
     ) -> None:
+        body = state.body
+
+        if state.mode == AircraftMode.MANUAL:
+            body.apply_yaw_command(state.manual.turn * body.limits.max_yaw_rate_deg_s, dt_s)
+            heading_rad = math.radians(body.heading)
+            demand = state.manual.forward * body.limits.max_speed_ms
+            body.apply_horizontal_command(
+                demand * math.sin(heading_rad), demand * math.cos(heading_rad), dt_s
+            )
+            rate = state.manual.vertical * (
+                body.limits.max_climb_ms if state.manual.vertical > 0 else body.limits.max_descend_ms
+            )
+            body.apply_vertical_command(rate, dt_s)
+            # The tether is a hard limit even on the sticks.
+            clamped_x, clamped_y = clamp_to_tether(body.x, body.y, rover_x, rover_y)
+            if (clamped_x, clamped_y) != (body.x, body.y):
+                body.x, body.y = clamped_x, clamped_y
+                body.vx = body.vy = 0.0
+            state.commanded_altitude_m = max(body.z, 1.0)
+            return
+
         if state.mode == AircraftMode.STATION:
             target_x, target_y = clamp_to_tether(
                 rover_x + state.slot_dx, rover_y + state.slot_dy, rover_x, rover_y
             )
-            state.x, state.y, _ = _move_toward(
-                state.x, state.y, target_x, target_y, TRICOPTER_TRANSIT_SPEED_MS, dt_s
-            )
-            state.z = _climb_toward(state.z, state.commanded_altitude_m, dt_s)
+            body.step_toward(target_x, target_y, dt_s, feedforward=self._rover_velocity)
+            body.step_altitude(state.commanded_altitude_m, dt_s)
+            body.face_travel_direction(dt_s)
             return
 
         if state.mode == AircraftMode.RETURNING:
-            index = self._ring_index(state.unit_id)
-            angle = math.radians(index * (360.0 / max(len(self.aircraft), 1)))
-            target_x = rover_x + RECALL_RING_RADIUS_M * math.sin(angle)
-            target_y = rover_y + RECALL_RING_RADIUS_M * math.cos(angle)
-            bearing_to_rover = math.degrees(math.atan2(rover_x - state.x, rover_y - state.y)) % 360.0
-            state.heading = _turn_toward(state.heading, bearing_to_rover, dt_s)
-            state.x, state.y, arrived = _move_toward(
-                state.x, state.y, target_x, target_y, TRICOPTER_TRANSIT_SPEED_MS, dt_s
+            target_x, target_y = self._ring_slot(state.unit_id, rover_x, rover_y)
+            body.step_heading(
+                math.degrees(math.atan2(rover_x - body.x, rover_y - body.y)) % 360.0, dt_s
             )
-            state.z = _climb_toward(state.z, HOLD_ALTITUDE_M, dt_s)
-            if arrived and abs(state.z - HOLD_ALTITUDE_M) < STATION_KEEP_TOLERANCE_M:
+            arrived = body.step_toward(target_x, target_y, dt_s)
+            settled = body.step_altitude(HOLD_ALTITUDE_M, dt_s)
+            if arrived and settled:
                 state.mode = AircraftMode.HOLDING
                 if state.unit_id not in self._dock_queue:
                     self._dock_queue.append(state.unit_id)
@@ -288,51 +410,71 @@ class FlightDirector:
             return
 
         if state.mode == AircraftMode.HOLDING:
-            index = self._ring_index(state.unit_id)
-            angle = math.radians(index * (360.0 / max(len(self.aircraft), 1)))
-            target_x = rover_x + RECALL_RING_RADIUS_M * math.sin(angle)
-            target_y = rover_y + RECALL_RING_RADIUS_M * math.cos(angle)
-            state.x, state.y, _ = _move_toward(
-                state.x, state.y, target_x, target_y, TRICOPTER_TRANSIT_SPEED_MS, dt_s
-            )
-            state.z = _climb_toward(state.z, HOLD_ALTITUDE_M, dt_s)
+            target_x, target_y = self._ring_slot(state.unit_id, rover_x, rover_y)
+            body.step_toward(target_x, target_y, dt_s)
+            body.step_altitude(HOLD_ALTITUDE_M, dt_s)
             return
 
         if state.mode == AircraftMode.DOCKING:
-            if state.recovery is None:
-                state.recovery = RecoverySequencer()
-                state.recovery.recall()
-            previous = state.recovery.stage
-            state.recovery.tick(dt_s)
-            if state.recovery.stage != previous:
-                events.append((state.unit_id, f"RECOVERY:{state.recovery.stage.value}"))
+            self._tick_docking(state, dt_s, rover_x, rover_y, events)
 
-            state.x, state.y, _ = _move_toward(
-                state.x, state.y, rover_x, rover_y, TRICOPTER_TRANSIT_SPEED_MS, dt_s
-            )
-            if state.recovery.stage == RecoveryStage.DOCKED:
-                state.x, state.y, state.z = rover_x, rover_y, 0.0
-                state.mode = AircraftMode.DOCKED
-                if state.unit_id in self._dock_queue:
-                    self._dock_queue.remove(state.unit_id)
-                events.append((state.unit_id, "DOCKED"))
-            else:
-                # Descend in step with the recovery stages rather than after them.
-                fraction = state.recovery.elapsed_s / max(state.recovery.elapsed_s + 1e-6, 1e-6)
-                state.z = _climb_toward(state.z, 0.0, dt_s * (1.0 + fraction))
+    def _tick_docking(
+        self, state: AircraftState, dt_s: float, rover_x: float, rover_y: float, events: list
+    ) -> None:
+        """Four-layer recovery, section 7. The stage is whatever precision the
+        aircraft has actually achieved, and the descent rate falls with it, so
+        3 cm is reached by flying carefully rather than by a timer expiring."""
+        body = state.body
+        body.step_toward(rover_x, rover_y, dt_s)
+        lateral_error = math.hypot(body.x - rover_x, body.y - rover_y)
 
-    def _ring_index(self, unit_id: str) -> int:
+        stage = self._stage_for(lateral_error, body.z)
+        if stage != state.recovery_stage:
+            state.recovery_stage = stage
+            events.append((state.unit_id, f"RECOVERY:{stage.value}"))
+
+        descent_rate = {
+            RecoveryStage.APPROACHING: DESCENT_RATE_COARSE_MS,
+            RecoveryStage.COARSE: DESCENT_RATE_COARSE_MS,
+            RecoveryStage.FINE: DESCENT_RATE_FINE_MS,
+            RecoveryStage.MECHANICAL: DESCENT_RATE_MECHANICAL_MS,
+            RecoveryStage.DOCKED: DESCENT_RATE_TOUCHDOWN_MS,
+        }[stage]
+        scale = min(1.0, descent_rate / max(body.limits.max_descend_ms, 1e-6))
+        body.step_altitude(0.0, dt_s, max_rate_scale=scale)
+
+        if body.z <= TOUCHDOWN_ALTITUDE_M and lateral_error <= RECOVERY_STAGE_3_PRECISION_CM / 100.0:
+            body.x, body.y, body.z = rover_x, rover_y, 0.0
+            body.vx = body.vy = body.vz = 0.0
+            state.mode = AircraftMode.DOCKED
+            state.recovery_stage = RecoveryStage.DOCKED
+            if state.unit_id in self._dock_queue:
+                self._dock_queue.remove(state.unit_id)
+            events.append((state.unit_id, "DOCKED"))
+
+    @staticmethod
+    def _stage_for(lateral_error_m: float, altitude_m: float) -> RecoveryStage:
+        if lateral_error_m <= RECOVERY_STAGE_3_PRECISION_CM / 100.0 and altitude_m <= 0.6:
+            return RecoveryStage.MECHANICAL
+        if lateral_error_m <= RECOVERY_STAGE_2_PRECISION_CM / 100.0 and altitude_m <= 2.5:
+            return RecoveryStage.FINE
+        return RecoveryStage.COARSE
+
+    def _ring_slot(self, unit_id: str, rover_x: float, rover_y: float) -> tuple[float, float]:
         ordered = sorted(self.aircraft)
-        return ordered.index(unit_id) if unit_id in ordered else 0
+        index = ordered.index(unit_id) if unit_id in ordered else 0
+        angle = math.radians(index * (360.0 / max(len(ordered), 1)))
+        return (
+            rover_x + RECALL_RING_RADIUS_M * math.sin(angle),
+            rover_y + RECALL_RING_RADIUS_M * math.cos(angle),
+        )
 
     def _service_dock_queue(self, events: list) -> None:
-        """One aircraft docks at a time, and only onto a stationary deck."""
         if not self._dock_queue:
             return
         if self._rover_speed_ms > ROVER_STATIONARY_SPEED_MS:
             return
-        already_docking = any(a.mode == AircraftMode.DOCKING for a in self.aircraft.values())
-        if already_docking:
+        if any(a.mode == AircraftMode.DOCKING for a in self.aircraft.values()):
             return
 
         next_id = self._dock_queue[0]
@@ -342,19 +484,28 @@ class FlightDirector:
             return
         if state.mode == AircraftMode.HOLDING:
             state.mode = AircraftMode.DOCKING
-            state.recovery = RecoverySequencer()
-            state.recovery.recall()
+            state.recovery_stage = RecoveryStage.COARSE
             events.append((next_id, "DOCKING"))
 
     # --- introspection for the UI ---
 
     def mode_of(self, unit_id: str) -> str:
         state = self.aircraft.get(unit_id)
-        return state.mode.value if state else "—"
+        if state is None:
+            return "—"
+        if state.mode == AircraftMode.DOCKING:
+            return f"DOCKING · {state.recovery_stage.value}"
+        return state.mode.value
 
     def commanded_altitude(self, unit_id: str) -> float | None:
         state = self.aircraft.get(unit_id)
         return state.commanded_altitude_m if state else None
+
+    def speed_of(self, unit_id: str) -> float | None:
+        if unit_id == "rover":
+            return self.rover_body.speed_ms
+        state = self.aircraft.get(unit_id)
+        return state.body.speed_ms if state else None
 
     def tether_distance(self, unit_id: str, rover_x: float, rover_y: float) -> float | None:
         state = self.aircraft.get(unit_id)

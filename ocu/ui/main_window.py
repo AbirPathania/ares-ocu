@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -80,6 +79,8 @@ class MainWindow(QMainWindow):
         self._last_clock_s = 0.0
         self._docked_state: dict[str, bool] = {uid: True for uid in TRICOPTER_IDS}
         self._position_owner: dict[str, str] = {uid: "scripted" for uid in ALL_UNIT_IDS}
+        self._keys_down: set[int] = set()
+        self.setFocusPolicy(Qt.StrongFocus)
 
         # The flight director owns every unit it has been handed, on its own
         # wall clock, independently of whether the scripted mission is playing.
@@ -140,15 +141,15 @@ class MainWindow(QMainWindow):
         feeds_label.setObjectName("sectionLabel")
         layout.addWidget(feeds_label)
 
-        grid = QGridLayout()
-        grid.setSpacing(3)
+        feeds_column = QVBoxLayout()
+        feeds_column.setSpacing(3)
         self.camera_feeds: dict[str, SimulatedCameraFeed] = {}
-        for i, unit_id in enumerate(ALL_UNIT_IDS):
-            feed = SimulatedCameraFeed(unit_id, unit_id.upper())
+        for unit_id in ALL_UNIT_IDS:
+            feed = SimulatedCameraFeed(unit_id, short_label(unit_id))
             self.camera_feeds[unit_id] = feed
-            grid.addWidget(feed, i // 2, i % 2)
+            feeds_column.addWidget(feed)
         self.camera_feeds["rover"].set_active(True)
-        layout.addLayout(grid)
+        layout.addLayout(feeds_column)
 
         roster_label = QLabel("FLEET")
         roster_label.setObjectName("sectionLabel")
@@ -309,12 +310,31 @@ class MainWindow(QMainWindow):
     # --- MANUAL handoff, section 4.2 ---
 
     def _on_take_manual(self, unit_id: str) -> None:
+        previous = self.control_authority.manual_holder
+        if previous is not None and previous != unit_id:
+            self.flight_director.release_manual(
+                previous, self.units["rover"].pose.x, self.units["rover"].pose.y
+            )
         self.control_authority.take_manual(unit_id)
+        rover = self.units["rover"]
+        if unit_id != "rover":
+            self._ensure_director_owns(unit_id)
+        if self.flight_director.take_manual(unit_id, rover.pose.x, rover.pose.y, rover.pose.heading):
+            self._position_owner[unit_id] = "operator"
+            self.event_log.log(
+                self.playback.clock_s,
+                f"{short_label(unit_id)} on manual sticks: W/S drive, A/D turn"
+                + (", R/F altitude" if unit_id != "rover" else ""),
+            )
+        self.setFocus()
         self.event_log.log(self.playback.clock_s, f"MANUAL control taken: {unit_id}")
         self._on_manual_authority_changed()
 
     def _on_release_manual(self) -> None:
         holder = self.control_authority.manual_holder
+        if holder is not None:
+            rover = self.units["rover"]
+            self.flight_director.release_manual(holder, rover.pose.x, rover.pose.y)
         self.control_authority.release_manual()
         if holder:
             self.event_log.log(self.playback.clock_s, f"MANUAL control released: {holder}")
@@ -329,8 +349,24 @@ class MainWindow(QMainWindow):
 
     # --- flight director: everything after launch ---
 
+    def _apply_manual_input(self) -> None:
+        """Translate held keys into stick demand for whoever holds MANUAL.
+
+        Nothing here moves a unit directly: the demand goes into the same
+        acceleration-limited flight model as autonomous motion, so driving by
+        hand feels like driving rather than dragging an icon.
+        """
+        holder = self.control_authority.manual_holder
+        if holder is None:
+            return
+        forward = (Qt.Key_W in self._keys_down) - (Qt.Key_S in self._keys_down)
+        turn = (Qt.Key_D in self._keys_down) - (Qt.Key_A in self._keys_down)
+        vertical = (Qt.Key_R in self._keys_down) - (Qt.Key_F in self._keys_down)
+        self.flight_director.set_manual_input(holder, forward, turn, vertical)
+
     def _on_director_tick(self) -> None:
         dt = DIRECTOR_TICK_MS / 1000.0
+        self._apply_manual_input()
         rover = self.units["rover"]
         poses, rover_pose, events = self.flight_director.tick(
             dt, rover.pose.x, rover.pose.y, rover.pose.heading
@@ -440,7 +476,10 @@ class MainWindow(QMainWindow):
         for unit_id in TRICOPTER_IDS:
             self._ensure_director_owns(unit_id)
         self._position_owner["rover"] = "operator"
-        recalled = self.flight_director.return_rover_to_base(0.0, 0.0)
+        rover = self.units["rover"]
+        recalled = self.flight_director.return_rover_to_base(
+            0.0, 0.0, rover.pose.x, rover.pose.y, rover.pose.heading
+        )
         if recalled:
             self.event_log.log(
                 self.playback.clock_s,
@@ -639,6 +678,7 @@ class MainWindow(QMainWindow):
         self.context_panel.rover_panel.sensors.clear()
         self.context_panel.rover_panel.sensors.set_scanning(False)
         self.flight_director.reset()
+        self._keys_down.clear()
         self._position_owner = {uid: "scripted" for uid in ALL_UNIT_IDS}
         for unit_id in TRICOPTER_IDS:
             self._set_docked(unit_id, True)
@@ -648,6 +688,26 @@ class MainWindow(QMainWindow):
         self.playback.apply_initial_state()
         self._select_unit(self.selected_unit_id)
         self._refresh_all_rows()
+
+    # --- manual driving ---
+
+    def keyPressEvent(self, event) -> None:
+        if not event.isAutoRepeat():
+            self._keys_down.add(event.key())
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:
+        if not event.isAutoRepeat():
+            self._keys_down.discard(event.key())
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        # Dropping focus with a key held would leave the unit driving itself.
+        self._keys_down.clear()
+        holder = self.control_authority.manual_holder
+        if holder is not None:
+            self.flight_director.set_manual_input(holder, 0.0, 0.0, 0.0)
+        super().focusOutEvent(event)
 
     # --- fleet-wide summaries ---
 

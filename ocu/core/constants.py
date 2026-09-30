@@ -36,12 +36,38 @@ UWB_RANGING_RATE_HZ = 100.0
 # limit, not a preference.
 TETHER_LIMIT_M = UWB_RANGING_LIMIT_M
 
-# --- Flight motion. Not baseline figures: the technical baseline gives
-# endurance, ceiling and scout radius for ARES-A but no transit speed or
-# climb rate, so these are this build's own motion model. See DECISIONS.md.
-TRICOPTER_TRANSIT_SPEED_MS = 7.0
-TRICOPTER_CLIMB_RATE_MS = 3.0
-TRICOPTER_TURN_RATE_DEG_S = 120.0
+# --- Flight model. Not baseline figures: the technical baseline gives
+# endurance, ceiling, scout radius and rover top speed, but no acceleration,
+# climb rate or turn rate for either vehicle. These are this build's motion
+# model, chosen to move like the real things rather than to look brisk.
+# See DECISIONS.md.
+
+# ARES-A, a 102 g compound bicopter: high thrust-to-weight, so it accelerates
+# hard for its size, but it descends more slowly than it climbs because
+# settling into its own downwash is the part you do carefully.
+TRICOPTER_TRANSIT_SPEED_MS = 6.0
+TRICOPTER_ACCEL_MS2 = 2.5
+TRICOPTER_DECEL_MS2 = 2.5
+TRICOPTER_CLIMB_RATE_MS = 2.5
+TRICOPTER_DESCEND_RATE_MS = 1.5
+TRICOPTER_VERTICAL_ACCEL_MS2 = 1.8
+TRICOPTER_TURN_RATE_DEG_S = 90.0
+TRICOPTER_TURN_ACCEL_DEG_S2 = 180.0
+
+# ARES-G: 25 kg minimum on six wheels over broken ground. It gets to 15 km/h
+# slowly, stops sooner than it starts, and a four-station steering rocker
+# bogie turns at walking pace rather than pivoting.
+ROVER_ACCEL_MS2 = 0.8
+ROVER_DECEL_MS2 = 1.2
+ROVER_TURN_RATE_DEG_S = 22.0
+ROVER_TURN_ACCEL_DEG_S2 = 40.0
+
+# Descent rates through the four recovery stages of section 7. The closer it
+# gets to the deck, the slower it goes, which is what makes 3 cm achievable.
+DESCENT_RATE_COARSE_MS = 1.2
+DESCENT_RATE_FINE_MS = 0.5
+DESCENT_RATE_MECHANICAL_MS = 0.22
+DESCENT_RATE_TOUCHDOWN_MS = 0.10
 STATION_KEEP_TOLERANCE_M = 0.4
 RECALL_RING_RADIUS_M = 6.0  # holding ring above the rover while awaiting a dock slot
 HOLD_ALTITUDE_M = 12.0  # altitude aircraft settle to while queued for docking

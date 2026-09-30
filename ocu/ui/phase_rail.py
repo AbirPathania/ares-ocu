@@ -26,8 +26,16 @@ class PhaseRail(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._index = -1
-        self.setFixedHeight(28)
-        self.setMinimumWidth(len(MISSION_PHASES) * (SEGMENT_W + GAP) + 190)
+        self.setFixedHeight(30)
+        self.setMinimumWidth(len(MISSION_PHASES) * (SEGMENT_W + GAP) + 250)
+        self.setToolTip(self._build_tooltip())
+
+    def _build_tooltip(self) -> str:
+        lines = ["Mission phase, section 5 of the build spec:"]
+        lines += [
+            f"  {i + 1}. {name.replace('_', ' ').title()}" for i, name in enumerate(MISSION_PHASES)
+        ]
+        return "\n".join(lines)
 
     def set_phase(self, phase: str) -> None:
         try:
@@ -45,7 +53,12 @@ class PhaseRail(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
 
-        y = (self.height() - SEGMENT_H) / 2
+        painter.setPen(QPen(QColor("#6c7a80")))
+        painter.setFont(QFont("Menlo", 7))
+        painter.drawText(QRectF(0, 0, 200, 10), Qt.AlignLeft | Qt.AlignVCenter, "MISSION PHASE")
+        painter.setPen(Qt.NoPen)
+
+        y = self.height() / 2 + 1
         for i in range(len(MISSION_PHASES)):
             x = i * (SEGMENT_W + GAP)
             if i < self._index:
@@ -67,9 +80,9 @@ class PhaseRail(QWidget):
             painter.setPen(QPen(QColor("#6c7a80")))
             painter.setFont(QFont("Menlo", 9))
             painter.drawText(
-                QRectF(label_x + 152, 0, 44, self.height()),
+                QRectF(label_x + 152, 0, 130, self.height()),
                 Qt.AlignLeft | Qt.AlignVCenter,
-                f"{self._index + 1}/{len(MISSION_PHASES)}",
+                f"STEP {self._index + 1} OF {len(MISSION_PHASES)}",
             )
         else:
             painter.setPen(QPen(QColor("#6c7a80")))
