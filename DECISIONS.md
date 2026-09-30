@@ -46,6 +46,45 @@ later.
   states the number. 3 m is a placeholder. Get a real figure from
   Bhargav before this ships past a demo.
 
+- **The section 6.4 slot offsets were replaced.** The spec's pseudocode
+  gives `vee = [(0,0), (-d,+s), (-d,-s)]`, `line = [(0,-s), (0,0), (0,+s)]`
+  and `column = [(0,0), (-d,0), (-2d,0)]`. Every one of those puts a slot at
+  `(0, 0)`, which is an aircraft hovering on the rover's own position, and
+  the rest at negative X, which is behind it. Flown literally, "line abreast
+  for a wide sweep" comes out as a trail strung out behind the vehicle,
+  which is what it did until this was fixed. The offsets in `formation.py`
+  are built from the *purpose* each pattern is given in the section 6.2
+  table instead: line is abreast and level for the widest swath, vee is a
+  leader on the track with wings swept back and out, column is single file
+  in depth. All of them scout ahead of the rover, at a standoff defaulting
+  to the near edge of the 30-50 m scout band in section 2. Treat this as a
+  deliberate departure from the pseudocode, not a transcription of it.
+
+- **Bearing is a compass heading, and was 90 degrees out.** The original
+  rotation used `x = dx*cos - dy*sin`, which makes bearing 0 point east,
+  while the map's bearing dial draws 0 as north. The formation therefore
+  never went where the operator pointed. Forward is now `(sin b, cos b)`
+  and right is `(cos b, -sin b)`, and `tests/test_formation.py` pins all
+  four cardinal bearings so this cannot drift back.
+
+- **Formations scale as a rigid shape at the tether.** Clamping each slot
+  to the tether ring independently flattens the formation against the ring
+  and turns a vee into an arc. The whole set of offsets is scaled by one
+  factor instead, so an oversized formation gets smaller rather than
+  deformed.
+
+- **Slot altitudes are deconflicted** by ALTITUDE_DECONFLICTION_M, centred
+  on the operator's rally altitude so their number stays the mean. Section
+  6.2 describes rally altitude as a single figure for all aircraft; three
+  aircraft sharing one layer is a collision as soon as one is pushed off
+  station, so this is a deliberate addition.
+
+- **A fifth launch parameter, standoff.** Section 6.2 lists four operator
+  inputs (bearing, pattern, spacing, rally altitude). Standoff, how far
+  ahead the formation scouts, was added because with the corrected geometry
+  it is the difference between a close screen and a far one, and the spec
+  gives a band for it (30-50 m, section 2) without giving a control.
+
 - **Formation `d` vs `s`.** The section 6.4 pseudocode uses two symbols in
   `slot_offsets` (forward stagger `d`, lateral offset `s`) but the operator
   only sets one "Spacing" parameter. `core/formation.py` sets `d = s =

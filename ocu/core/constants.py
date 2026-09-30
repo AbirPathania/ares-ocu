@@ -80,6 +80,18 @@ ROVER_STATIONARY_SPEED_MS = 0.15
 
 LAUNCH_STAGGER_S = 1.5  # aircraft lift off one at a time, ~1.5s apart, 6.3
 MIN_AIRCRAFT_SEPARATION_M = 3.0  # hard minimum, enforced in code not just UI, 6.2/10
+
+# How far ahead of the rover a guided formation sits by default. Section 2
+# puts the ARES-A scout radius at 30 to 50 m forward of the rover, so a
+# formation launched to scout belongs at the near edge of that band: far
+# enough to be looking at ground the rover has not reached, close enough to
+# leave tether margin for the formation's own depth.
+FORMATION_STANDOFF_M = 30.0
+
+# Vertical separation between formation slots. Three aircraft sharing one
+# altitude is a collision as soon as any of them is pushed off station.
+# Not a baseline figure; see DECISIONS.md.
+ALTITUDE_DECONFLICTION_M = 3.0
 # Not stated numerically in the spec; 3 m is a conservative placeholder pending
 # a real number from Bhargav. Flagged in DECISIONS.md, do not treat as sourced.
 

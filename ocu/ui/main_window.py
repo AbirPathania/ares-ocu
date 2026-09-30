@@ -235,6 +235,7 @@ class MainWindow(QMainWindow):
         console = self.context_panel.launch_console
         console.previewChanged.connect(self.map_view.set_formation_preview)
         console.previewCleared.connect(lambda: self.map_view.set_formation_preview(None))
+        console.bearingChanged.connect(self.map_view.set_bearing)
         console.aircraftPositionChanged.connect(self._on_guided_aircraft_position)
         console.aircraftUndocked.connect(self._on_aircraft_undocked)
         console.launchComplete.connect(self._on_launch_complete)

@@ -31,7 +31,10 @@ from PySide6.QtWidgets import (
 
 from ocu.core.constants import (
     ARES_A_CEILING_M,
+    ARES_A_SCOUT_RADIUS_M_HIGH,
+    ARES_A_SCOUT_RADIUS_M_LOW,
     FORMATION_PATTERNS,
+    FORMATION_STANDOFF_M,
     MIN_AIRCRAFT_SEPARATION_M,
     TETHER_LIMIT_M,
 )
@@ -60,6 +63,7 @@ def short_label(unit_id: str) -> str:
 class LaunchConsole(QWidget):
     previewChanged = Signal(list, tuple)  # targets [(x,y,z)...], origin (x,y)
     previewCleared = Signal()
+    bearingChanged = Signal(float)  # keeps the map's compass rose in step with the dial
     stageChanged = Signal(str)  # LaunchStage value
     aircraftPositionChanged = Signal(str, float, float, float, float)  # id, x, y, z, heading
     aircraftUndocked = Signal(list)  # tricopter_ids leaving the rover's bay
@@ -139,6 +143,18 @@ class LaunchConsole(QWidget):
         self.spacing_spin.valueChanged.connect(self._on_params_changed)
         form.addRow("Spacing", self.spacing_spin)
 
+        self.standoff_spin = QDoubleSpinBox()
+        self.standoff_spin.setRange(MIN_AIRCRAFT_SEPARATION_M, TETHER_LIMIT_M)
+        self.standoff_spin.setValue(FORMATION_STANDOFF_M)
+        self.standoff_spin.setSuffix(" m")
+        self.standoff_spin.setToolTip(
+            f"How far ahead of the rover the formation scouts. Section 2 puts the "
+            f"ARES-A scout radius at {ARES_A_SCOUT_RADIUS_M_LOW:.0f} to "
+            f"{ARES_A_SCOUT_RADIUS_M_HIGH:.0f} m forward."
+        )
+        self.standoff_spin.valueChanged.connect(self._on_params_changed)
+        form.addRow("Standoff", self.standoff_spin)
+
         self.rally_altitude_spin = QDoubleSpinBox()
         self.rally_altitude_spin.setRange(1.0, ARES_A_CEILING_M)
         self.rally_altitude_spin.setValue(DEFAULT_RALLY_ALTITUDE_M)
@@ -192,6 +208,7 @@ class LaunchConsole(QWidget):
             self.stage_label.setText(LaunchStage.ARMED.value)
             self.stageChanged.emit(LaunchStage.ARMED.value)
 
+        self.bearingChanged.emit(self.bearing_spin.value())
         if tricopter_ids:
             self._emit_preview()
         else:
@@ -252,10 +269,12 @@ class LaunchConsole(QWidget):
             self.current_pattern(),
             self.spacing_spin.value(),
             self.rally_altitude_spin.value(),
+            standoff_m=self.standoff_spin.value(),
         )
         return targets[: max(len(self.selected_ids()), 1)]
 
     def _on_params_changed(self, *_args) -> None:
+        self.bearingChanged.emit(self.bearing_spin.value())
         self._emit_preview()
         self._update_button_states()
 
@@ -265,7 +284,8 @@ class LaunchConsole(QWidget):
         if not self.selected_ids():
             self.previewCleared.emit()
             return
-        targets = self._current_targets()
+        selected = self.selected_ids()
+        targets = self._current_targets()[: len(selected)]
         self.previewChanged.emit(
             [(t.x, t.y, t.z) for t in targets], (self._origin[0], self._origin[1])
         )

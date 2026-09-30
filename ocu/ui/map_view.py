@@ -453,18 +453,64 @@ class MapView(QWidget):
             )
 
     def _draw_formation_preview(self, painter: QPainter) -> None:
+        """Show the formation before it is committed, section 6.2.
+
+        The operator is choosing a shape, so the preview draws the shape:
+        the bearing axis they are pointing down, the slots joined in order,
+        which aircraft takes which slot, and each slot's altitude. Three
+        loose circles would not tell them a vee from a line.
+        """
         if not self._formation_preview or not self._formation_origin:
             return
-        pen = QPen(QColor("#f4f7f6"))
-        pen.setStyle(Qt.DashLine)
-        pen.setWidth(1)
-        painter.setPen(pen)
+
         origin = self._to_screen(*self._formation_origin)
-        for tx, ty, _tz in self._formation_preview:
-            target = self._to_screen(tx, ty)
-            painter.drawLine(origin, target)
-            painter.setBrush(QBrush(QColor(255, 255, 255, 90)))
-            painter.drawEllipse(target, 7.0, 7.0)
+        points = [self._to_screen(tx, ty) for tx, ty, _ in self._formation_preview]
+
+        # Bearing axis: the direction the whole formation faces.
+        bearing_rad = math.radians(self._bearing_deg)
+        axis_end = origin + QPointF(
+            220 * math.sin(bearing_rad), -220 * math.cos(bearing_rad)
+        )
+        axis_pen = QPen(QColor(94, 201, 194, 70))
+        axis_pen.setStyle(Qt.DashLine)
+        axis_pen.setWidth(1)
+        painter.setPen(axis_pen)
+        painter.drawLine(origin, axis_end)
+
+        # The formation's own outline, slot to slot in order.
+        shape_pen = QPen(QColor(244, 247, 246, 130))
+        shape_pen.setWidth(1)
+        painter.setPen(shape_pen)
+        painter.setBrush(Qt.NoBrush)
+        for a, b in zip(points, points[1:]):
+            painter.drawLine(a, b)
+
+        # Tie each slot back to the rover so the standoff is legible.
+        tie_pen = QPen(QColor(255, 255, 255, 45))
+        tie_pen.setStyle(Qt.DotLine)
+        painter.setPen(tie_pen)
+        for point in points:
+            painter.drawLine(origin, point)
+
+        for i, point in enumerate(points):
+            altitude = self._formation_preview[i][2]
+            painter.setPen(QPen(QColor("#f4f7f6"), 1))
+            painter.setBrush(QBrush(QColor(94, 201, 194, 70)))
+            painter.drawEllipse(point, 9.0, 9.0)
+
+            painter.setFont(QFont("Menlo", 8, QFont.Bold))
+            painter.setPen(QPen(QColor("#0e1215")))
+            painter.drawText(
+                QRectF(point.x() - 9, point.y() - 8, 18, 16), Qt.AlignCenter, str(i + 1)
+            )
+
+            painter.setPen(QPen(QColor("#cfe0dd")))
+            painter.setFont(QFont("Menlo", 8))
+            painter.drawText(
+                QRectF(point.x() - 40, point.y() + 11, 80, 13),
+                Qt.AlignHCenter,
+                f"TRI-{i + 1}  {altitude:.0f}m",
+            )
 
     def _draw_units(self, painter: QPainter) -> None:
         for unit_id, pose in self._units.items():
