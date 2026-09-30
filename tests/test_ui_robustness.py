@@ -97,3 +97,59 @@ def test_reset_midflight_restores_a_clean_bay(app):
     assert all(window._docked_state.values())
     assert window.flight_director.aircraft == {}
     assert all(owner == "scripted" for owner in window._position_owner.values())
+
+
+def _select_mode(window, mode):
+    index = window.mode_combo.findData(mode)
+    assert index >= 0
+    window.mode_combo.setCurrentIndex(index)
+
+
+def test_ghost_mode_silences_the_feeds_and_the_sticks(app):
+    window = MainWindow()
+    _select_mode(window, "GHOST")
+    pump(app)
+    assert all(feed._emcon for feed in window.camera_feeds.values())
+    assert all(unit.mission_mode == "GHOST" for unit in window.units.values())
+    assert not window.context_panel.rover_panel.manual_btn.isEnabled()
+    assert not window.context_panel.rover_panel.rtb_btn.isEnabled()
+
+
+def test_autonomous_mode_blocks_intervention_but_keeps_the_feeds(app):
+    window = MainWindow()
+    _select_mode(window, "AUTONOMOUS")
+    pump(app)
+    assert not any(feed._emcon for feed in window.camera_feeds.values())
+    assert not window.context_panel.rover_panel.manual_btn.isEnabled()
+
+
+def test_switching_to_ghost_drops_an_existing_manual_hold(app):
+    window = MainWindow()
+    window._on_take_manual("rover")
+    assert window.control_authority.manual_holder == "rover"
+    _select_mode(window, "GHOST")
+    pump(app)
+    assert window.control_authority.manual_holder is None
+
+
+def test_returning_to_standard_restores_control(app):
+    window = MainWindow()
+    _select_mode(window, "GHOST")
+    _select_mode(window, "STANDARD")
+    pump(app)
+    assert not any(feed._emcon for feed in window.camera_feeds.values())
+    assert window.context_panel.rover_panel.manual_btn.isEnabled()
+
+
+def test_manual_lock_chip_only_appears_when_held(app):
+    window = MainWindow()
+    assert not window.manual_chip.isVisibleTo(window)
+    window._on_take_manual("tricopter-1")
+    window._refresh_all_rows()
+    # tricopter-1 is docked, so manual is refused and the chip stays hidden
+    window._on_take_manual("rover")
+    window._refresh_all_rows()
+    assert window.manual_chip.isVisibleTo(window)
+    window._on_release_manual()
+    window._refresh_all_rows()
+    assert not window.manual_chip.isVisibleTo(window)

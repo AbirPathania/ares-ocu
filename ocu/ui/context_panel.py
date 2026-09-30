@@ -366,6 +366,23 @@ class ContextPanel(QStackedWidget):
         self.rover_panel.set_manual(is_holder)
         self.aircraft_panel.set_manual(is_holder)
 
+    def set_manual_available(self, available: bool, mode: str) -> None:
+        """Ghost and Autonomous take the sticks away, section 4.1. The button
+        says why rather than simply refusing to work."""
+        reason = {
+            "AUTONOMOUS": "Unavailable in AUTONOMOUS: mission is pre-loaded, no real-time intervention",
+            "GHOST": "Unavailable in GHOST: emissions silent, no command uplink",
+        }.get(mode, "")
+        for panel in (self.rover_panel, self.aircraft_panel):
+            panel.manual_btn.setEnabled(available)
+            panel.manual_btn.setToolTip(reason)
+            if not available:
+                panel.manual_hint.setVisible(False)
+        self.rover_panel.rtb_btn.setEnabled(available)
+        self.rover_panel.rtb_btn.setToolTip(reason)
+        self.aircraft_panel.recall_btn.setEnabled(available)
+        self.aircraft_panel.recall_btn.setToolTip(reason)
+
     def show_rover(self) -> None:
         self.setCurrentWidget(self.rover_panel)
 

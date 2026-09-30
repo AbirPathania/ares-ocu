@@ -22,6 +22,19 @@ QLabel#missionClock {
     color: #5ec9c2;
 }
 
+QLabel#phaseLabel {
+    font-size: 12px;
+    font-weight: bold;
+    color: #5ec9c2;
+    padding-left: 6px;
+}
+
+QComboBox#modeCombo {
+    font-size: 10px;
+    font-weight: bold;
+    max-width: 210px;
+}
+
 QLabel#statusChip {
     font-size: 10px;
     font-weight: bold;

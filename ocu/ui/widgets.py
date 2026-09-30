@@ -5,8 +5,8 @@ behavior from section 10, so it lives in one place rather than three.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Signal
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import QComboBox, QListView, QPushButton
 
 from ocu.core.constants import IRREVERSIBLE_COMMAND_HOLD_S
 
@@ -55,3 +55,28 @@ class HoldToConfirmButton(QPushButton):
             self._timer.stop()
             self.setText(self._label)
             self.confirmed.emit()
+
+
+def make_styled_combo(entries: list[tuple[str, str]]) -> QComboBox:
+    """A combo whose popup obeys the stylesheet and fits its longest entry.
+
+    A combo's popup is a separate top-level widget: it inherits none of the
+    styling applied to the closed control, and its width follows the closed
+    combo rather than its own contents, so the longest option elides. Both
+    have to be handled explicitly, in one place rather than per call site.
+
+    entries are (label, value) pairs; the value is stored as item data so the
+    displayed text never has to double as the data.
+    """
+    combo = QComboBox()
+    combo.setView(QListView())
+    combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+    for label, value in entries:
+        combo.addItem(label, value)
+
+    view = combo.view()
+    metrics = view.fontMetrics()
+    widest = max((metrics.horizontalAdvance(label) for label, _ in entries), default=0)
+    view.setTextElideMode(Qt.ElideNone)
+    view.setMinimumWidth(widest + 72)
+    return combo

@@ -42,7 +42,7 @@ from ocu.ui.event_log import EventLog
 from ocu.ui.fleet_roster import FleetRoster
 from ocu.ui.launch_console import short_label
 from ocu.ui.map_view import MapView
-from ocu.ui.phase_rail import PhaseRail
+from ocu.ui.widgets import make_styled_combo
 from ocu.ui.threat_panel import ThreatPanel
 
 TRICOPTER_IDS = ["tricopter-1", "tricopter-2", "tricopter-3"]
@@ -189,21 +189,42 @@ class MainWindow(QMainWindow):
         self.clock_label.setObjectName("missionClock")
         layout.addWidget(self.clock_label)
 
-        self.phase_rail = PhaseRail()
-        layout.addWidget(self.phase_rail)
+        self.phase_label = QLabel("STANDBY")
+        self.phase_label.setObjectName("phaseLabel")
+        layout.addWidget(self.phase_label)
 
         layout.addStretch(1)
 
-        self.mode_chip = QLabel()
+        # Mission mode is real doctrine (section 4.1) with real consequences,
+        # so it is a control rather than a caption. LCA is not offered here:
+        # it is entered automatically on total loss of contact, never chosen.
+        self.mode_combo = make_styled_combo(
+            [
+                ("STANDARD · full RF, live video", "STANDARD"),
+                ("AUTONOMOUS · status pings only", "AUTONOMOUS"),
+                ("GHOST · zero emissions", "GHOST"),
+            ]
+        )
+        self.mode_combo.setObjectName("modeCombo")
+        self.mode_combo.setToolTip(
+            "Mission mode, section 4.1.\n"
+            "STANDARD: full RF, live video and telemetry, real-time override.\n"
+            "AUTONOMOUS: minimal RF, periodic status only, no real-time intervention.\n"
+            "GHOST: zero intentional emissions, no downlink, UWB only.\n"
+            "LCA is entered automatically if the rover loses contact entirely."
+        )
+        self.mode_combo.currentIndexChanged.connect(self._on_mission_mode_changed)
+        layout.addWidget(self.mode_combo)
+
         self.link_chip = QLabel()
         self.battery_chip = QLabel()
         self.manual_chip = QLabel()
-        for chip in (self.mode_chip, self.link_chip, self.battery_chip, self.manual_chip):
+        for chip in (self.link_chip, self.battery_chip, self.manual_chip):
             chip.setObjectName("statusChip")
             layout.addWidget(chip)
-        self.mode_chip.setText(_chip("MODE", "STANDARD", "#cfe0dd"))
+        self.manual_chip.setVisible(False)  # only shown when somebody holds the sticks
 
-        self.play_btn = QPushButton("▶ PLAY")
+        self.play_btn = QPushButton("▶ DEPLOY")
         self.play_btn.setObjectName("playButton")
         self.play_btn.clicked.connect(self._on_play_clicked)
         layout.addWidget(self.play_btn)
@@ -309,6 +330,44 @@ class MainWindow(QMainWindow):
         self._refresh_all_rows()
 
     # --- MANUAL handoff, section 4.2 ---
+
+    # --- mission mode, section 4.1 ---
+
+    def _on_mission_mode_changed(self) -> None:
+        """Apply the selected mission mode to the fleet.
+
+        These modes are doctrine with consequences, not a caption. Ghost
+        means zero intentional emissions, so there is no video downlink to
+        show; Autonomous means the mission is pre-loaded and the operator
+        monitors without intervening. Both therefore take the sticks away,
+        because offering a control that cannot reach the vehicle is worse
+        than not offering it at all.
+        """
+        mode = self.mode_combo.currentData() or "STANDARD"
+        emissions_silent = mode == "GHOST"
+        can_intervene = mode == "STANDARD"
+
+        for unit in self.units.values():
+            unit.mission_mode = mode
+        for feed in self.camera_feeds.values():
+            feed.set_emcon(emissions_silent)
+
+        if not can_intervene and self.control_authority.manual_holder is not None:
+            self._on_release_manual()
+        self.context_panel.set_manual_available(can_intervene, mode)
+
+        self.event_log.log(
+            self.playback.clock_s,
+            {
+                "STANDARD": "Mission mode STANDARD: full RF, live video and telemetry",
+                "AUTONOMOUS": (
+                    "Mission mode AUTONOMOUS: minimal RF, status pings only, "
+                    "no real-time intervention"
+                ),
+                "GHOST": "Mission mode GHOST: emissions silent, no downlink, UWB only",
+            }[mode],
+        )
+        self._refresh_all_rows()
 
     def _on_take_manual(self, unit_id: str) -> None:
         previous = self.control_authority.manual_holder
@@ -618,7 +677,7 @@ class MainWindow(QMainWindow):
             self.context_panel.rover_panel.update_pose(rover.pose.x, rover.pose.y, rover.pose.heading, dt)
 
     def _on_phase_changed(self, phase: str, t: float) -> None:
-        self.phase_rail.set_phase(phase)
+        self.phase_label.setText(phase.replace('_', ' ').upper())
         self.context_panel.rover_panel.sensors.set_scanning(phase in SCANNING_PHASES)
         self.event_log.log(t, f"Phase: {phase.replace('_', ' ')}")
         for unit in self.units.values():
@@ -654,24 +713,24 @@ class MainWindow(QMainWindow):
         self.event_log.log(
             self.playback.clock_s, "Mission complete: waypoints exhausted, rover returned to start point"
         )
-        self.play_btn.setText("▶ PLAY")
+        self.play_btn.setText("▶ DEPLOY")
 
     # --- transport ---
 
     def _on_play_clicked(self) -> None:
         if self.playback.playing:
             self.playback.pause()
-            self.play_btn.setText("▶ PLAY")
+            self.play_btn.setText("▶ DEPLOY")
         else:
             self.playback.play()
-            self.play_btn.setText("⏸ PAUSE")
+            self.play_btn.setText("⏸ HOLD")
 
     def _on_reset_clicked(self) -> None:
         self.playback.reset()
         self.map_view.clear()
         self.event_log.clear()
         self.threat_panel.clear()
-        self.phase_rail.reset()
+        self.phase_label.setText("STANDBY")
         self.mesh_link = MeshLink()
         self.units = _default_units()
         self.control_authority = ControlAuthority(self.units)
@@ -684,7 +743,7 @@ class MainWindow(QMainWindow):
         for unit_id in TRICOPTER_IDS:
             self._set_docked(unit_id, True)
         self._last_clock_s = 0.0
-        self.play_btn.setText("▶ PLAY")
+        self.play_btn.setText("▶ DEPLOY")
         self.clock_label.setText("00:00")
         self.playback.apply_initial_state()
         self._select_unit(self.selected_unit_id)
@@ -735,7 +794,9 @@ class MainWindow(QMainWindow):
         link_color = {"CONNECTED": "#5ec9c2", "DEGRADED": "#e8b23c", "LOST": "#e05c4b"}[worst.link_state]
         self.link_chip.setText(_chip("LINK", worst.link_state, link_color))
 
+        # The lock only appears when somebody actually holds the sticks; an
+        # always-present padlock reading "—" is a symbol with nothing to say.
         holder = self.control_authority.manual_holder
-        self.manual_chip.setText(
-            _chip("\U0001F512", holder or "—", "#f4d78a" if holder else "#6c7a80")
-        )
+        self.manual_chip.setVisible(holder is not None)
+        if holder is not None:
+            self.manual_chip.setText(_chip("\U0001F512 MANUAL", short_label(holder), "#f4d78a"))

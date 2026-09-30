@@ -36,6 +36,7 @@ class SimulatedCameraFeed(QWidget):
         self._rng = random.Random(hash(unit_id) & 0xFFFF)
         self._noise_offset = 0.0
         self._active = False
+        self._emcon = False
 
         self.setMinimumHeight(104)
         self.setMaximumHeight(124)
@@ -47,6 +48,13 @@ class SimulatedCameraFeed(QWidget):
 
     def set_active(self, active: bool) -> None:
         self._active = active
+        self.update()
+
+    def set_emcon(self, emcon: bool) -> None:
+        """Ghost Mode, section 4.1: zero intentional emissions, so there is no
+        video downlink to show. The panel says why it is dark rather than
+        going blank as though the feed had failed."""
+        self._emcon = emcon
         self.update()
 
     def set_link_state(self, state: str) -> None:
@@ -65,6 +73,18 @@ class SimulatedCameraFeed(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect())
+
+        if self._emcon:
+            painter.fillRect(rect, QColor("#0b0e11"))
+            painter.setPen(QPen(QColor("#5c4a2a")))
+            painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+            painter.setPen(QPen(QColor("#7c6a3a")))
+            painter.setFont(QFont("Menlo", 7, QFont.Bold))
+            painter.drawText(QRectF(2, 2, rect.width() - 4, 12), Qt.AlignLeft, self._label)
+            painter.setPen(QPen(QColor("#e8b23c")))
+            painter.drawText(rect, Qt.AlignCenter, "EMCON \u00b7 NO DOWNLINK")
+            painter.end()
+            return
 
         if not self._active:
             painter.fillRect(rect, QColor("#0b0e11"))
