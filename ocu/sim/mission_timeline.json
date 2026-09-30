@@ -1,0 +1,73 @@
+{
+  "_comment": "The eight-phase scripted mission, section 5 and 12.3. Roughly 90 seconds of playback, one pass through deploy -> recharge_and_return. Mission theme stays a generic hazard sweep per section 3; nothing here says minefield. The phase_markers, the t=30 tricopter-1 keyframe, and the t=50/58 link_events are the literal example values given in section 12.3 of the build spec; everything else extends that example to a complete run.",
+
+  "phase_markers": [
+    { "t": 0,  "phase": "deploy" },
+    { "t": 8,  "phase": "drive_and_scan" },
+    { "t": 30, "phase": "reactive_launch", "bearing": 47, "count": 2 },
+    { "t": 34, "phase": "aerial_recon" },
+    { "t": 48, "phase": "fusion" },
+    { "t": 55, "phase": "alert", "confidence": 0.91, "type": "TBD" },
+    { "t": 62, "phase": "mark_and_route" },
+    { "t": 78, "phase": "recharge_and_return" }
+  ],
+
+  "units": {
+    "rover": [
+      { "t": 0,  "x": 0,  "y": 0, "z": 0, "heading": 0 },
+      { "t": 8,  "x": 5,  "y": 0, "z": 0, "heading": 0 },
+      { "t": 30, "x": 12, "y": 0, "z": 0, "heading": 0 },
+      { "t": 34, "x": 14, "y": 0, "z": 0, "heading": 0 },
+      { "t": 48, "x": 16, "y": 0, "z": 0, "heading": 5 },
+      { "t": 55, "x": 17, "y": 0, "z": 0, "heading": 5 },
+      { "t": 62, "x": 18, "y": 3, "z": 0, "heading": 40 },
+      { "t": 78, "x": 22, "y": 5, "z": 0, "heading": 40 },
+      { "t": 90, "x": 24, "y": 6, "z": 0, "heading": 40 }
+    ],
+    "tricopter-1": [
+      { "t": 0,  "x": 0,  "y": 0, "z": 0 },
+      { "t": 30, "x": 12, "y": 4, "z": 20 },
+      { "t": 48, "x": 14, "y": 6, "z": 18 },
+      { "t": 55, "x": 14, "y": 6, "z": 18 },
+      { "t": 62, "x": 13, "y": 7, "z": 18 },
+      { "t": 78, "x": 8,  "y": 3, "z": 10 },
+      { "t": 90, "x": 2,  "y": 1, "z": 1 }
+    ],
+    "tricopter-2": [
+      { "t": 0,  "x": 0,  "y": 0, "z": 0 },
+      { "t": 30, "x": 12, "y": -4, "z": 20 },
+      { "t": 48, "x": 15, "y": -3, "z": 19 },
+      { "t": 55, "x": 15, "y": -3, "z": 19 },
+      { "t": 62, "x": 14, "y": -2, "z": 19 },
+      { "t": 78, "x": 7,  "y": -2, "z": 9 },
+      { "t": 90, "x": 1,  "y": -1, "z": 1 }
+    ],
+    "tricopter-3": [
+      { "t": 0,  "x": 0,  "y": 0, "z": 0 },
+      { "t": 30, "x": 12, "y": 0, "z": 0 },
+      { "t": 62, "x": 18, "y": 3, "z": 0 },
+      { "t": 90, "x": 24, "y": 6, "z": 0 }
+    ]
+  },
+
+  "battery_pct": {
+    "rover":   [{ "t": 0, "pct": 96 }, { "t": 90, "pct": 78 }],
+    "tricopter-1": [{ "t": 30, "pct": 100 }, { "t": 78, "pct": 34 }, { "t": 90, "pct": 46 }],
+    "tricopter-2": [{ "t": 30, "pct": 100 }, { "t": 78, "pct": 31 }, { "t": 90, "pct": 44 }],
+    "tricopter-3": [{ "t": 0, "pct": 100 }, { "t": 90, "pct": 100 }]
+  },
+
+  "detections": [
+    { "t": 40, "sensor": "gpr",                  "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.62, "type": "unknown" },
+    { "t": 44, "sensor": "pulse_induction",       "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.71, "type": "unknown" },
+    { "t": 50, "sensor": "magnetic_gradiometer",  "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.79, "type": "unknown" },
+    { "t": 52, "sensor": "thermal",               "source": "aircraft", "source_id": "tricopter-1", "x": 14, "y": 6, "confidence": 0.68, "type": "unknown",
+      "_comment": "aircraft-side hit on the same voxel while the link is cut (t=50-58), so Cut Link produces a real, visible divergence to reconcile on Restore Link, section 8.5" },
+    { "t": 55, "sensor": "fused",                 "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.91, "type": "TBD" }
+  ],
+
+  "link_events": [
+    { "t": 50, "event": "cut",     "units": ["tricopter-1", "tricopter-2"] },
+    { "t": 58, "event": "restore", "units": ["tricopter-1", "tricopter-2"] }
+  ]
+}

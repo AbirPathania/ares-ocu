@@ -1,0 +1,197 @@
+/* Dark tactical theme, section 15 stage 7. Flat, dense, legible at a glance. */
+
+* {
+    color: #d8e0de;
+    font-family: "Menlo", "SF Mono", monospace;
+    font-size: 12px;
+}
+
+QMainWindow, QWidget {
+    background-color: #0e1215;
+}
+
+QWidget#topBar {
+    background-color: #0a0d10;
+    border-bottom: 1px solid #263038;
+    min-height: 38px;
+}
+
+QLabel#missionClock {
+    font-size: 18px;
+    font-weight: bold;
+    color: #5ec9c2;
+}
+
+QLabel#statusChip {
+    font-size: 10px;
+    font-weight: bold;
+    background-color: #12181c;
+    border: 1px solid #1c252b;
+    border-radius: 3px;
+    padding: 4px 8px;
+}
+
+QLabel#panelTitle {
+    font-size: 12px;
+    font-weight: bold;
+    color: #ffffff;
+    padding-bottom: 2px;
+}
+
+QLabel#sectionLabel {
+    font-size: 9px;
+    font-weight: bold;
+    color: #6c7a80;
+    padding: 5px 2px 3px 2px;
+    border-top: 1px solid #1c252b;
+}
+
+QLabel#mutedNote {
+    color: #6c7a80;
+    font-size: 9px;
+}
+
+QLabel#recordingIndicator {
+    color: #ff5540;
+    font-weight: bold;
+    font-size: 10px;
+}
+
+QPushButton {
+    background-color: #182228;
+    border: 1px solid #2f3d44;
+    border-radius: 3px;
+    padding: 7px 14px;
+    font-size: 10px;
+    font-weight: bold;
+    color: #cfe0dd;
+}
+
+QPushButton:hover {
+    background-color: #1f2c33;
+    border-color: #3d4f57;
+}
+
+QPushButton:pressed {
+    background-color: #23343c;
+}
+
+QPushButton:disabled {
+    color: #43494d;
+    background-color: #12161a;
+    border-color: #1c252b;
+}
+
+QPushButton#playButton {
+    background-color: #163331;
+    border-color: #2c5f57;
+    color: #7fe0d1;
+    min-width: 76px;
+}
+
+QPushButton#playButton:hover {
+    background-color: #1c4441;
+}
+
+QPushButton#launchAircraftButton {
+    background-color: #163331;
+    border-color: #2c5f57;
+    color: #7fe0d1;
+}
+
+QPushButton#launchAircraftButton:hover {
+    background-color: #1c4441;
+}
+
+QPushButton#cutLinkButton {
+    background-color: #3a1f1f;
+    border-color: #5c3232;
+    color: #ffb3a3;
+}
+
+QPushButton#cutLinkButton:hover {
+    background-color: #4a2626;
+}
+
+QWidget#alertBanner {
+    background-color: #1c1113;
+    border: 1px solid #e05c4b;
+    border-radius: 3px;
+}
+
+QLabel#alertTitle {
+    color: #ff8a75;
+    font-weight: bold;
+    font-size: 11px;
+}
+
+QLabel#alertMessage {
+    color: #f0d9d4;
+    font-size: 11px;
+}
+
+QLabel#alertCountdown {
+    color: #ff8a75;
+    font-size: 20px;
+    font-weight: bold;
+}
+
+QPushButton#confirmButton {
+    background-color: #4a1f1a;
+    border-color: #e05c4b;
+    color: #ffd7cf;
+}
+
+QPushButton#confirmButton:hover {
+    background-color: #5c2620;
+}
+
+QListWidget#eventLogList {
+    background-color: #080b0d;
+    border: 1px solid #1c252b;
+    font-size: 10px;
+    color: #9fb0ac;
+}
+
+QDoubleSpinBox, QComboBox {
+    background-color: #0d1114;
+    border: 1px solid #2f3d44;
+    border-radius: 3px;
+    padding: 5px;
+    color: #cfe0dd;
+    font-size: 11px;
+}
+
+QDoubleSpinBox:focus, QComboBox:focus {
+    border-color: #5ec9c2;
+}
+
+QLabel#stageLabel {
+    font-weight: bold;
+    font-size: 13px;
+    color: #e8b23c;
+}
+
+QSplitter::handle {
+    background-color: #1c252b;
+}
+
+QScrollArea {
+    background-color: transparent;
+    border: none;
+}
+
+QScrollBar:vertical {
+    background: #0e1215;
+    width: 8px;
+}
+
+QScrollBar::handle:vertical {
+    background: #263038;
+    border-radius: 4px;
+    min-height: 20px;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}

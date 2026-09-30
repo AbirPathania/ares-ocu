@@ -1,0 +1,240 @@
+"""Threat list, the operator's actual work product.
+
+Detections are keyed by voxel, not by event, so four sensor hits on the
+same hole in the ground are one threat with four contributing sensors and
+a rising confidence, not four rows to reconcile by eye. That is the same
+merge the shared map performs in core/mesh_state.py (section 8.2), shown
+where the operator can act on it.
+
+Each card carries the classification, the best fused confidence, which
+sensors contributed, the map coordinate, and a status the operator can
+change: PENDING until confirmed or rejected, per the section 8.3
+human-in-the-loop rule.
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
+
+from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD
+from ocu.core.mesh_state import voxel_key
+from ocu.ui.icons import draw_threat_glyph
+
+CARD_HEIGHT = 64
+
+STATUS_COLORS = {
+    "PENDING": QColor("#e8b23c"),
+    "CONFIRMED": QColor("#e05c4b"),
+    "CLEARED": QColor("#5a6469"),
+}
+
+SENSOR_ABBR = {
+    "gpr": "GPR",
+    "pulse_induction": "PI",
+    "magnetic_gradiometer": "MAG",
+    "saw_voc": "VOC",
+    "thermal": "THRM",
+    "optical": "OPT",
+    "fused": "FUSE",
+}
+
+
+def confidence_color(confidence: float) -> QColor:
+    if confidence >= ALERT_CONFIDENCE_THRESHOLD:
+        return QColor("#e05c4b")
+    if confidence >= 0.60:
+        return QColor("#e8b23c")
+    return QColor("#5ec9c2")
+
+
+class ThreatCard(QWidget):
+    clicked = Signal(object)  # the threat dict
+
+    def __init__(self, threat: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.threat = threat
+        self.setFixedHeight(CARD_HEIGHT)
+        self.setCursor(Qt.PointingHandCursor)
+        self._selected = False
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        self.clicked.emit(self.threat)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0, 0, -1, -1)
+
+        status = self.threat.get("status", "PENDING")
+        status_color = STATUS_COLORS.get(status, QColor("#5a6469"))
+        confidence = self.threat.get("confidence", 0.0)
+
+        painter.fillRect(rect, QColor("#15191d") if not self._selected else QColor("#1d262b"))
+        painter.setPen(QPen(QColor("#222c33")))
+        painter.drawRect(rect)
+        painter.fillRect(QRectF(rect.left(), rect.top(), 3, rect.height()), status_color)
+
+        glyph_center = QPointF(rect.left() + 26, rect.top() + 24)
+        painter.setPen(QPen(status_color, 1.6))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(glyph_center, 13, 13)
+        draw_threat_glyph(painter, glyph_center, 13, self.threat.get("type", "unknown"))
+
+        painter.setPen(QPen(QColor("#e6ecea")))
+        painter.setFont(QFont("Menlo", 11, QFont.Bold))
+        painter.drawText(
+            QRectF(rect.left() + 46, rect.top() + 6, rect.width() - 110, 16),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            str(self.threat.get("type", "unknown")).upper(),
+        )
+
+        painter.setPen(QPen(status_color))
+        painter.setFont(QFont("Menlo", 8, QFont.Bold))
+        painter.drawText(
+            QRectF(rect.right() - 92, rect.top() + 6, 86, 16), Qt.AlignRight | Qt.AlignVCenter, status
+        )
+
+        bar_rect = QRectF(rect.left() + 46, rect.top() + 26, rect.width() - 140, 5)
+        painter.setPen(Qt.NoPen)
+        painter.fillRect(bar_rect, QColor("#222c33"))
+        fill = QRectF(bar_rect)
+        fill.setWidth(bar_rect.width() * min(max(confidence, 0.0), 1.0))
+        painter.fillRect(fill, confidence_color(confidence))
+
+        threshold_x = bar_rect.left() + bar_rect.width() * ALERT_CONFIDENCE_THRESHOLD
+        painter.setPen(QPen(QColor("#8c9a9f"), 1, Qt.DotLine))
+        painter.drawLine(QPointF(threshold_x, bar_rect.top() - 2), QPointF(threshold_x, bar_rect.bottom() + 2))
+
+        painter.setPen(QPen(QColor("#e6ecea")))
+        painter.setFont(QFont("Menlo", 9, QFont.Bold))
+        painter.drawText(
+            QRectF(rect.right() - 92, rect.top() + 22, 86, 14),
+            Qt.AlignRight | Qt.AlignVCenter,
+            f"{confidence:.2f}",
+        )
+
+        sensors = " ".join(SENSOR_ABBR.get(s, s.upper()[:4]) for s in self.threat.get("sensors", []))
+        painter.setPen(QPen(QColor("#7c8891")))
+        painter.setFont(QFont("Menlo", 8))
+        painter.drawText(
+            QRectF(rect.left() + 46, rect.top() + 40, rect.width() - 56, 14),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            f"{sensors}   ({self.threat['x']:.0f}, {self.threat['y']:.0f}) m",
+        )
+        painter.end()
+
+
+class ThreatPanel(QWidget):
+    threatSelected = Signal(object)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._threats: dict[tuple, dict] = {}
+        self._cards: dict[tuple, ThreatCard] = {}
+        self._selected_key: tuple | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.header = QLabel("THREATS  0")
+        self.header.setObjectName("sectionLabel")
+        layout.addWidget(self.header)
+
+        self.empty_label = QLabel("No detections yet.")
+        self.empty_label.setObjectName("mutedNote")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.empty_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        self._container = QWidget()
+        self._list_layout = QVBoxLayout(self._container)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(3)
+        self._list_layout.addStretch(1)
+        scroll.setWidget(self._container)
+        layout.addWidget(scroll, stretch=1)
+        self._refresh_header()
+
+    def add_detection(self, detection: dict) -> dict:
+        """Fold one detection into the threat at its voxel, creating it if new."""
+        key = voxel_key(detection["x"], detection["y"], 0.0)
+        threat = self._threats.get(key)
+
+        if threat is None:
+            threat = {
+                "key": key,
+                "x": detection["x"],
+                "y": detection["y"],
+                "type": detection.get("type", "unknown"),
+                "confidence": detection.get("confidence", 0.0),
+                "sensors": [],
+                "status": "PENDING",
+            }
+            self._threats[key] = threat
+            card = ThreatCard(threat)
+            card.clicked.connect(self._on_card_clicked)
+            self._cards[key] = card
+            self._list_layout.insertWidget(self._list_layout.count() - 1, card)
+
+        sensor = detection.get("sensor")
+        if sensor and sensor not in threat["sensors"]:
+            threat["sensors"].append(sensor)
+
+        # Highest confidence wins, matching the merge rule in core/mesh_state.py.
+        if detection.get("confidence", 0.0) > threat["confidence"]:
+            threat["confidence"] = detection["confidence"]
+            threat["type"] = detection.get("type", threat["type"])
+
+        self._cards[key].threat = threat
+        self._cards[key].update()
+        self._refresh_header()
+        return threat
+
+    def set_status(self, x: float, y: float, status: str) -> None:
+        key = voxel_key(x, y, 0.0)
+        threat = self._threats.get(key)
+        if threat is None:
+            return
+        threat["status"] = status
+        self._cards[key].update()
+        self._refresh_header()
+
+    def clear(self) -> None:
+        for card in self._cards.values():
+            self._list_layout.removeWidget(card)
+            card.deleteLater()
+        self._threats.clear()
+        self._cards.clear()
+        self._selected_key = None
+        self._refresh_header()
+
+    def _on_card_clicked(self, threat: dict) -> None:
+        self._selected_key = threat["key"]
+        for key, card in self._cards.items():
+            card.set_selected(key == self._selected_key)
+        self.threatSelected.emit(threat)
+
+    def _refresh_header(self) -> None:
+        pending = sum(1 for t in self._threats.values() if t["status"] == "PENDING")
+        confirmed = sum(1 for t in self._threats.values() if t["status"] == "CONFIRMED")
+        parts = [f"THREATS  {len(self._threats)}"]
+        if pending:
+            parts.append(f"{pending} PENDING")
+        if confirmed:
+            parts.append(f"{confirmed} CONFIRMED")
+        self.header.setText("   ".join(parts))
+        self.empty_label.setVisible(not self._threats)
+
+        # Only claim the height the list actually needs, so an empty threat
+        # list does not hold open a blank third of the right column.
+        count = len(self._threats)
+        self.setMaximumHeight(56 if count == 0 else min(count * (CARD_HEIGHT + 3) + 34, 430))

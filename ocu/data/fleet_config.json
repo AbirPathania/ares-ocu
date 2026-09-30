@@ -1,0 +1,57 @@
+{
+  "_comment": "Static per-unit specs, section 2 of the build spec. These describe the platform, not any single mission; the scripted mission lives in sim/mission_timeline.json.",
+
+  "rover": {
+    "id": "rover",
+    "kind": "rover",
+    "mass_kg_min": 25,
+    "top_speed_kmh": 15,
+    "endurance_mixed_duty_h": 4.0,
+    "endurance_continuous_worst_case_h": 3.0,
+    "battery_usable_wh": 430,
+    "mission_avg_power_w": 143,
+    "wheel_layout": "six wheel rocker bogie, four station steering",
+    "steering_note": "two rear wheels steer individually, two front bogies steer as a rigid unit",
+    "compute_load_w": 20,
+    "compute_note": "Orin NX + STM32H7 pair, from the L0.3 power budget",
+    "radio": "AES-256 frequency hopping, Silvus StreamCaster in production or Doodle Labs Helix for the prototype",
+    "uwb_radio": "Qorvo DWM3001C, ~50 m at 100 Hz",
+    "detection_suite": ["gpr", "pulse_induction", "magnetic_gradiometer", "saw_voc"],
+    "aircraft_bays": 3,
+    "charge_pads": 3,
+    "charge_pad_power_w": 30
+  },
+
+  "tricopters": {
+    "id_prefix": "tricopter",
+    "count": 3,
+    "kind": "tricopter",
+    "mass_g": 102,
+    "configuration": "compound_bicopter",
+    "configuration_note": "two tilting lift rotors plus one tail pusher, three rotors total. This document uses compound bicopter throughout, matching the engineering baseline and patent language; external decks use nano tricopter, section 14",
+    "cruise_endurance_min_low": 10,
+    "cruise_endurance_min_high": 12,
+    "ceiling_m": 4500,
+    "scout_radius_m_low": 30,
+    "scout_radius_m_high": 50,
+    "radio": "civilian ExpressLRS",
+    "video_link": "5.8 GHz, acknowledged weak point against a jamming threat",
+    "uwb_radio": "Qorvo DWM3001C, ~50 m at 100 Hz",
+    "sensors": ["thermal", "optical"],
+    "recovery_stages": [
+      { "stage": "coarse",     "guidance": "ultra wideband ranging",         "precision_cm": 50 },
+      { "stage": "fine",       "guidance": "ArUco fiducial, downward camera", "precision_cm": 10 },
+      { "stage": "mechanical", "guidance": "funnel shaped physical pad",      "precision_cm": 3 },
+      { "stage": "touchdown",  "guidance": "cuts power, gravity completes alignment", "precision_cm": 0 }
+    ]
+  },
+
+  "mission_modes": ["STANDARD", "AUTONOMOUS", "GHOST", "LCA"],
+  "control_modes": ["MANUAL", "GUIDED", "AUTO", "HOLD"],
+  "formation_patterns": ["vee", "line", "column"],
+
+  "alert_confidence_threshold": 0.85,
+  "voxel_resolution_cm": 5,
+  "mesh_load_kbps_low": 3,
+  "mesh_load_kbps_high": 12
+}
