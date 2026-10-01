@@ -185,6 +185,20 @@ class MainWindow(QMainWindow):
         self.recording_label.setObjectName("recordingIndicator")
         layout.addWidget(self.recording_label)
 
+        # Section 3's one rule, stated on the app's face rather than left to
+        # whoever happens to be narrating. The restraint is the point: every
+        # figure here is real, and none of it is pretending to be live.
+        self.provenance_label = QLabel("TRL 2 · SCRIPTED PLAYBACK · NO HARDWARE")
+        self.provenance_label.setObjectName("provenanceChip")
+        self.provenance_label.setToolTip(
+            "ARES is at TRL 2. No hardware exists yet, so every position, detection "
+            "and battery figure shown here is played back from a scripted mission "
+            "timeline, not read from a sensor.\n\n"
+            "What is real: the conflict-free map merge, the formation geometry, the "
+            "flight model, and the launch and recovery state machines."
+        )
+        layout.addWidget(self.provenance_label)
+
         self.clock_label = QLabel("00:00")
         self.clock_label.setObjectName("missionClock")
         layout.addWidget(self.clock_label)
@@ -606,6 +620,7 @@ class MainWindow(QMainWindow):
     def _apply_link_cut(self, unit_ids: list[str]) -> None:
         self.mesh_link.cut()
         self.map_view.set_link_cut_visual(True, unit_ids)
+        self._push_mesh_state()
         for unit_id in unit_ids:
             self.units[unit_id].link_state = "LOST"
         self._refresh_all_rows()
@@ -613,12 +628,23 @@ class MainWindow(QMainWindow):
     def _apply_link_restore(self, unit_ids: list[str]) -> int:
         delta = self.mesh_link.restore()
         self.map_view.set_link_cut_visual(False)
+        self._push_mesh_state()
+        self.map_view.flash_reconciled()
         for unit_id in unit_ids:
             self.units[unit_id].link_state = "CONNECTED"
         self._refresh_all_rows()
         return delta
 
     # --- alert / confirm workflow, section 8.3 ---
+
+    def _push_mesh_state(self) -> None:
+        """Mirror the real replica state onto the map after anything changes it."""
+        self.map_view.set_mesh_state(
+            self.mesh_link.holdings(),
+            self.mesh_link.rover_voxels,
+            self.mesh_link.aircraft_voxels,
+            self.mesh_link.divergence(),
+        )
 
     def _on_detection(self, detection: dict) -> None:
         x, y, confidence = detection["x"], detection["y"], detection["confidence"]
@@ -632,6 +658,7 @@ class MainWindow(QMainWindow):
             source_id=source_id,
         )
         self.mesh_link.observe(source, observation)
+        self._push_mesh_state()
         self.map_view.add_detection(detection)
         self.threat_panel.add_detection(detection)
         self.context_panel.rover_panel.sensors.register_hit(detection.get("sensor", ""))
@@ -732,6 +759,7 @@ class MainWindow(QMainWindow):
         self.threat_panel.clear()
         self.phase_label.setText("STANDBY")
         self.mesh_link = MeshLink()
+        self._push_mesh_state()
         self.units = _default_units()
         self.control_authority = ControlAuthority(self.units)
         self.context_panel.launch_console.reset()

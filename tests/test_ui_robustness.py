@@ -153,3 +153,35 @@ def test_manual_lock_chip_only_appears_when_held(app):
     window._on_release_manual()
     window._refresh_all_rows()
     assert not window.manual_chip.isVisibleTo(window)
+
+
+def test_cut_link_makes_the_divergence_visible_on_the_map(app):
+    """The cut-link demonstration is the one the spec calls unmissable. It is
+    only unmissable if the map actually shows the two replicas disagreeing."""
+    window = MainWindow()
+    window._on_detection(
+        {"x": 10, "y": 4, "confidence": 0.5, "sensor": "gpr", "source": "rover",
+         "source_id": "rover", "type": "unknown"}
+    )
+    pump(app)
+    assert window.map_view._mesh_diverged == 0
+    shared = window.map_view._holdings[(200, 80, 0)]
+    assert shared == {"rover", "aircraft"}
+
+    window._on_cut_link()
+    window._on_detection(
+        {"x": 20, "y": 8, "confidence": 0.7, "sensor": "thermal", "source": "aircraft",
+         "source_id": "tricopter-1", "type": "unknown"}
+    )
+    pump(app)
+    # Seen only by an aircraft while the link is down: one replica holds it.
+    assert window.map_view._holdings[(400, 160, 0)] == {"aircraft"}
+    assert window.map_view._mesh_diverged == 1
+    assert window.map_view._mesh_rover != window.map_view._mesh_aircraft
+
+    window._on_restore_link()
+    pump(app)
+    assert window.map_view._mesh_diverged == 0
+    assert window.map_view._mesh_rover == window.map_view._mesh_aircraft
+    assert window.map_view._holdings[(400, 160, 0)] == {"rover", "aircraft"}
+    assert window.map_view._reconciled_flash > 0

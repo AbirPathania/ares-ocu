@@ -132,3 +132,46 @@ def test_mesh_link_diverges_while_cut_and_reconverges_on_restore():
     assert delta == 2
     assert link.rover_map.snapshot() == link.aircraft_map.snapshot()
     assert link.connected is True
+
+
+def test_holdings_marks_which_replica_has_each_voxel():
+    link = MeshLink()
+    link.observe("rover", make_obs(key=(1, 1, 1)))
+    link.cut()
+    link.observe("rover", make_obs(key=(2, 2, 2), source="rover"))
+    link.observe("aircraft", make_obs(key=(3, 3, 3), source="tricopter-1"))
+
+    held = link.holdings()
+    assert held[(1, 1, 1)] == {"rover", "aircraft"}  # crossed before the cut
+    assert held[(2, 2, 2)] == {"rover"}
+    assert held[(3, 3, 3)] == {"aircraft"}
+
+
+def test_divergence_equals_the_delta_a_restore_reports():
+    link = MeshLink()
+    link.cut()
+    link.observe("rover", make_obs(key=(1, 0, 0), t=1, confidence=0.4))
+    link.observe("aircraft", make_obs(key=(2, 0, 0), t=2, confidence=0.5))
+    link.observe("aircraft", make_obs(key=(1, 0, 0), t=3, confidence=0.9))
+
+    predicted = link.divergence()
+    assert predicted == 2
+    assert link.restore() == predicted
+
+
+def test_divergence_is_zero_while_connected():
+    link = MeshLink()
+    for i in range(5):
+        link.observe("rover", make_obs(key=(i, 0, 0)))
+    assert link.divergence() == 0
+    assert link.rover_voxels == link.aircraft_voxels == 5
+
+
+def test_holdings_converge_after_restore():
+    link = MeshLink()
+    link.cut()
+    link.observe("rover", make_obs(key=(9, 9, 9)))
+    assert link.holdings()[(9, 9, 9)] == {"rover"}
+    link.restore()
+    assert link.holdings()[(9, 9, 9)] == {"rover", "aircraft"}
+    assert link.divergence() == 0

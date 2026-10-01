@@ -62,7 +62,9 @@
     { "t": 44, "sensor": "pulse_induction",       "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.71, "type": "unknown" },
     { "t": 50, "sensor": "magnetic_gradiometer",  "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.79, "type": "unknown" },
     { "t": 52, "sensor": "thermal",               "source": "aircraft", "source_id": "tricopter-1", "x": 14, "y": 6, "confidence": 0.68, "type": "unknown",
-      "_comment": "aircraft-side hit on the same voxel while the link is cut (t=50-58), so Cut Link produces a real, visible divergence to reconcile on Restore Link, section 8.5" },
+      "_comment": "aircraft-side hit on the SAME voxel while the link is cut: the two replicas end up holding different observations of one place, which the merge resolves by confidence" },
+    { "t": 53, "sensor": "thermal",               "source": "aircraft", "source_id": "tricopter-2", "x": 23, "y": 11, "confidence": 0.58, "type": "unknown",
+      "_comment": "aircraft-side hit on ground the rover has not reached, found while the link is down. The rover's map cannot contain it until the link is restored, which is what makes the divergence visible on the map rather than only in a counter, section 8.5" },
     { "t": 55, "sensor": "fused",                 "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.91, "type": "TBD" }
   ],
 

@@ -47,6 +47,7 @@ ALERT_COLOR = QColor("#e05c4b")
 CONFIRMED_COLOR = QColor("#ff6a55")
 GEOFENCE_COLOR = QColor("#e8b23c")
 LINK_CUT_TINT = QColor("#e05c4b")
+UNSYNCED_COLOR = QColor("#e8b23c")
 TERRAIN_VEGETATION = QColor(94, 201, 130, 14)
 TERRAIN_ROCK = QColor(150, 130, 105, 18)
 TERRAIN_CONTOUR = QColor(255, 255, 255, 13)
@@ -71,6 +72,11 @@ class MapView(QWidget):
         self._trails: dict[str, list[tuple[float, float]]] = {}
         self._detections: list[dict] = []
         self._detection_by_key: dict[tuple, dict] = {}
+        self._holdings: dict[tuple, set[str]] = {}
+        self._mesh_rover = 0
+        self._mesh_aircraft = 0
+        self._mesh_diverged = 0
+        self._reconciled_flash = 0.0  # seconds of 'just reconciled' banner left
         self._geofence_vertices: list[tuple[float, float]] = []
         self._formation_preview: list[tuple[float, float, float]] | None = None
         self._formation_origin: tuple[float, float] | None = None
@@ -155,6 +161,8 @@ class MapView(QWidget):
             self.cutLinkRequested.emit()
 
     def _on_radar_tick(self) -> None:
+        if self._reconciled_flash > 0:
+            self._reconciled_flash = max(0.0, self._reconciled_flash - RADAR_TICK_MS / 1000.0)
         self._radar_angle = (self._radar_angle + 2.4) % 360.0
         self.update()
 
@@ -195,6 +203,9 @@ class MapView(QWidget):
         self._trails.clear()
         self._detections.clear()
         self._detection_by_key.clear()
+        self._holdings.clear()
+        self._mesh_rover = self._mesh_aircraft = self._mesh_diverged = 0
+        self._reconciled_flash = 0.0
         self._formation_preview = None
         self._link_cut = False
         self._link_cut_units = []
@@ -228,6 +239,25 @@ class MapView(QWidget):
         entry = self._detection_by_key.get(voxel_key(x, y, 0.0))
         if entry is not None:
             entry["confirmed"] = True
+        self.update()
+
+    def set_mesh_state(
+        self,
+        holdings: dict[tuple, set[str]],
+        rover_voxels: int,
+        aircraft_voxels: int,
+        diverged: int,
+    ) -> None:
+        """Push the real replica state in, so the map can draw what each side
+        actually holds rather than one merged view that hides the divergence."""
+        self._holdings = holdings
+        self._mesh_rover = rover_voxels
+        self._mesh_aircraft = aircraft_voxels
+        self._mesh_diverged = diverged
+        self.update()
+
+    def flash_reconciled(self, seconds: float = 4.0) -> None:
+        self._reconciled_flash = seconds
         self.update()
 
     def set_geofence(self, vertices: list[tuple[float, float]]) -> None:
@@ -296,8 +326,7 @@ class MapView(QWidget):
             self._draw_bearing_compass(painter)
         self._draw_north_indicator(painter)
         self._draw_scale_bar(painter)
-        if self._link_cut:
-            self._draw_link_cut_banner(painter)
+        self._draw_mesh_banner(painter)
         self._draw_cursor_readout(painter)
 
         painter.end()
@@ -442,6 +471,25 @@ class MapView(QWidget):
             painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 50)))
             painter.drawEllipse(center, radius, radius)
             draw_threat_glyph(painter, center, radius, threat_type)
+
+            # An observation only one replica holds has not crossed the link.
+            # Drawing it the same as a shared one would hide exactly the thing
+            # the cut-link demonstration exists to show.
+            holders = self._holdings.get(voxel_key(d["x"], d["y"], 0.0))
+            if holders is not None and len(holders) == 1:
+                side = next(iter(holders))
+                badge = "R" if side == "rover" else "A"
+                painter.setPen(QPen(UNSYNCED_COLOR, 1, Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(center, radius + 6, radius + 6)
+
+                corner = center + QPointF(radius + 4, -radius - 4)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(UNSYNCED_COLOR))
+                painter.drawEllipse(corner, 7.0, 7.0)
+                painter.setPen(QPen(QColor("#0e1215")))
+                painter.setFont(QFont("Menlo", 8, QFont.Bold))
+                painter.drawText(QRectF(corner.x() - 7, corner.y() - 7, 14, 14), Qt.AlignCenter, badge)
 
             # Below the marker, centered: unit labels sit to the right of their
             # icons, and a scout hovering over its own detection collided with them.
@@ -652,10 +700,50 @@ class MapView(QWidget):
             QRectF(self.width() - 120, self.height() - 20, 110, 14), Qt.AlignRight, f"{x:6.1f}, {y:6.1f} m"
         )
 
-    def _draw_link_cut_banner(self, painter: QPainter) -> None:
-        painter.setPen(QPen(LINK_CUT_TINT))
+    def _draw_mesh_banner(self, painter: QPainter) -> None:
+        """The shared map's state, in numbers, where the operator is looking.
+
+        A cut link that produces only a log line asks the viewer to take the
+        divergence on trust. The counts make it checkable: two replicas, how
+        many voxels each holds, and how many must cross for them to agree.
+        """
+        if self._link_cut:
+            headline = "LINK CUT — MAPS DIVERGING"
+            detail = (
+                f"ROVER MAP {self._mesh_rover}   AIRCRAFT MAP {self._mesh_aircraft}"
+                f"   UNRECONCILED {self._mesh_diverged}"
+            )
+            accent, box = LINK_CUT_TINT, QColor(60, 24, 24, 210)
+        elif self._reconciled_flash > 0:
+            headline = "LINK RESTORED — MAPS RECONCILED"
+            detail = (
+                f"ROVER MAP {self._mesh_rover}   AIRCRAFT MAP {self._mesh_aircraft}"
+                f"   DIVERGENCE {self._mesh_diverged}"
+            )
+            accent, box = QColor("#5ec9c2"), QColor(20, 54, 50, 210)
+        else:
+            painter.setPen(QPen(QColor(124, 136, 145, 170)))
+            painter.setFont(QFont("Menlo", 8))
+            painter.drawText(
+                QRectF(0, 52, self.width(), 14),
+                Qt.AlignCenter,
+                f"MESH SYNCED · {self._mesh_rover} voxels on both replicas",
+            )
+            return
+
+        # Below the toolbar row, which occupies the top-left corner.
+        width, height = 430.0, 44.0
+        rect = QRectF((self.width() - width) / 2, 46, width, height)
+        painter.setPen(QPen(accent, 1))
+        painter.setBrush(QBrush(box))
+        painter.drawRoundedRect(rect, 3, 3)
+
+        painter.setPen(QPen(accent))
         painter.setFont(QFont("Menlo", 11, QFont.Bold))
-        painter.drawText(QRectF(0, 8, self.width(), 24), Qt.AlignCenter, "LINK CUT — MAPS DIVERGING")
+        painter.drawText(QRectF(rect.x(), rect.y() + 5, width, 16), Qt.AlignCenter, headline)
+        painter.setPen(QPen(QColor("#cfe0dd")))
+        painter.setFont(QFont("Menlo", 9))
+        painter.drawText(QRectF(rect.x(), rect.y() + 23, width, 15), Qt.AlignCenter, detail)
 
     # --- mouse interaction: drag the compass rose, pan the map, click units/bay ---
 

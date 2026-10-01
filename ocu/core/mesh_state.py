@@ -159,3 +159,37 @@ class MeshLink:
         delta = reconcile(self.rover_map, self.aircraft_map)
         self.last_restore_delta = delta
         return delta
+
+    def holdings(self) -> dict[tuple[int, int, int], set[str]]:
+        """Which replicas currently hold each voxel.
+
+        This is what makes a cut link visible rather than merely logged: a
+        voxel held by one side only is an observation that has not crossed,
+        and the map can draw it as such instead of pretending the fleet
+        shares one view while the link is down.
+        """
+        held: dict[tuple[int, int, int], set[str]] = {}
+        for key in self.rover_map.snapshot():
+            held.setdefault(key, set()).add("rover")
+        for key in self.aircraft_map.snapshot():
+            held.setdefault(key, set()).add("aircraft")
+        return held
+
+    def divergence(self) -> int:
+        """How many voxels would have to cross the link to reconcile right now.
+
+        Counts a voxel once if the two replicas disagree about it at all,
+        whether because only one side has seen it or because they hold
+        different observations of it. Equals the delta a restore reports.
+        """
+        rover = self.rover_map.snapshot()
+        aircraft = self.aircraft_map.snapshot()
+        return sum(1 for key in set(rover) | set(aircraft) if rover.get(key) != aircraft.get(key))
+
+    @property
+    def rover_voxels(self) -> int:
+        return len(self.rover_map)
+
+    @property
+    def aircraft_voxels(self) -> int:
+        return len(self.aircraft_map)

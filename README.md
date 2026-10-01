@@ -36,6 +36,37 @@ on the map panel is the single most important interaction in the app
 disconnected and reconverging via the CRDT merge on reconnect, with a
 delta count showing exactly how much crossed the link.
 
+## The sixty second demo
+
+Section 8.5 calls the cut-link demonstration "the single most important
+interaction in the whole application", and says it is the ten seconds
+worth rehearsing until it is unmissable. This is that run.
+
+1. **Open it and say the first line out loud.** The top bar reads TRL 2,
+   scripted playback, no hardware. Say so before anyone asks. What is real
+   is the map merge, the formation geometry, the flight model and the state
+   machines; what is scripted is where the vehicles are and what they find.
+2. **DEPLOY.** The rover drives and scans. At the blind-terrain waypoint its
+   own planner launches two of the three tricopters without being asked, and
+   the log says so. The third stays in the bay for you to task.
+3. **Watch the threat build.** Four sensors hit the same buried object. They
+   merge into one threat, not four rows, with the contributing sensors named
+   and a confidence that climbs past the 0.85 escalation threshold.
+4. **The link cuts at 00:50.** This is the moment. The banner over the map
+   shows the two replicas drifting apart by count, and any observation only
+   one side holds gets a dashed ring and an R or A badge. A tricopter finds
+   something at (23, 11) that the rover's map cannot contain.
+5. **Restore the link.** The counts converge, the badges clear, and the log
+   names how many observations crossed. Nobody re-sent the whole map.
+6. **Then show control.** Open the launch console, pick a pattern, swing the
+   bearing dial and watch the formation redraw before you commit. Take
+   MANUAL and drive the rover on W/S/A/D. Press RETURN TO BASE and watch the
+   tricopters come home with it and wait for it to stop before docking.
+
+The honest line to close on: almost every autonomy pitch claims to work in
+a GPS-denied, link-contested environment, and almost none of them show the
+failure on purpose and then show the recovery.
+
 ## Tests
 
 ```
