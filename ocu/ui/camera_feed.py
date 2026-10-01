@@ -37,6 +37,7 @@ class SimulatedCameraFeed(QWidget):
         self._noise_offset = 0.0
         self._active = False
         self._emcon = False
+        self._downlink_reason = ""
 
         self.setMinimumHeight(104)
         self.setMaximumHeight(124)
@@ -48,6 +49,21 @@ class SimulatedCameraFeed(QWidget):
 
     def set_active(self, active: bool) -> None:
         self._active = active
+        self.update()
+
+    def set_downlink(self, video: bool, mode: str) -> None:
+        """Video is a function of the link, not of the camera.
+
+        In Autonomous the aircraft is flying and its camera is running; the
+        link simply is not carrying video. In Ghost nothing is radiated at
+        all. Saying which is which beats a blank panel that looks broken.
+        """
+        self._emcon = not video
+        self._downlink_reason = {
+            "AUTONOMOUS": "NO VIDEO \u00b7 STATUS LINK ONLY",
+            "GHOST": "EMISSIONS SILENT \u00b7 NO DOWNLINK",
+            "LCA": "CONTACT LOST",
+        }.get(mode, "")
         self.update()
 
     def set_emcon(self, emcon: bool) -> None:
@@ -82,7 +98,7 @@ class SimulatedCameraFeed(QWidget):
             painter.setFont(QFont("DIN Condensed", 7 + 3, QFont.Bold))
             painter.drawText(QRectF(2, 2, rect.width() - 4, 12), Qt.AlignLeft, self._label)
             painter.setPen(QPen(QColor("#C9952F")))
-            painter.drawText(rect, Qt.AlignCenter, "EMCON \u00b7 NO DOWNLINK")
+            painter.drawText(rect, Qt.AlignCenter, self._downlink_reason or "NO DOWNLINK")
             painter.end()
             return
 
@@ -133,9 +149,6 @@ class SimulatedCameraFeed(QWidget):
         painter.setFont(QFont("Menlo", 7))
         painter.drawText(QRectF(4, rect.height() - 13, rect.width() - 8, 11), Qt.AlignLeft, self._telemetry)
 
-        painter.setPen(QPen(QColor("#C9952F")))
-        painter.setFont(QFont("DIN Condensed", 6 + 3, QFont.Bold))
-        painter.drawText(QRectF(0, 2, rect.width() - 4, 11), Qt.AlignRight, "SIMULATED")
 
         painter.end()
 

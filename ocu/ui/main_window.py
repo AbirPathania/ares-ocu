@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD
+from ocu.core.comms import GHOST, LCA, STANDARD, profile_for
 from ocu.core.control_authority import ControlAuthority
 from ocu.core.flight_director import AircraftMode, FlightDirector
 from ocu.core.geofence import Geofence
@@ -71,7 +72,7 @@ def _default_units() -> dict[str, Unit]:
 
 
 def _chip(label: str, value: str, color: str) -> str:
-    return f'<span style="color:#6c7a80">{label}</span> <span style="color:{color}">{value}</span>'
+    return f'<span style="color:#7B8794">{label}</span> <span style="color:{color}">{value}</span>'
 
 
 class MainWindow(QMainWindow):
@@ -90,6 +91,9 @@ class MainWindow(QMainWindow):
         self._docked_state: dict[str, bool] = {uid: True for uid in TRICOPTER_IDS}
         self._position_owner: dict[str, str] = {uid: "scripted" for uid in ALL_UNIT_IDS}
         self._keys_down: set[int] = set()
+        self._comms = profile_for(STANDARD)
+        self._last_downlink_s = 0.0
+        self._silence_began_s: float | None = None
         self.setFocusPolicy(Qt.StrongFocus)
 
         # The flight director owns every unit it has been handed, on its own
@@ -147,7 +151,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(6, 4, 4, 4)
         layout.setSpacing(3)
 
-        feeds_label = QLabel("CAMERA FEEDS  ·  SIMULATED, NO HARDWARE")
+        feeds_label = QLabel("CAMERA FEEDS")
         feeds_label.setObjectName("sectionLabel")
         layout.addWidget(feeds_label)
 
@@ -190,24 +194,6 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(10, 2, 10, 2)
         layout.setSpacing(12)
-
-        self.recording_label = QLabel("● REC")
-        self.recording_label.setObjectName("recordingIndicator")
-        layout.addWidget(self.recording_label)
-
-        # Section 3's one rule, stated on the app's face rather than left to
-        # whoever happens to be narrating. The restraint is the point: every
-        # figure here is real, and none of it is pretending to be live.
-        self.provenance_label = QLabel("TRL 2 · SCRIPTED PLAYBACK · NO HARDWARE")
-        self.provenance_label.setObjectName("provenanceChip")
-        self.provenance_label.setToolTip(
-            "ARES is at TRL 2. No hardware exists yet, so every position, detection "
-            "and battery figure shown here is played back from a scripted mission "
-            "timeline, not read from a sensor.\n\n"
-            "What is real: the conflict-free map merge, the formation geometry, the "
-            "flight model, and the launch and recovery state machines."
-        )
-        layout.addWidget(self.provenance_label)
 
         self.clock_label = QLabel("00:00")
         self.clock_label.setObjectName("missionClock")
@@ -360,40 +346,55 @@ class MainWindow(QMainWindow):
     # --- mission mode, section 4.1 ---
 
     def _on_mission_mode_changed(self) -> None:
-        """Apply the selected mission mode to the fleet.
+        """Apply the selected mission mode, section 4.1.
 
-        These modes are doctrine with consequences, not a caption. Ghost
-        means zero intentional emissions, so there is no video downlink to
-        show; Autonomous means the mission is pre-loaded and the operator
-        monitors without intervening. Both therefore take the sticks away,
-        because offering a control that cannot reach the vehicle is worse
-        than not offering it at all.
+        A mode is a communications posture, not a permission level. It
+        decides what the fleet radiates and therefore what arrives here:
+        Autonomous drops video and delivers state on a ping instead of a
+        stream, Ghost stops the downlink entirely. The fleet keeps flying
+        either way. Freezing this display while the simulation continues
+        underneath is what those modes actually look like from an operator's
+        seat, and it is the part worth showing.
         """
-        mode = self.mode_combo.currentData() or "STANDARD"
-        emissions_silent = mode == "GHOST"
-        can_intervene = mode == "STANDARD"
+        self._apply_comms(self.mode_combo.currentData() or STANDARD)
 
+    def _apply_comms(self, mode: str) -> None:
+        self._comms = profile_for(mode)
         for unit in self.units.values():
             unit.mission_mode = mode
+
         for feed in self.camera_feeds.values():
-            feed.set_emcon(emissions_silent)
+            feed.set_downlink(self._comms.video, mode)
 
-        if not can_intervene and self.control_authority.manual_holder is not None:
+        if not self._comms.uplink and self.control_authority.manual_holder is not None:
             self._on_release_manual()
-        self.context_panel.set_manual_available(can_intervene, mode)
+        self.context_panel.set_manual_available(self._comms.uplink, mode)
 
-        self.event_log.log(
-            self.playback.clock_s,
-            {
-                "STANDARD": "Mission mode STANDARD: full RF, live video and telemetry",
-                "AUTONOMOUS": (
-                    "Mission mode AUTONOMOUS: minimal RF, status pings only, "
-                    "no real-time intervention"
-                ),
-                "GHOST": "Mission mode GHOST: emissions silent, no downlink, UWB only",
-            }[mode],
-        )
+        if self._comms.telemetry:
+            self._silence_began_s = None
+            self.map_view.set_telemetry_stale(False, "")
+        else:
+            # Mark the picture stale the moment the downlink closes, rather
+            # than on the next clock tick: with playback paused there may not
+            # be a next tick, and a frozen picture must never look live.
+            if self._silence_began_s is None:
+                self._silence_began_s = self.playback.clock_s
+            self._update_silence_indicator()
+
+        self.event_log.log(self.playback.clock_s, f"Mission mode {mode}: {self._comms.summary}")
         self._refresh_all_rows()
+
+    def _downlink_open(self) -> bool:
+        """Whether a fresh picture is allowed through to the operator right now."""
+        if self._comms.telemetry and self._comms.continuous:
+            return True
+        if not self._comms.telemetry:
+            return False
+        # Autonomous: a snapshot on the ping, nothing between pings.
+        if self.playback.clock_s - self._last_downlink_s >= self._comms.ping_interval_s:
+            self._last_downlink_s = self.playback.clock_s
+            return True
+        return False
 
     def _on_take_manual(self, unit_id: str) -> None:
         previous = self.control_authority.manual_holder
@@ -462,11 +463,16 @@ class MainWindow(QMainWindow):
             rover.pose.x, rover.pose.y, rover.pose.heading = rover_pose
             self.map_view.set_unit_pose("rover", rover.pose.x, rover.pose.y, 0.0, rover.pose.heading)
 
+        downlink = self._downlink_open()
         for unit_id, (x, y, z, heading) in poses.items():
             unit = self.units.get(unit_id)
             if unit is None:
                 continue
+            # The aircraft is there whether or not it is telling us. State
+            # always advances; only the operator's copy of it is gated.
             unit.pose.x, unit.pose.y, unit.pose.z, unit.pose.heading = x, y, z, heading
+            if not downlink:
+                continue
             self.map_view.set_unit_pose(unit_id, x, y, z, heading)
             if self.selected_unit_id == unit_id:
                 self.context_panel.aircraft_panel.update_pose(z, heading)
@@ -515,11 +521,11 @@ class MainWindow(QMainWindow):
                 0.0, unit.battery_pct - tricopter_drain_pct_per_s(speed, vertical) * dt_s
             )
 
-        if self.selected_unit_id == "rover":
+        if self.selected_unit_id == "rover" and self._comms.telemetry:
             self.context_panel.rover_panel.update_power(
                 rover_power_w(rover_speed), self._endurance_text("rover")
             )
-        elif self.selected_unit_id in TRICOPTER_IDS:
+        elif self.selected_unit_id in TRICOPTER_IDS and self._comms.telemetry:
             state = self.flight_director.aircraft.get(self.selected_unit_id)
             speed = state.body.speed_ms if state else 0.0
             vertical = state.body.vz if state else 0.0
@@ -697,12 +703,21 @@ class MainWindow(QMainWindow):
                 f"Link restored: {', '.join(unit_ids)}, {delta} observation(s) crossed to reconcile",
             )
 
+    def _check_lost_comms_autonomous(self) -> None:
+        """LCA is entered, not ordered, section 4.1."""
+        all_lost = all(u.link_state == "LOST" for u in self.units.values())
+        if all_lost and self._comms.mode != LCA:
+            self._apply_comms(LCA)
+        elif not all_lost and self._comms.mode == LCA:
+            self._apply_comms(self.mode_combo.currentData() or STANDARD)
+
     def _apply_link_cut(self, unit_ids: list[str]) -> None:
         self.mesh_link.cut()
         self.map_view.set_link_cut_visual(True, unit_ids)
         self._push_mesh_state()
         for unit_id in unit_ids:
             self.units[unit_id].link_state = "LOST"
+        self._check_lost_comms_autonomous()
         self._refresh_all_rows()
 
     def _apply_link_restore(self, unit_ids: list[str]) -> int:
@@ -712,6 +727,7 @@ class MainWindow(QMainWindow):
         self.map_view.flash_reconciled()
         for unit_id in unit_ids:
             self.units[unit_id].link_state = "CONNECTED"
+        self._check_lost_comms_autonomous()
         self._refresh_all_rows()
         return delta
 
@@ -737,8 +753,13 @@ class MainWindow(QMainWindow):
             threat_type=detection.get("type", "unknown"),
             source_id=source_id,
         )
-        self.mesh_link.observe(source, observation)
-        self._push_mesh_state()
+        if self._comms.mesh_traffic:
+            self.mesh_link.observe(source, observation)
+            self._push_mesh_state()
+        if not self._comms.telemetry:
+            # Found, logged on the vehicle, and not reported until the fleet
+            # is allowed to talk again.
+            return
         self.map_view.add_detection(detection)
         self.threat_panel.add_detection(detection)
         self.context_panel.rover_panel.sensors.register_hit(detection.get("sensor", ""))
@@ -781,9 +802,19 @@ class MainWindow(QMainWindow):
         self.clock_label.setText(f"{minutes:02d}:{seconds:02d}")
         dt = clock_s - self._last_clock_s
         self._last_clock_s = clock_s
-        if self.selected_unit_id == "rover":
+        self._update_silence_indicator()
+        # Rover telemetry is a downlink like any other.
+        if self.selected_unit_id == "rover" and self._comms.telemetry:
             rover = self.units["rover"]
             self.context_panel.rover_panel.update_pose(rover.pose.x, rover.pose.y, rover.pose.heading, dt)
+
+    def _update_silence_indicator(self) -> None:
+        if self._comms.telemetry or self._silence_began_s is None:
+            return
+        elapsed = max(0.0, self.playback.clock_s - self._silence_began_s)
+        minutes, seconds = divmod(int(elapsed), 60)
+        label = "CONTACT LOST" if self._comms.mode == LCA else "EMISSIONS SILENT"
+        self.map_view.set_telemetry_stale(True, f"{label} \u00b7 LAST CONTACT {minutes:02d}:{seconds:02d}")
 
     def _on_phase_changed(self, phase: str, t: float) -> None:
         self.phase_label.setText(phase.replace('_', ' ').upper())
@@ -798,9 +829,10 @@ class MainWindow(QMainWindow):
         if unit is None or self._position_owner.get(unit_id) != "scripted":
             return
         unit.pose.x, unit.pose.y, unit.pose.z, unit.pose.heading = x, y, z, heading
-        self.map_view.set_unit_pose(unit_id, x, y, z, heading)
-        if self.selected_unit_id == unit_id and unit.kind == "tricopter":
-            self.context_panel.aircraft_panel.update_pose(z, heading)
+        if self._downlink_open():
+            self.map_view.set_unit_pose(unit_id, x, y, z, heading)
+            if self.selected_unit_id == unit_id and unit.kind == "tricopter":
+                self.context_panel.aircraft_panel.update_pose(z, heading)
 
         breach_action = self.geofence.check_breach(x, y)
         if breach_action is not None and not unit.emergency_return:
@@ -898,7 +930,9 @@ class MainWindow(QMainWindow):
                 unit_id, unit.control_mode, unit.battery_pct, unit.link_state, unit.current_task,
                 manual, self._endurance_text(unit_id),
             )
-            self.event_log.set_link(unit_id, unit.link_state)
+            self.event_log.set_link(
+                unit_id, unit.link_state if self._comms.telemetry else "SILENT"
+            )
             feed = self.camera_feeds.get(unit_id)
             if feed is not None:
                 feed.set_link_state(unit.link_state)
@@ -911,16 +945,24 @@ class MainWindow(QMainWindow):
                     )
 
         lowest = min(u.battery_pct for u in self.units.values())
-        battery_color = "#e05c4b" if lowest <= 25 else "#e8b23c" if lowest <= 50 else "#cfe0dd"
+        battery_color = "#C04438" if lowest <= 25 else "#C9952F" if lowest <= 50 else "#C6D0DA"
         self.battery_chip.setText(_chip("BATT", f"{lowest:.0f}%", battery_color))
 
-        worst = max(self.units.values(), key=lambda u: LINK_SEVERITY[u.link_state])
-        link_color = {"CONNECTED": "#5ec9c2", "DEGRADED": "#e8b23c", "LOST": "#e05c4b"}[worst.link_state]
-        self.link_chip.setText(_chip("LINK", worst.link_state, link_color))
+        # In Ghost there is nothing on the air to be connected to, so a green
+        # CONNECTED chip would contradict the mode it is sitting next to.
+        if not self._comms.telemetry:
+            label = "CONTACT LOST" if self._comms.mode == LCA else "SILENT"
+            self.link_chip.setText(_chip("LINK", label, "#C9952F"))
+        else:
+            worst = max(self.units.values(), key=lambda u: LINK_SEVERITY[u.link_state])
+            link_color = {"CONNECTED": "#4F9D69", "DEGRADED": "#C9952F", "LOST": "#C04438"}[
+                worst.link_state
+            ]
+            self.link_chip.setText(_chip("LINK", worst.link_state, link_color))
 
         # The lock only appears when somebody actually holds the sticks; an
         # always-present padlock reading "—" is a symbol with nothing to say.
         holder = self.control_authority.manual_holder
         self.manual_chip.setVisible(holder is not None)
         if holder is not None:
-            self.manual_chip.setText(_chip("\U0001F512 MANUAL", short_label(holder), "#f4d78a"))
+            self.manual_chip.setText(_chip("\U0001F512 MANUAL", short_label(holder), "#D9B257"))

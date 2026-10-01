@@ -115,12 +115,17 @@ def test_ghost_mode_silences_the_feeds_and_the_sticks(app):
     assert not window.context_panel.rover_panel.rtb_btn.isEnabled()
 
 
-def test_autonomous_mode_blocks_intervention_but_keeps_the_feeds(app):
+def test_autonomous_drops_video_and_pings_rather_than_streams(app):
+    """Section 4.1: minimal RF, periodic status pings only. Not a permission
+    level on the operator's buttons, a different downlink."""
     window = MainWindow()
     _select_mode(window, "AUTONOMOUS")
     pump(app)
-    assert not any(feed._emcon for feed in window.camera_feeds.values())
-    assert not window.context_panel.rover_panel.manual_btn.isEnabled()
+    assert all(feed._emcon for feed in window.camera_feeds.values()), "no video on minimal RF"
+    assert window._comms.telemetry is True
+    assert window._comms.continuous is False, "status arrives on a ping, not a stream"
+    assert window._comms.uplink is False, "no real-time intervention"
+    assert window._comms.mesh_traffic is True, "the vehicles still share a map"
 
 
 def test_switching_to_ghost_drops_an_existing_manual_hold(app):
@@ -226,3 +231,102 @@ def test_battery_endurance_matches_the_published_platform_figures(app):
     # An 11 minute aircraft must lose a believable slice, not most of the pack.
     used = 100.0 - window.units["tricopter-1"].battery_pct
     assert 5.0 < used < 30.0
+
+
+def test_ghost_closes_the_downlink_entirely(app):
+    """Section 4.1: zero intentional emissions. No video, no telemetry, no
+    MANET. The operator sees the last picture before the fleet went quiet."""
+    window = MainWindow()
+    _select_mode(window, "GHOST")
+    pump(app)
+    assert window._comms.video is False
+    assert window._comms.telemetry is False
+    assert window._comms.mesh_traffic is False, "no MANET traffic at all"
+    assert window._downlink_open() is False
+    assert window.map_view._stale is True
+
+
+def test_ghost_freezes_the_picture_while_the_fleet_keeps_flying(app):
+    """The point of Ghost: the aircraft are still working, the operator just
+    is not being told. The simulation must advance while the display does not."""
+    window = MainWindow()
+    # Put aircraft on station directly. The launch animation runs on a real
+    # wall clock, which a test that spins the event loop cannot advance.
+    for i, unit_id in enumerate(TRICOPTERS):
+        window.flight_director.adopt(unit_id, 20.0 + i * 4, 6.0, 20.0, 0.0, 0.0, 0.0)
+        window._docked_state[unit_id] = False
+        window.flight_director.set_commanded_altitude(unit_id, 40.0)
+    for _ in range(10):
+        window._on_director_tick()
+
+    _select_mode(window, "GHOST")
+    pump(app)
+    shown_before = {k: dict(v) for k, v in window.map_view._units.items()}
+    truth_before = {u: window.units[u].pose.z for u in TRICOPTERS}
+
+    for _ in range(60):
+        window._on_director_tick()
+
+    truth_after = {u: window.units[u].pose.z for u in TRICOPTERS}
+    assert truth_after != truth_before, "the fleet must keep flying while silent"
+    assert window.map_view._units == shown_before, "the operator's picture must not update"
+
+
+def test_detections_found_while_silent_are_not_reported(app):
+    window = MainWindow()
+    _select_mode(window, "GHOST")
+    pump(app)
+    before = len(window.map_view._detections)
+    window._on_detection(
+        {"x": 31, "y": 9, "confidence": 0.77, "sensor": "gpr", "source": "rover",
+         "source_id": "rover", "type": "unknown"}
+    )
+    pump(app)
+    assert len(window.map_view._detections) == before, "nothing is radiated in Ghost"
+
+
+def test_total_loss_of_contact_enters_lca_without_being_ordered(app):
+    """Section 4.1: LCA triggers automatically, it is never selected."""
+    window = MainWindow()
+    assert "LCA" not in [window.mode_combo.itemData(i) for i in range(window.mode_combo.count())]
+
+    for unit in window.units.values():
+        unit.link_state = "LOST"
+    window._check_lost_comms_autonomous()
+    pump(app)
+    assert window._comms.mode == "LCA"
+    assert window.map_view._stale is True
+
+    for unit in window.units.values():
+        unit.link_state = "CONNECTED"
+    window._check_lost_comms_autonomous()
+    pump(app)
+    assert window._comms.mode == "STANDARD"
+
+
+def test_standard_streams_everything(app):
+    window = MainWindow()
+    _select_mode(window, "STANDARD")
+    pump(app)
+    assert window._comms.video and window._comms.telemetry and window._comms.continuous
+    assert window._downlink_open() is True
+    assert window.map_view._stale is False
+
+
+def test_ghost_does_not_claim_a_connected_link(app):
+    """A green CONNECTED chip beside a mode that radiates nothing is a
+    contradiction an investor will spot before you finish the sentence."""
+    window = MainWindow()
+    _select_mode(window, "GHOST")
+    window._refresh_all_rows()
+    pump(app)
+    assert "SILENT" in window.link_chip.text()
+    assert "CONNECTED" not in window.link_chip.text()
+    assert all(state == "SILENT" for state in window.event_log.link_strip._states.values())
+
+
+def test_standard_reports_the_real_link_state(app):
+    window = MainWindow()
+    window._refresh_all_rows()
+    pump(app)
+    assert "CONNECTED" in window.link_chip.text()

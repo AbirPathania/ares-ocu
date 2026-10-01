@@ -77,6 +77,8 @@ class MapView(QWidget):
         self._mesh_aircraft = 0
         self._mesh_diverged = 0
         self._reconciled_flash = 0.0  # seconds of 'just reconciled' banner left
+        self._stale = False
+        self._stale_caption = ""
         self._geofence_vertices: list[tuple[float, float]] = []
         self._formation_preview: list[tuple[float, float, float]] | None = None
         self._formation_origin: tuple[float, float] | None = None
@@ -256,6 +258,17 @@ class MapView(QWidget):
         self._mesh_diverged = diverged
         self.update()
 
+    def set_telemetry_stale(self, stale: bool, caption: str) -> None:
+        """Mark the picture as last-known rather than live.
+
+        When the downlink is closed the tracks on this map are history. They
+        are drawn dimmed and dashed, and captioned with how long ago, so the
+        operator is never reading an old position as a current one.
+        """
+        self._stale = stale
+        self._stale_caption = caption
+        self.update()
+
     def flash_reconciled(self, seconds: float = 4.0) -> None:
         self._reconciled_flash = seconds
         self.update()
@@ -327,6 +340,8 @@ class MapView(QWidget):
         self._draw_north_indicator(painter)
         self._draw_scale_bar(painter)
         self._draw_mesh_banner(painter)
+        if self._stale:
+            self._draw_stale_overlay(painter)
         self._draw_cursor_readout(painter)
 
         painter.end()
@@ -580,6 +595,8 @@ class MapView(QWidget):
             )
 
     def _draw_units(self, painter: QPainter) -> None:
+        if self._stale:
+            painter.setOpacity(0.45)
         for unit_id, pose in self._units.items():
             if self._docked.get(unit_id, False):
                 continue  # rendered as a bay slot on the rover instead
@@ -612,6 +629,7 @@ class MapView(QWidget):
             painter.setFont(QFont("Menlo", 9))
             # To the right at mid height: the rover's bay occupies the space above it.
             painter.drawText(center + QPointF(15, 4), short_label(unit_id))
+        painter.setOpacity(1.0)
 
     def _draw_rover_glyph(self, painter: QPainter, center: QPointF, heading: float, color: QColor) -> None:
         """Friendly ground track, MIL-STD-2525: a rectangle, with a leader
@@ -708,6 +726,27 @@ class MapView(QWidget):
         painter.drawLine(QPointF(x0 + bar_px, y0 - 4), QPointF(x0 + bar_px, y0 + 4))
         painter.setFont(QFont("Menlo", 8))
         painter.drawText(QRectF(x0, y0 - 16, bar_px, 12), Qt.AlignCenter, f"{bar_m:.0f} m")
+
+    def _draw_stale_overlay(self, painter: QPainter) -> None:
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(10, 14, 18, 120)))
+        painter.drawRect(self.rect())
+
+        width, height = 430.0, 44.0
+        rect = QRectF((self.width() - width) / 2, (self.height() - height) / 2 - 40, width, height)
+        painter.setPen(QPen(QColor("#C9952F"), 1))
+        painter.setBrush(QBrush(QColor(31, 28, 20, 225)))
+        painter.drawRect(rect)
+        painter.setPen(QPen(QColor("#C9952F")))
+        painter.setFont(QFont("DIN Condensed", 15, QFont.Bold))
+        painter.drawText(QRectF(rect.x(), rect.y() + 4, width, 18), Qt.AlignCenter, self._stale_caption)
+        painter.setPen(QPen(QColor("#7B8794")))
+        painter.setFont(QFont("Menlo", 9))
+        painter.drawText(
+            QRectF(rect.x(), rect.y() + 24, width, 15),
+            Qt.AlignCenter,
+            "Tracks shown are last known. Fleet is still executing.",
+        )
 
     def _draw_cursor_readout(self, painter: QPainter) -> None:
         if self._cursor_world is None:

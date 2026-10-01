@@ -25,6 +25,7 @@ SAMPLE_MS = 500
 LANE_H = 13
 
 LINK_COLORS = {
+    "SILENT": QColor("#1E2630"),
     "CONNECTED": QColor("#4F9D69"),
     "DEGRADED": QColor("#C9952F"),
     "LOST": QColor("#C04438"),
