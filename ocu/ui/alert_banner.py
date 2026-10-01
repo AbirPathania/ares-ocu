@@ -50,14 +50,14 @@ class _ThreatBadge(QWidget):
         painter.setPen(track)
         painter.drawEllipse(center, radius, radius)
 
-        ring = QPen(QColor("#e05c4b"))
+        ring = QPen(QColor("#C04438"))
         ring.setWidth(4)
         ring.setCapStyle(Qt.RoundCap)
         painter.setPen(ring)
         span = int(-360 * 16 * self._confidence)
         painter.drawArc(QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2), 90 * 16, span)
 
-        painter.setPen(QPen(QColor("#ffd7cf")))
+        painter.setPen(QPen(QColor("#E8EDF2")))
         painter.setBrush(Qt.NoBrush)
         draw_threat_glyph(painter, center, radius * 0.68, self._threat_type)
         painter.end()
@@ -127,6 +127,21 @@ class AlertBanner(QWidget):
         self._update_countdown_label()
         self.show()
         self._timer.start()
+
+    def dismiss_for(self, detection: dict) -> None:
+        """Close the banner if it is counting down on this exact threat.
+
+        The same decision can be answered from the threat list, and a banner
+        still ticking on a threat the operator has already resolved would ask
+        them to answer it twice.
+        """
+        current = self._detection
+        if current is None:
+            return
+        if (current.get("x"), current.get("y")) == (detection.get("x"), detection.get("y")):
+            self._timer.stop()
+            self._detection = None
+            self.hide()
 
     def _on_tick(self) -> None:
         self._remaining_s -= TICK_MS / 1000.0

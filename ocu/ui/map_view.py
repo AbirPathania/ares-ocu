@@ -23,8 +23,15 @@ from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, Q
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD, TETHER_LIMIT_M
+from ocu.ui.theme import GRID, GRID_MAJOR, TERRAIN_CONTOUR, UNIT_TINTS
 from ocu.core.mesh_state import voxel_key
-from ocu.ui.icons import draw_threat_glyph
+from ocu.ui.icons import (
+    draw_friendly_air,
+    draw_friendly_ground,
+    draw_hostile,
+    draw_threat_glyph,
+    draw_unknown_contact,
+)
 from ocu.ui.launch_console import short_label
 
 SCALE_PX_PER_M = 9.0
@@ -34,23 +41,16 @@ RADAR_TICK_MS = 60
 TERRAIN_SEED = 20260930
 BAY_SLOT_ORDER = ["tricopter-1", "tricopter-2", "tricopter-3"]
 
-UNIT_COLORS = {
-    "rover": QColor("#5ec9c2"),
-    "tricopter-1": QColor("#e8b23c"),
-    "tricopter-2": QColor("#c97ee8"),
-    "tricopter-3": QColor("#7ea8e8"),
-}
-SELECTED_RING_COLOR = QColor("#f4f7f6")
+UNIT_COLORS = dict(UNIT_TINTS)
+SELECTED_RING_COLOR = QColor("#E8EDF2")
 TRAIL_COLOR = QColor(255, 255, 255, 36)
-DETECTION_COLOR = QColor("#e8b23c")
-ALERT_COLOR = QColor("#e05c4b")
-CONFIRMED_COLOR = QColor("#ff6a55")
-GEOFENCE_COLOR = QColor("#e8b23c")
-LINK_CUT_TINT = QColor("#e05c4b")
-UNSYNCED_COLOR = QColor("#e8b23c")
-TERRAIN_VEGETATION = QColor(94, 201, 130, 14)
-TERRAIN_ROCK = QColor(150, 130, 105, 18)
-TERRAIN_CONTOUR = QColor(255, 255, 255, 13)
+DETECTION_COLOR = QColor("#C9952F")
+ALERT_COLOR = QColor("#C04438")
+CONFIRMED_COLOR = QColor("#C04438")
+GEOFENCE_COLOR = QColor("#C9952F")
+LINK_CUT_TINT = QColor("#C04438")
+UNSYNCED_COLOR = QColor("#C9952F")
+
 TETHER_COLOR = QColor(94, 201, 194, 46)
 TETHER_LABEL_COLOR = QColor(94, 201, 194, 110)
 
@@ -310,7 +310,7 @@ class MapView(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#0e1215"))
+        painter.fillRect(self.rect(), QColor("#0A0E12"))
 
         self._draw_grid(painter)
         self._draw_terrain(painter)
@@ -332,38 +332,53 @@ class MapView(QWidget):
         painter.end()
 
     def _draw_grid(self, painter: QPainter) -> None:
-        pen = QPen(QColor(255, 255, 255, 14))
+        """A 10 m grid with coordinates on the majors, so distances on this
+        map can be read rather than estimated."""
+        self._draw_grid_lines(painter, 10.0, GRID, labelled=False)
+        self._draw_grid_lines(painter, 50.0, GRID_MAJOR, labelled=True)
+
+    def _draw_grid_lines(self, painter: QPainter, spacing_m: float, color, labelled: bool) -> None:
+        pen = QPen(color)
         pen.setWidth(1)
         painter.setPen(pen)
-        step = SCALE_PX_PER_M * 5  # every 5 m
+        step = SCALE_PX_PER_M * spacing_m
         c = self._center()
+        painter.setFont(QFont("Menlo", 7))
         x = c.x() % step
         while x < self.width():
             painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
+            if labelled:
+                world_x = (x - c.x()) / SCALE_PX_PER_M
+                painter.drawText(QRectF(x + 3, 2, 60, 11), Qt.AlignLeft, f"{world_x:+.0f}E")
             x += step
         y = c.y() % step
         while y < self.height():
             painter.drawLine(QPointF(0, y), QPointF(self.width(), y))
+            if labelled:
+                world_y = -(y - c.y()) / SCALE_PX_PER_M
+                painter.drawText(QRectF(3, y + 2, 60, 11), Qt.AlignLeft, f"{world_y:+.0f}N")
             y += step
 
     def _draw_terrain(self, painter: QPainter) -> None:
-        painter.setPen(Qt.NoPen)
+        """Contour rings only.
+
+        The soft filled blobs this replaces were decoration: they carried no
+        elevation, no trafficability, nothing an operator could act on, and
+        coloured ground competes with the status palette. Contours at least
+        read as terrain without pretending to be survey data.
+        """
+        painter.setBrush(Qt.NoBrush)
+        pen = QPen(TERRAIN_CONTOUR)
+        pen.setWidth(1)
+        painter.setPen(pen)
         for feature in self._terrain:
+            if feature["kind"] != "contour":
+                continue
             center = self._to_screen(feature["x"], feature["y"])
-            radius_px = feature["r"] * SCALE_PX_PER_M
-            if feature["kind"] == "vegetation":
-                painter.setBrush(QBrush(TERRAIN_VEGETATION))
-                painter.drawEllipse(center, radius_px, radius_px)
-            elif feature["kind"] == "rock":
-                painter.setBrush(QBrush(TERRAIN_ROCK))
-                painter.drawEllipse(center, radius_px * 0.6, radius_px * 0.6)
-            else:  # contour
-                pen = QPen(TERRAIN_CONTOUR)
-                pen.setWidth(1)
-                painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
-                painter.drawEllipse(center, radius_px, radius_px)
-                painter.setPen(Qt.NoPen)
+            for ring in range(3):
+                radius_px = (feature["r"] - ring * 2.5) * SCALE_PX_PER_M
+                if radius_px > 4:
+                    painter.drawEllipse(center, radius_px, radius_px)
 
     def _draw_tether_ring(self, painter: QPainter) -> None:
         """The UWB tether, section 2. Aircraft never work outside this ring, so
@@ -401,7 +416,7 @@ class MapView(QWidget):
             -18,
         )
         path.closeSubpath()
-        gradient_color = QColor("#5ec9c2")
+        gradient_color = QColor("#4A9FD4")
         gradient_color.setAlpha(14)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(gradient_color))
@@ -469,8 +484,12 @@ class MapView(QWidget):
 
             painter.setPen(QPen(color, 2))
             painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 50)))
-            painter.drawEllipse(center, radius, radius)
-            draw_threat_glyph(painter, center, radius, threat_type)
+            if d.get("confirmed"):
+                draw_hostile(painter, center, radius + 2)
+            else:
+                draw_unknown_contact(painter, center, radius)
+            painter.setBrush(Qt.NoBrush)
+            draw_threat_glyph(painter, center, radius * 0.8, threat_type)
 
             # An observation only one replica holds has not crossed the link.
             # Drawing it the same as a shared one would hide exactly the thing
@@ -487,13 +506,13 @@ class MapView(QWidget):
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QBrush(UNSYNCED_COLOR))
                 painter.drawEllipse(corner, 7.0, 7.0)
-                painter.setPen(QPen(QColor("#0e1215")))
-                painter.setFont(QFont("Menlo", 8, QFont.Bold))
+                painter.setPen(QPen(QColor("#0A0E12")))
+                painter.setFont(QFont("DIN Condensed", 8 + 3, QFont.Bold))
                 painter.drawText(QRectF(corner.x() - 7, corner.y() - 7, 14, 14), Qt.AlignCenter, badge)
 
             # Below the marker, centered: unit labels sit to the right of their
             # icons, and a scout hovering over its own detection collided with them.
-            painter.setPen(QPen(QColor("#cfd8d6")))
+            painter.setPen(QPen(QColor("#C6D0DA")))
             painter.setFont(QFont("Menlo", 8))
             label = f"{threat_type.upper()} {confidence:.2f}"
             painter.drawText(
@@ -542,17 +561,17 @@ class MapView(QWidget):
 
         for i, point in enumerate(points):
             altitude = self._formation_preview[i][2]
-            painter.setPen(QPen(QColor("#f4f7f6"), 1))
+            painter.setPen(QPen(QColor("#E8EDF2"), 1))
             painter.setBrush(QBrush(QColor(94, 201, 194, 70)))
             painter.drawEllipse(point, 9.0, 9.0)
 
-            painter.setFont(QFont("Menlo", 8, QFont.Bold))
-            painter.setPen(QPen(QColor("#0e1215")))
+            painter.setFont(QFont("DIN Condensed", 8 + 3, QFont.Bold))
+            painter.setPen(QPen(QColor("#0A0E12")))
             painter.drawText(
                 QRectF(point.x() - 9, point.y() - 8, 18, 16), Qt.AlignCenter, str(i + 1)
             )
 
-            painter.setPen(QPen(QColor("#cfe0dd")))
+            painter.setPen(QPen(QColor("#C6D0DA")))
             painter.setFont(QFont("Menlo", 8))
             painter.drawText(
                 QRectF(point.x() - 40, point.y() + 11, 80, 13),
@@ -589,35 +608,35 @@ class MapView(QWidget):
             else:
                 self._draw_aircraft_glyph(painter, center, pose.get("heading", 0.0), color)
 
-            painter.setPen(QPen(QColor("#e6e6e6")))
+            painter.setPen(QPen(QColor("#C6D0DA")))
             painter.setFont(QFont("Menlo", 9))
             # To the right at mid height: the rover's bay occupies the space above it.
             painter.drawText(center + QPointF(15, 4), short_label(unit_id))
 
     def _draw_rover_glyph(self, painter: QPainter, center: QPointF, heading: float, color: QColor) -> None:
-        half = 9.0
-        rect = QRectF(center.x() - half, center.y() - half, half * 2, half * 2)
-        painter.drawRoundedRect(rect, 2, 2)
+        """Friendly ground track, MIL-STD-2525: a rectangle, with a leader
+        line showing heading."""
+        draw_friendly_ground(painter, center, 10.0)
         heading_rad = math.radians(heading)
-        tip = center + QPointF(half * 1.6 * math.sin(heading_rad), -half * 1.6 * math.cos(heading_rad))
         pen = QPen(color)
         pen.setWidth(2)
         painter.setPen(pen)
-        painter.drawLine(center, tip)
+        painter.drawLine(
+            center,
+            center + QPointF(17 * math.sin(heading_rad), -17 * math.cos(heading_rad)),
+        )
 
     def _draw_aircraft_glyph(self, painter: QPainter, center: QPointF, heading: float, color: QColor) -> None:
+        """Friendly air track, MIL-STD-2525: an arch, with a leader line."""
+        draw_friendly_air(painter, center, 9.0)
         heading_rad = math.radians(heading)
-        tip = center + QPointF(9 * math.sin(heading_rad), -9 * math.cos(heading_rad))
-        left = center + QPointF(
-            -6 * math.cos(heading_rad) - 3 * math.sin(heading_rad),
-            -6 * math.sin(heading_rad) + 3 * math.cos(heading_rad),
+        pen = QPen(color)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawLine(
+            center,
+            center + QPointF(15 * math.sin(heading_rad), -15 * math.cos(heading_rad)),
         )
-        right = center + QPointF(
-            6 * math.cos(heading_rad) - 3 * math.sin(heading_rad),
-            6 * math.sin(heading_rad) + 3 * math.cos(heading_rad),
-        )
-        back = center + QPointF(-3 * math.sin(heading_rad), 3 * math.cos(heading_rad))
-        painter.drawPolygon(QPolygonF([tip, left, back, right]))
 
     def _draw_rover_bay(self, painter: QPainter) -> None:
         """The single drawer bay on the rover's top deck, section 2: three
@@ -631,8 +650,8 @@ class MapView(QWidget):
         start_x = center.x() - total_w / 2.0
         bay_y = center.y() - 24.0
 
-        painter.setPen(QPen(QColor("#3a4149")))
-        painter.setBrush(QBrush(QColor("#12161a")))
+        painter.setPen(QPen(QColor("#3A4756")))
+        painter.setBrush(QBrush(QColor("#121820")))
         painter.drawRoundedRect(QRectF(start_x - 3, bay_y - 3, total_w + 6, slot_h + 6), 2, 2)
 
         for i, tricopter_id in enumerate(BAY_SLOT_ORDER):
@@ -642,7 +661,7 @@ class MapView(QWidget):
                 painter.setPen(QPen(color.darker(130), 1))
                 painter.setBrush(QBrush(color))
             else:
-                painter.setPen(QPen(QColor("#3a4149"), 1, Qt.DashLine))
+                painter.setPen(QPen(QColor("#3A4756"), 1, Qt.DashLine))
                 painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(slot_rect, 1, 1)
 
@@ -663,26 +682,26 @@ class MapView(QWidget):
             COMPASS_RADIUS_PX * math.sin(bearing_rad), -COMPASS_RADIUS_PX * math.cos(bearing_rad)
         )
         painter.drawLine(center, handle)
-        painter.setBrush(QBrush(QColor("#f4f7f6")))
+        painter.setBrush(QBrush(QColor("#E8EDF2")))
         painter.drawEllipse(handle, 6.0, 6.0)
 
     def _draw_north_indicator(self, painter: QPainter) -> None:
         x, y = self.width() - 34, 34
-        painter.setPen(QPen(QColor("#7c8891"), 1))
+        painter.setPen(QPen(QColor("#7B8794"), 1))
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(QPointF(x, y), 16, 16)
-        painter.setPen(QPen(QColor("#5ec9c2"), 2))
+        painter.setPen(QPen(QColor("#4A9FD4"), 2))
         painter.drawLine(QPointF(x, y + 10), QPointF(x, y - 12))
         painter.drawLine(QPointF(x, y - 12), QPointF(x - 4, y - 5))
         painter.drawLine(QPointF(x, y - 12), QPointF(x + 4, y - 5))
-        painter.setFont(QFont("Menlo", 8, QFont.Bold))
+        painter.setFont(QFont("DIN Condensed", 8 + 3, QFont.Bold))
         painter.drawText(QRectF(x - 8, y - 30, 16, 12), Qt.AlignCenter, "N")
 
     def _draw_scale_bar(self, painter: QPainter) -> None:
         bar_m = 10.0
         bar_px = bar_m * SCALE_PX_PER_M
         x0, y0 = 16.0, self.height() - 20.0
-        pen = QPen(QColor("#9fb0ac"), 2)
+        pen = QPen(QColor("#7B8794"), 2)
         painter.setPen(pen)
         painter.drawLine(QPointF(x0, y0), QPointF(x0 + bar_px, y0))
         painter.drawLine(QPointF(x0, y0 - 4), QPointF(x0, y0 + 4))
@@ -694,7 +713,7 @@ class MapView(QWidget):
         if self._cursor_world is None:
             return
         x, y = self._cursor_world
-        painter.setPen(QPen(QColor("#7c8891")))
+        painter.setPen(QPen(QColor("#7B8794")))
         painter.setFont(QFont("Menlo", 8))
         painter.drawText(
             QRectF(self.width() - 120, self.height() - 20, 110, 14), Qt.AlignRight, f"{x:6.1f}, {y:6.1f} m"
@@ -720,7 +739,7 @@ class MapView(QWidget):
                 f"ROVER MAP {self._mesh_rover}   AIRCRAFT MAP {self._mesh_aircraft}"
                 f"   DIVERGENCE {self._mesh_diverged}"
             )
-            accent, box = QColor("#5ec9c2"), QColor(20, 54, 50, 210)
+            accent, box = QColor("#4A9FD4"), QColor(20, 54, 50, 210)
         else:
             painter.setPen(QPen(QColor(124, 136, 145, 170)))
             painter.setFont(QFont("Menlo", 8))
@@ -739,9 +758,9 @@ class MapView(QWidget):
         painter.drawRoundedRect(rect, 3, 3)
 
         painter.setPen(QPen(accent))
-        painter.setFont(QFont("Menlo", 11, QFont.Bold))
+        painter.setFont(QFont("DIN Condensed", 11 + 3, QFont.Bold))
         painter.drawText(QRectF(rect.x(), rect.y() + 5, width, 16), Qt.AlignCenter, headline)
-        painter.setPen(QPen(QColor("#cfe0dd")))
+        painter.setPen(QPen(QColor("#C6D0DA")))
         painter.setFont(QFont("Menlo", 9))
         painter.drawText(QRectF(rect.x(), rect.y() + 23, width, 15), Qt.AlignCenter, detail)
 

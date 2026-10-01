@@ -1,151 +1,156 @@
-/* Dark tactical theme, section 15 stage 7. Flat, dense, legible at a glance. */
+/* ARES OCU. Palette and type rationale live in ocu/ui/theme.py.
+   Colour is reserved for status: blue is own forces, amber is caution,
+   red is threat. Chrome is greyscale so the eye never has to work out
+   which colour is information. Corners are square and rules are hairlines. */
+
 
 * {
-    color: #d8e0de;
-    font-family: "Menlo", "SF Mono", monospace;
+    color: #C6D0DA;
+    font-family: "Helvetica Neue", sans-serif;
     font-size: 12px;
 }
 
 QMainWindow, QWidget {
-    background-color: #0e1215;
+    background-color: #0A0E12;
 }
 
 QWidget#topBar {
-    background-color: #0a0d10;
-    border-bottom: 1px solid #263038;
+    background-color: #0C1116;
+    border-bottom: 1px solid #3A4756;
     min-height: 38px;
 }
 
 QLabel#missionClock {
     font-size: 18px;
     font-weight: bold;
-    color: #5ec9c2;
+    color: #4A9FD4;
 }
 
 QLabel#provenanceChip {
-    font-size: 9px;
+    font-family: "DIN Condensed"; font-size: 12px; letter-spacing: 1px;
     font-weight: bold;
-    color: #e8b23c;
-    background-color: #241f14;
-    border: 1px solid #4a3f22;
-    border-radius: 3px;
+    color: #C9952F;
+    background-color: #1F1C14;
+    border: 1px solid #4A4128;
     padding: 4px 8px;
 }
 
 QLabel#phaseLabel {
-    font-size: 12px;
+    font-family: "DIN Condensed"; font-size: 16px; letter-spacing: 1px;
     font-weight: bold;
-    color: #5ec9c2;
+    color: #4A9FD4;
     padding-left: 6px;
 }
 
 QComboBox#modeCombo {
-    font-size: 10px;
+    font-family: "DIN Condensed";
+    font-size: 13px;
     font-weight: bold;
     max-width: 210px;
 }
 
 QLabel#statusChip {
-    font-size: 10px;
+    font-family: "DIN Condensed"; font-size: 13px; letter-spacing: 1px;
     font-weight: bold;
     background-color: #12181c;
-    border: 1px solid #1c252b;
-    border-radius: 3px;
+    border: 1px solid #283340;
     padding: 4px 8px;
 }
 
 QLabel#panelTitle {
-    font-size: 12px;
+    font-family: "DIN Condensed"; font-size: 16px; letter-spacing: 1px;
     font-weight: bold;
-    color: #ffffff;
+    color: #E8EDF2;
     padding-bottom: 2px;
 }
 
 QLabel#sectionLabel {
-    font-size: 9px;
+    font-family: "DIN Condensed"; font-size: 12px; letter-spacing: 1px;
     font-weight: bold;
-    color: #6c7a80;
+    color: #7B8794;
     padding: 5px 2px 3px 2px;
-    border-top: 1px solid #1c252b;
+    border-top: 1px solid #283340;
 }
 
 QLabel#manualHint {
-    color: #f4d78a;
-    font-size: 9px;
+    color: #D9B257;
+    font-family: "DIN Condensed";
+    font-size: 12px;
+    letter-spacing: 1px;
     font-weight: bold;
-    background-color: #241f14;
-    border: 1px solid #4a3f22;
-    border-radius: 3px;
+    background-color: #1F1C14;
+    border: 1px solid #4A4128;
     padding: 5px;
 }
 
 QPushButton#returnButton {
-    background-color: #2a2418;
-    border-color: #5c4a2a;
-    color: #f4d78a;
+    background-color: #20201A;
+    border-color: #4A4128;
+    color: #D9B257;
 }
 
 QLabel#mutedNote {
-    color: #6c7a80;
+    color: #7B8794;
     font-size: 9px;
 }
 
 QLabel#recordingIndicator {
-    color: #ff5540;
+    color: #C04438;
     font-weight: bold;
     font-size: 10px;
 }
 
 QPushButton {
-    background-color: #182228;
-    border: 1px solid #2f3d44;
-    border-radius: 3px;
+    font-family: "DIN Condensed";
+    letter-spacing: 1px;
+    background-color: #182029;
+    border: 1px solid #3A4756;
     padding: 7px 14px;
-    font-size: 10px;
+    font-size: 13px;
     font-weight: bold;
-    color: #cfe0dd;
+    color: #C6D0DA;
 }
 
 QPushButton:hover {
-    background-color: #1f2c33;
-    border-color: #3d4f57;
+    background-color: #1E2832;
+    border-color: #48566A;
 }
 
 QPushButton:pressed {
-    background-color: #23343c;
+    background-color: #243040;
 }
 
 QPushButton:disabled {
-    color: #43494d;
-    background-color: #12161a;
-    border-color: #1c252b;
+    color: #4F5B68;
+    background-color: #121820;
+    border-color: #283340;
 }
 
 QPushButton#playButton {
-    background-color: #163331;
-    border-color: #2c5f57;
-    color: #7fe0d1;
+    background-color: #17344A;
+    border-color: #2E5F80;
+    color: #8FC9E8;
     min-width: 76px;
 }
 
 QPushButton#playButton:hover {
-    background-color: #1c4441;
+    background-color: #1D4463;
 }
 
 QPushButton#launchAircraftButton {
-    background-color: #163331;
-    border-color: #2c5f57;
-    color: #7fe0d1;
+    background-color: #17344A;
+    border-color: #2E5F80;
+    color: #8FC9E8;
 }
 
 QPushButton#launchAircraftButton:hover {
-    background-color: #1c4441;
+    background-color: #1D4463;
 }
 
 QPushButton#cutLinkButton {
-    background-color: #3a1f1f;
-    border-color: #5c3232;
-    color: #ffb3a3;
+    background-color: #2E1A18;
+    border-color: #5A2F2A;
+    color: #D4675A;
 }
 
 QPushButton#cutLinkButton:hover {
@@ -153,61 +158,59 @@ QPushButton#cutLinkButton:hover {
 }
 
 QWidget#alertBanner {
-    background-color: #1c1113;
-    border: 1px solid #e05c4b;
-    border-radius: 3px;
+    background-color: #1A1315;
+    border: 1px solid #C04438;
 }
 
 QLabel#alertTitle {
-    color: #ff8a75;
+    color: #D4675A;
     font-weight: bold;
-    font-size: 11px;
+    font-family: "DIN Condensed"; font-size: 15px; letter-spacing: 1px;
 }
 
 QLabel#alertMessage {
-    color: #f0d9d4;
+    color: #C6D0DA;
     font-size: 11px;
 }
 
 QLabel#alertCountdown {
-    color: #ff8a75;
+    color: #D4675A;
     font-size: 20px;
     font-weight: bold;
 }
 
 QPushButton#confirmButton {
-    background-color: #4a1f1a;
-    border-color: #e05c4b;
-    color: #ffd7cf;
+    background-color: #4A211C;
+    border-color: #C04438;
+    color: #E8EDF2;
 }
 
 QPushButton#confirmButton:hover {
-    background-color: #5c2620;
+    background-color: #5A2F2A;
 }
 
 QListWidget#eventLogList {
-    background-color: #080b0d;
-    border: 1px solid #1c252b;
+    background-color: #080B0F;
+    border: 1px solid #283340;
     font-size: 10px;
-    color: #9fb0ac;
+    color: #7B8794;
 }
 
 QDoubleSpinBox, QComboBox {
-    background-color: #0d1114;
-    border: 1px solid #2f3d44;
-    border-radius: 3px;
+    background-color: #0C1116;
+    border: 1px solid #3A4756;
     padding: 5px 8px;
-    color: #cfe0dd;
+    color: #C6D0DA;
     font-size: 11px;
     min-height: 20px;
 }
 
 QDoubleSpinBox:focus, QComboBox:focus {
-    border-color: #5ec9c2;
+    border-color: #4A9FD4;
 }
 
 QDoubleSpinBox:hover, QComboBox:hover {
-    border-color: #3d4f57;
+    border-color: #48566A;
 }
 
 /* The popup is a separate top-level widget and inherits none of the styling
@@ -217,7 +220,7 @@ QComboBox::drop-down {
     subcontrol-origin: padding;
     subcontrol-position: center right;
     width: 20px;
-    border-left: 1px solid #2f3d44;
+    border-left: 1px solid #3A4756;
 }
 
 QComboBox::down-arrow {
@@ -226,19 +229,19 @@ QComboBox::down-arrow {
     height: 0;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-top: 5px solid #7fb3ac;
+    border-top: 5px solid #7B8794;
 }
 
 QComboBox::down-arrow:disabled {
-    border-top-color: #4a5359;
+    border-top-color: #4F5B68;
 }
 
 QComboBox QAbstractItemView {
     background-color: #12181c;
-    border: 1px solid #3d4f57;
-    color: #cfe0dd;
-    selection-background-color: #1c4441;
-    selection-color: #ffffff;
+    border: 1px solid #48566A;
+    color: #C6D0DA;
+    selection-background-color: #1D4463;
+    selection-color: #E8EDF2;
     outline: none;
     padding: 3px;
 }
@@ -246,49 +249,42 @@ QComboBox QAbstractItemView {
 QComboBox QAbstractItemView::item {
     min-height: 24px;
     padding: 4px 10px;
-    border-radius: 2px;
 }
 
 QComboBox QAbstractItemView::item:selected {
-    background-color: #1c4441;
-    color: #ffffff;
+    background-color: #1D4463;
+    color: #E8EDF2;
 }
 
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
     subcontrol-origin: border;
     width: 18px;
-    background-color: #182228;
-    border-left: 1px solid #2f3d44;
+    background-color: #182029;
+    border-left: 1px solid #3A4756;
 }
 
 QDoubleSpinBox::up-button {
     subcontrol-position: top right;
-    border-top-right-radius: 3px;
 }
 
 QDoubleSpinBox::down-button {
     subcontrol-position: bottom right;
-    border-bottom-right-radius: 3px;
 }
 
 QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
-    background-color: #23343c;
+    background-color: #243040;
 }
 
 QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow {
     width: 7px;
     height: 7px;
-    background-color: #7fb3ac;
+    background-color: #7B8794;
 }
 
 QDoubleSpinBox::up-arrow {
-    border-top-left-radius: 3px;
-    border-top-right-radius: 3px;
 }
 
 QDoubleSpinBox::down-arrow {
-    border-bottom-left-radius: 3px;
-    border-bottom-right-radius: 3px;
 }
 
 QDoubleSpinBox::up-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
@@ -296,46 +292,47 @@ QDoubleSpinBox::up-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
 }
 
 QCheckBox {
-    color: #cfe0dd;
-    font-size: 10px;
+    color: #C6D0DA;
+    font-family: "DIN Condensed";
+    font-size: 13px;
+    letter-spacing: 1px;
     font-weight: bold;
     spacing: 6px;
 }
 
 QCheckBox:disabled {
-    color: #4a5359;
+    color: #4F5B68;
 }
 
 QCheckBox::indicator {
     width: 13px;
     height: 13px;
-    border: 1px solid #3d4f57;
-    border-radius: 2px;
-    background-color: #0d1114;
+    border: 1px solid #48566A;
+    background-color: #0C1116;
 }
 
 QCheckBox::indicator:checked {
-    background-color: #5ec9c2;
-    border-color: #5ec9c2;
+    background-color: #4A9FD4;
+    border-color: #4A9FD4;
 }
 
 QCheckBox::indicator:hover {
-    border-color: #5ec9c2;
+    border-color: #4A9FD4;
 }
 
 QCheckBox::indicator:disabled {
-    border-color: #24303a;
-    background-color: #12161a;
+    border-color: #283340;
+    background-color: #121820;
 }
 
 QLabel#stageLabel {
     font-weight: bold;
-    font-size: 13px;
-    color: #e8b23c;
+    font-family: "DIN Condensed"; font-size: 17px; letter-spacing: 1px;
+    color: #C9952F;
 }
 
 QSplitter::handle {
-    background-color: #1c252b;
+    background-color: #283340;
 }
 
 QScrollArea {
@@ -344,16 +341,35 @@ QScrollArea {
 }
 
 QScrollBar:vertical {
-    background: #0e1215;
+    background: #0A0E12;
     width: 8px;
 }
 
 QScrollBar::handle:vertical {
-    background: #263038;
-    border-radius: 4px;
+    background: #3A4756;
     min-height: 20px;
 }
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0;
+}
+
+QPushButton#cardConfirm, QPushButton#cardReject {
+    font-family: "DIN Condensed";
+    font-size: 11px;
+    letter-spacing: 1px;
+    padding: 1px 4px;
+    min-height: 0;
+}
+
+QPushButton#cardConfirm {
+    background-color: #4A211C;
+    border: 1px solid #C04438;
+    color: #E8EDF2;
+}
+
+QPushButton#cardReject {
+    background-color: #182029;
+    border: 1px solid #3A4756;
+    color: #7B8794;
 }

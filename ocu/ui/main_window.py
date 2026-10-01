@@ -260,6 +260,8 @@ class MainWindow(QMainWindow):
         self.map_view.bayLaunchRequested.connect(self._on_bay_launch_requested)
 
         self.threat_panel.threatSelected.connect(self._on_threat_selected)
+        self.threat_panel.confirmRequested.connect(self._on_alert_confirmed)
+        self.threat_panel.rejectRequested.connect(self._on_alert_rejected)
 
         self.context_panel.takeManualRequested.connect(self._on_take_manual)
         self.context_panel.releaseManualRequested.connect(self._on_release_manual)
@@ -673,6 +675,7 @@ class MainWindow(QMainWindow):
             )
 
     def _on_alert_confirmed(self, detection: dict) -> None:
+        self.alert_banner.dismiss_for(detection)
         self.map_view.confirm_detection(detection["x"], detection["y"])
         self.threat_panel.set_status(detection["x"], detection["y"], "CONFIRMED")
         self.event_log.log(
@@ -681,6 +684,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_alert_rejected(self, detection: dict) -> None:
+        self.alert_banner.dismiss_for(detection)
         self.threat_panel.set_status(detection["x"], detection["y"], "CLEARED")
         self.event_log.log(
             self.playback.clock_s, f"Alert rejected at ({detection['x']:.0f}, {detection['y']:.0f})"
@@ -780,6 +784,16 @@ class MainWindow(QMainWindow):
     # --- manual driving ---
 
     def keyPressEvent(self, event) -> None:
+        # One key back to a clean start, so a demo can always be recovered in
+        # front of an audience. Modified and function keys only, so it can
+        # never collide with the WASD driving keys.
+        if event.key() == Qt.Key_F5 or (
+            event.key() == Qt.Key_R and event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)
+        ):
+            self._keys_down.clear()
+            self._on_reset_clicked()
+            self.event_log.log(0.0, "Demo reset: fleet, map and mission returned to start")
+            return
         if not event.isAutoRepeat():
             self._keys_down.add(event.key())
         super().keyPressEvent(event)

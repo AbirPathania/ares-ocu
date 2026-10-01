@@ -57,7 +57,7 @@ class Readout(QWidget):
         self._label = label
         self._value = value
         self._suffix = suffix
-        self._color = QColor("#e6ecea")
+        self._color = QColor("#C6D0DA")
         self.setFixedHeight(40)
 
     def set_value(self, value: str, color: QColor | None = None) -> None:
@@ -71,18 +71,18 @@ class Readout(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect())
 
-        painter.setPen(QPen(QColor("#6c7a80")))
+        painter.setPen(QPen(QColor("#7B8794")))
         painter.setFont(QFont("Menlo", 8))
         painter.drawText(QRectF(rect.left(), rect.top(), rect.width(), 12), Qt.AlignLeft, self._label)
 
         painter.setPen(QPen(self._color))
-        painter.setFont(QFont("Menlo", 16, QFont.Bold))
+        painter.setFont(QFont("DIN Condensed", 16 + 3, QFont.Bold))
         painter.drawText(
             QRectF(rect.left(), rect.top() + 13, rect.width(), 24), Qt.AlignLeft, self._value
         )
 
         if self._suffix:
-            painter.setPen(QPen(QColor("#6c7a80")))
+            painter.setPen(QPen(QColor("#7B8794")))
             painter.setFont(QFont("Menlo", 9))
             painter.drawText(
                 QRectF(rect.left(), rect.top() + 18, rect.width(), 18), Qt.AlignRight, self._suffix
@@ -125,22 +125,22 @@ class SensorStrip(QWidget):
             y = i * 19 + 2
             hit_age = now - self._last_hit.get(key, -1e9)
             if hit_age < HIT_DECAY_S:
-                color, state = QColor("#e8b23c"), "HIT"
+                color, state = QColor("#C9952F"), "HIT"
             elif self._scanning:
-                color, state = QColor("#5ec9c2"), "SCANNING"
+                color, state = QColor("#4A9FD4"), "SCANNING"
             else:
-                color, state = QColor("#4a5359"), "IDLE"
+                color, state = QColor("#4F5B68"), "IDLE"
 
             painter.setPen(Qt.NoPen)
             painter.setBrush(color)
             painter.drawEllipse(QRectF(2, y + 5, 6, 6))
 
-            painter.setPen(QPen(QColor("#b8c4c1") if state != "IDLE" else QColor("#5a6469")))
+            painter.setPen(QPen(QColor("#C6D0DA") if state != "IDLE" else QColor("#4F5B68")))
             painter.setFont(QFont("Menlo", 9))
             painter.drawText(QRectF(14, y, self.width() - 90, 16), Qt.AlignLeft | Qt.AlignVCenter, label)
 
             painter.setPen(QPen(color))
-            painter.setFont(QFont("Menlo", 8, QFont.Bold))
+            painter.setFont(QFont("DIN Condensed", 8 + 3, QFont.Bold))
             painter.drawText(
                 QRectF(self.width() - 80, y, 78, 16), Qt.AlignRight | Qt.AlignVCenter, state
             )
@@ -307,7 +307,7 @@ class AircraftPanel(QWidget):
         self.heading.set_value(f"{heading:.0f}°")
 
     def update_battery(self, pct: float) -> None:
-        color = QColor("#e05c4b") if pct <= 25 else QColor("#e8b23c") if pct <= 50 else QColor("#e6ecea")
+        color = QColor("#C04438") if pct <= 25 else QColor("#C9952F") if pct <= 50 else QColor("#C6D0DA")
         self.battery.set_value(f"{pct:.0f}%", color)
 
     def update_link(self, link_state: str) -> None:

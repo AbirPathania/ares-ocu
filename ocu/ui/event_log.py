@@ -25,9 +25,9 @@ SAMPLE_MS = 500
 LANE_H = 13
 
 LINK_COLORS = {
-    "CONNECTED": QColor("#3f8d86"),
-    "DEGRADED": QColor("#e8b23c"),
-    "LOST": QColor("#e05c4b"),
+    "CONNECTED": QColor("#4F9D69"),
+    "DEGRADED": QColor("#C9952F"),
+    "LOST": QColor("#C04438"),
 }
 
 
@@ -66,7 +66,7 @@ class LinkHistoryStrip(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.setPen(QPen(QColor("#6c7a80")))
+        painter.setPen(QPen(QColor("#7B8794")))
         painter.setFont(QFont("Menlo", 8))
         painter.drawText(QRectF(0, 0, self.width(), 14), Qt.AlignLeft, "LINK HISTORY  ← 60s")
 
@@ -77,7 +77,7 @@ class LinkHistoryStrip(QWidget):
 
         for i, uid in enumerate(ROW_ORDER):
             y = 16 + i * LANE_H
-            painter.setPen(QPen(QColor("#7c8891")))
+            painter.setPen(QPen(QColor("#7B8794")))
             painter.setFont(QFont("Menlo", 8))
             painter.drawText(QRectF(0, y, label_w, LANE_H), Qt.AlignLeft | Qt.AlignVCenter, uid)
 
@@ -85,7 +85,7 @@ class LinkHistoryStrip(QWidget):
             for j, state in enumerate(self._history[uid]):
                 painter.fillRect(
                     QRectF(track_x + j * sample_w, y + 3, sample_w + 0.6, LANE_H - 6),
-                    LINK_COLORS.get(state, QColor("#3a4149")),
+                    LINK_COLORS.get(state, QColor("#3A4756")),
                 )
         painter.end()
 

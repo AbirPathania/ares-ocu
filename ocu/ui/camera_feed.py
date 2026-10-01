@@ -20,9 +20,9 @@ from PySide6.QtWidgets import QWidget
 TICK_MS = 220
 
 LINK_COLORS = {
-    "CONNECTED": QColor("#5ec9c2"),
-    "DEGRADED": QColor("#e8b23c"),
-    "LOST": QColor("#e05c4b"),
+    "CONNECTED": QColor("#4A9FD4"),
+    "DEGRADED": QColor("#C9952F"),
+    "LOST": QColor("#C04438"),
 }
 
 
@@ -75,23 +75,23 @@ class SimulatedCameraFeed(QWidget):
         rect = QRectF(self.rect())
 
         if self._emcon:
-            painter.fillRect(rect, QColor("#0b0e11"))
-            painter.setPen(QPen(QColor("#5c4a2a")))
+            painter.fillRect(rect, QColor("#0C1116"))
+            painter.setPen(QPen(QColor("#4A4128")))
             painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
-            painter.setPen(QPen(QColor("#7c6a3a")))
-            painter.setFont(QFont("Menlo", 7, QFont.Bold))
+            painter.setPen(QPen(QColor("#8A7A4A")))
+            painter.setFont(QFont("DIN Condensed", 7 + 3, QFont.Bold))
             painter.drawText(QRectF(2, 2, rect.width() - 4, 12), Qt.AlignLeft, self._label)
-            painter.setPen(QPen(QColor("#e8b23c")))
+            painter.setPen(QPen(QColor("#C9952F")))
             painter.drawText(rect, Qt.AlignCenter, "EMCON \u00b7 NO DOWNLINK")
             painter.end()
             return
 
         if not self._active:
-            painter.fillRect(rect, QColor("#0b0e11"))
-            painter.setPen(QPen(QColor("#3a4149")))
+            painter.fillRect(rect, QColor("#0C1116"))
+            painter.setPen(QPen(QColor("#3A4756")))
             painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
-            painter.setPen(QPen(QColor("#4a5359")))
-            painter.setFont(QFont("Menlo", 7, QFont.Bold))
+            painter.setPen(QPen(QColor("#4F5B68")))
+            painter.setFont(QFont("DIN Condensed", 7 + 3, QFont.Bold))
             painter.drawText(QRectF(2, 2, rect.width() - 4, 12), Qt.AlignLeft, self._label)
             painter.setFont(QFont("Menlo", 7))
             painter.drawText(rect, Qt.AlignCenter, "IN BAY")
@@ -99,8 +99,8 @@ class SimulatedCameraFeed(QWidget):
             return
 
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        gradient.setColorAt(0.0, QColor("#141b1f"))
-        gradient.setColorAt(1.0, QColor("#0a0d10"))
+        gradient.setColorAt(0.0, QColor("#141C24"))
+        gradient.setColorAt(1.0, QColor("#0C1116"))
         painter.fillRect(rect, gradient)
 
         # cheap synthetic "static": a handful of translucent bars, reseeded each tick
@@ -125,16 +125,16 @@ class SimulatedCameraFeed(QWidget):
         painter.drawLine(cx - 6, cy, cx + 6, cy)
         painter.drawLine(cx, cy - 6, cx, cy + 6)
 
-        painter.setFont(QFont("Menlo", 7, QFont.Bold))
-        painter.setPen(QPen(QColor("#cfe0dd")))
+        painter.setFont(QFont("DIN Condensed", 7 + 3, QFont.Bold))
+        painter.setPen(QPen(QColor("#C6D0DA")))
         painter.drawText(QRectF(4, 2, rect.width() - 8, 11), Qt.AlignLeft, self._label)
 
-        painter.setPen(QPen(QColor("#7c8891")))
+        painter.setPen(QPen(QColor("#7B8794")))
         painter.setFont(QFont("Menlo", 7))
         painter.drawText(QRectF(4, rect.height() - 13, rect.width() - 8, 11), Qt.AlignLeft, self._telemetry)
 
-        painter.setPen(QPen(QColor("#e8b23c")))
-        painter.setFont(QFont("Menlo", 6, QFont.Bold))
+        painter.setPen(QPen(QColor("#C9952F")))
+        painter.setFont(QFont("DIN Condensed", 6 + 3, QFont.Bold))
         painter.drawText(QRectF(0, 2, rect.width() - 4, 11), Qt.AlignRight, "SIMULATED")
 
         painter.end()

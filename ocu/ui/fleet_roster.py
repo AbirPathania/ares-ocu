@@ -15,20 +15,16 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from ocu.ui.launch_console import short_label
+from ocu.ui.theme import UNIT_TINTS
 
 CARD_HEIGHT = 54
 
-UNIT_COLORS = {
-    "rover": QColor("#5ec9c2"),
-    "tricopter-1": QColor("#e8b23c"),
-    "tricopter-2": QColor("#c97ee8"),
-    "tricopter-3": QColor("#7ea8e8"),
-}
+UNIT_COLORS = dict(UNIT_TINTS)
 
 LINK_COLORS = {
-    "CONNECTED": QColor("#5ec9c2"),
-    "DEGRADED": QColor("#e8b23c"),
-    "LOST": QColor("#e05c4b"),
+    "CONNECTED": QColor("#4A9FD4"),
+    "DEGRADED": QColor("#C9952F"),
+    "LOST": QColor("#C04438"),
 }
 
 ROW_ORDER = ["rover", "tricopter-1", "tricopter-2", "tricopter-3"]
@@ -36,10 +32,10 @@ ROW_ORDER = ["rover", "tricopter-1", "tricopter-2", "tricopter-3"]
 
 def battery_color(pct: float) -> QColor:
     if pct <= 25:
-        return QColor("#e05c4b")
+        return QColor("#C04438")
     if pct <= 50:
-        return QColor("#e8b23c")
-    return QColor("#5ec9c2")
+        return QColor("#C9952F")
+    return QColor("#4A9FD4")
 
 
 class UnitCard(QWidget):
@@ -68,13 +64,13 @@ class UnitCard(QWidget):
         rect = QRectF(self.rect()).adjusted(0, 0, -1, -1)
         accent = UNIT_COLORS.get(self.unit_id, QColor("#cccccc"))
 
-        painter.fillRect(rect, QColor("#1d262b") if self.selected else QColor("#15191d"))
-        painter.setPen(QPen(QColor("#5ec9c2") if self.selected else QColor("#222c33")))
+        painter.fillRect(rect, QColor("#182029") if self.selected else QColor("#121820"))
+        painter.setPen(QPen(QColor("#4A9FD4") if self.selected else QColor("#283340")))
         painter.drawRect(rect)
         painter.fillRect(QRectF(rect.left(), rect.top(), 3, rect.height()), accent)
 
-        painter.setPen(QPen(QColor("#e6ecea")))
-        painter.setFont(QFont("Menlo", 11, QFont.Bold))
+        painter.setPen(QPen(QColor("#C6D0DA")))
+        painter.setFont(QFont("DIN Condensed", 11 + 3, QFont.Bold))
         painter.drawText(
             QRectF(rect.left() + 10, rect.top() + 5, 90, 15),
             Qt.AlignLeft | Qt.AlignVCenter,
@@ -82,8 +78,8 @@ class UnitCard(QWidget):
         )
 
         mode_text = ("\U0001F512 " if self.manual_holder else "") + self.control_mode
-        painter.setPen(QPen(QColor("#f4d78a") if self.manual_holder else QColor("#7c8891")))
-        painter.setFont(QFont("Menlo", 8, QFont.Bold))
+        painter.setPen(QPen(QColor("#D9B257") if self.manual_holder else QColor("#7B8794")))
+        painter.setFont(QFont("DIN Condensed", 8 + 3, QFont.Bold))
         painter.drawText(
             QRectF(rect.left() + 100, rect.top() + 5, 96, 15), Qt.AlignLeft | Qt.AlignVCenter, mode_text
         )
@@ -95,13 +91,13 @@ class UnitCard(QWidget):
 
         bar_rect = QRectF(rect.left() + 10, rect.top() + 25, rect.width() - 62, 5)
         painter.setPen(Qt.NoPen)
-        painter.fillRect(bar_rect, QColor("#222c33"))
+        painter.fillRect(bar_rect, QColor("#283340"))
         fill = QRectF(bar_rect)
         fill.setWidth(bar_rect.width() * min(max(self.battery_pct / 100.0, 0.0), 1.0))
         painter.fillRect(fill, battery_color(self.battery_pct))
 
         painter.setPen(QPen(battery_color(self.battery_pct)))
-        painter.setFont(QFont("Menlo", 8, QFont.Bold))
+        painter.setFont(QFont("DIN Condensed", 8 + 3, QFont.Bold))
         painter.drawText(
             QRectF(rect.right() - 46, rect.top() + 21, 40, 14),
             Qt.AlignRight | Qt.AlignVCenter,
@@ -109,7 +105,7 @@ class UnitCard(QWidget):
         )
 
         task = "IN BAY" if self.docked else self.current_task.upper()
-        painter.setPen(QPen(QColor("#8fa39e") if self.docked else QColor("#7c8891")))
+        painter.setPen(QPen(QColor("#7B8794") if self.docked else QColor("#7B8794")))
         painter.setFont(QFont("Menlo", 8))
         painter.drawText(
             QRectF(rect.left() + 10, rect.top() + 36, rect.width() - 20, 14),
