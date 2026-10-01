@@ -163,8 +163,9 @@ class RoverPanel(QWidget):
 
         self.speed = Readout("SPEED", "0.0", f"/ {ROVER_TOP_SPEED_KMH:.0f} km/h")
         self.heading = Readout("HEADING", "0°")
-        self.compute = Readout("COMPUTE LOAD", f"{ROVER_COMPUTE_LOAD_W:.0f}", "W")
-        for widget in (self.speed, self.heading, self.compute):
+        self.power = Readout("POWER DRAW", f"{ROVER_COMPUTE_LOAD_W:.0f}", "W")
+        self.endurance = Readout("ENDURANCE", "\u2014")
+        for widget in (self.speed, self.heading, self.power, self.endurance):
             layout.addWidget(widget)
 
         suite_label = QLabel("DETECTION SUITE")
@@ -210,6 +211,15 @@ class RoverPanel(QWidget):
         self.heading.set_value(f"{heading:.0f}°")
         self._last_pos = (x, y)
 
+    def update_power(self, watts: float, endurance: str) -> None:
+        """Total draw, not just the compute slice.
+
+        Endurance is only checkable against the 430 Wh baseline if the draw
+        it was computed from is on screen next to it.
+        """
+        self.power.set_value(f"{watts:.0f}")
+        self.endurance.set_value(endurance)
+
     def set_manual(self, is_holder: bool) -> None:
         self.manual_btn.setText("RELEASE MANUAL" if is_holder else "TAKE MANUAL CONTROL")
         self.manual_hint.setVisible(is_holder)
@@ -234,7 +244,8 @@ class AircraftPanel(QWidget):
         self.heading = Readout("HEADING", "0°")
         self.battery = Readout("BATTERY", "100%")
         self.stage = Readout("FLIGHT MODE", "—")
-        for widget in (self.altitude, self.heading, self.battery, self.stage):
+        self.endurance = Readout("ENDURANCE", "—")
+        for widget in (self.altitude, self.heading, self.battery, self.stage, self.endurance):
             layout.addWidget(widget)
 
         command_label = QLabel("COMMANDED ALTITUDE")
@@ -315,6 +326,9 @@ class AircraftPanel(QWidget):
 
     def update_stage(self, stage: str) -> None:
         self.stage.set_value(stage)
+
+    def update_endurance(self, endurance: str, regime: str) -> None:
+        self.endurance.set_value(f"{endurance}  {regime}")
 
     def set_manual(self, is_holder: bool) -> None:
         self.manual_btn.setText("RELEASE MANUAL" if is_holder else "TAKE MANUAL CONTROL")

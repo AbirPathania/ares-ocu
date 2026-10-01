@@ -33,6 +33,16 @@ from ocu.core.control_authority import ControlAuthority
 from ocu.core.flight_director import AircraftMode, FlightDirector
 from ocu.core.geofence import Geofence
 from ocu.core.mesh_state import MeshLink, VoxelObservation, voxel_key
+from ocu.core.power import (
+    charge_pct_per_s,
+    flight_regime,
+    format_endurance,
+    rover_drain_pct_per_s,
+    rover_endurance_s,
+    rover_power_w,
+    tricopter_drain_pct_per_s,
+    tricopter_endurance_s,
+)
 from ocu.core.unit import Unit
 from ocu.sim.playback_engine import PlaybackEngine
 from ocu.ui.alert_banner import AlertBanner
@@ -54,7 +64,7 @@ SCANNING_PHASES = {"drive_and_scan", "reactive_launch", "aerial_recon", "fusion"
 
 
 def _default_units() -> dict[str, Unit]:
-    units = {"rover": Unit(id="rover", kind="rover", current_task="idle")}
+    units = {"rover": Unit(id="rover", kind="rover", battery_pct=96.0, current_task="idle")}
     for tricopter_id in TRICOPTER_IDS:
         units[tricopter_id] = Unit(id=tricopter_id, kind="tricopter", current_task="docked")
     return units
@@ -461,11 +471,79 @@ class MainWindow(QMainWindow):
             if self.selected_unit_id == unit_id:
                 self.context_panel.aircraft_panel.update_pose(z, heading)
 
+        self._tick_power(dt)
+
         for unit_id, event in events:
             self._handle_director_event(unit_id, event)
 
         if self.selected_unit_id in TRICOPTER_IDS:
             self._refresh_aircraft_flight_state(self.selected_unit_id)
+
+    def _tick_power(self, dt_s: float) -> None:
+        """Integrate every battery from what that unit is actually doing.
+
+        Drain follows the power model in core/power.py, which is built to
+        reproduce the published baseline: 3.0 h for the rover at its mission
+        average, 10 to 12 minutes of cruise for an ARES-A, 8 to 10 minutes to
+        charge. Hovering costs more than cruising, climbing more than either,
+        and a docked aircraft charges and tapers.
+        """
+        # Battery has to burn on mission time, not wall-clock time. The
+        # director ticks in real seconds, but the mission can be played back
+        # faster; integrating against the wall clock would leave a
+        # fast-forwarded run showing a pack that barely moved.
+        if self.playback.playing:
+            dt_s *= self.playback.speed
+
+        rover = self.units["rover"]
+        rover_speed = self.flight_director.speed_of("rover") or 0.0
+        rover.battery_pct = max(0.0, rover.battery_pct - rover_drain_pct_per_s(rover_speed) * dt_s)
+
+        for unit_id in TRICOPTER_IDS:
+            unit = self.units.get(unit_id)
+            if unit is None:
+                continue
+            if self._docked_state.get(unit_id, True):
+                unit.battery_pct = min(
+                    100.0, unit.battery_pct + charge_pct_per_s(unit.battery_pct) * dt_s
+                )
+                continue
+            state = self.flight_director.aircraft.get(unit_id)
+            speed = state.body.speed_ms if state else 0.0
+            vertical = state.body.vz if state else 0.0
+            unit.battery_pct = max(
+                0.0, unit.battery_pct - tricopter_drain_pct_per_s(speed, vertical) * dt_s
+            )
+
+        if self.selected_unit_id == "rover":
+            self.context_panel.rover_panel.update_power(
+                rover_power_w(rover_speed), self._endurance_text("rover")
+            )
+        elif self.selected_unit_id in TRICOPTER_IDS:
+            state = self.flight_director.aircraft.get(self.selected_unit_id)
+            speed = state.body.speed_ms if state else 0.0
+            vertical = state.body.vz if state else 0.0
+            self.context_panel.aircraft_panel.update_endurance(
+                self._endurance_text(self.selected_unit_id), flight_regime(speed, vertical)
+            )
+
+        self._refresh_all_rows()
+
+    def _endurance_text(self, unit_id: str) -> str:
+        """Time remaining at the current draw, which is what an operator reads.
+
+        A three hour platform barely moves its percentage across a ninety
+        second mission. That is correct, and on its own it is also useless.
+        """
+        unit = self.units[unit_id]
+        if unit.kind == "rover":
+            return format_endurance(rover_endurance_s(unit.battery_pct, self.flight_director.speed_of("rover") or 0.0))
+        if self._docked_state.get(unit_id, True):
+            return "CHG" if unit.battery_pct < 100.0 else "FULL"
+        state = self.flight_director.aircraft.get(unit_id)
+        speed = state.body.speed_ms if state else 0.0
+        vertical = state.body.vz if state else 0.0
+        return format_endurance(tricopter_endurance_s(unit.battery_pct, speed, vertical))
 
     def _handle_director_event(self, unit_id: str, event: str) -> None:
         if event == "DOCKED":
@@ -817,7 +895,8 @@ class MainWindow(QMainWindow):
         for unit_id, unit in self.units.items():
             manual = self.control_authority.manual_holder == unit_id
             self.fleet_roster.update_unit(
-                unit_id, unit.control_mode, unit.battery_pct, unit.link_state, unit.current_task, manual
+                unit_id, unit.control_mode, unit.battery_pct, unit.link_state, unit.current_task,
+                manual, self._endurance_text(unit_id),
             )
             self.event_log.set_link(unit_id, unit.link_state)
             feed = self.camera_feeds.get(unit_id)
@@ -826,7 +905,10 @@ class MainWindow(QMainWindow):
                 if unit.kind == "rover":
                     feed.set_telemetry(f"{unit.battery_pct:.0f}%  HDG {unit.pose.heading:.0f}°")
                 else:
-                    feed.set_telemetry(f"{unit.battery_pct:.0f}%  ALT {unit.pose.z:.0f}m")
+                    feed.set_telemetry(
+                        f"{unit.battery_pct:.0f}%  {self._endurance_text(unit_id)}  "
+                        f"ALT {unit.pose.z:.0f}m"
+                    )
 
         lowest = min(u.battery_pct for u in self.units.values())
         battery_color = "#e05c4b" if lowest <= 25 else "#e8b23c" if lowest <= 50 else "#cfe0dd"

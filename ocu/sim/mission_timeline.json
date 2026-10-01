@@ -50,12 +50,6 @@
     ]
   },
 
-  "battery_pct": {
-    "rover":   [{ "t": 0, "pct": 96 }, { "t": 90, "pct": 78 }],
-    "tricopter-1": [{ "t": 30, "pct": 100 }, { "t": 78, "pct": 34 }, { "t": 90, "pct": 46 }],
-    "tricopter-2": [{ "t": 30, "pct": 100 }, { "t": 78, "pct": 31 }, { "t": 90, "pct": 44 }],
-    "tricopter-3": [{ "t": 0, "pct": 100 }, { "t": 90, "pct": 100 }]
-  },
 
   "detections": [
     { "t": 40, "sensor": "gpr",                  "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.62, "type": "unknown" },

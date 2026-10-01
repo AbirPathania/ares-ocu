@@ -106,7 +106,8 @@ real decision from the team, not this build's placeholder.
 
 | Element | Status |
 |---|---|
-| Unit positions, battery, detections | Scripted, from `mission_timeline.json` |
+| Unit positions, detections | Scripted, from `mission_timeline.json` |
+| Battery and endurance | Real, integrated from the power budget in `core/power.py`. Reproduces the baseline: 430 Wh at 143 W gives 3.0 h, ARES-A cruise gives 11 min, a 30 W pad charges in 9 min |
 | CRDT merge logic, `core/mesh_state.py` | Real |
 | Formation math, `core/formation.py` | Real, computed live from operator input |
 | Launch/recovery state machines | Real, tick on a real clock |

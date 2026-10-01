@@ -217,6 +217,25 @@ in the second category was cut.
   what the machine is doing; the rail says how far through the mission
   that is and what is next.
 
+- **Battery moved from scripted to derived**, which changes its section 13
+  classification. The mission file used to carry hand-written battery
+  curves and they were wrong by about an order of magnitude: the tricopters
+  discharged in 73 s against a published 10 to 12 minutes, the rover in 8
+  minutes against a published 3.0 hours, and a docked aircraft charged in
+  under 2 minutes against a published 8 to 10. Battery is now integrated
+  from `core/power.py` using the real motion state, and the published
+  figures fall back out of it. Deriving it is more honest than scripting
+  it, not less: the numbers now agree with the spec sheet by construction
+  rather than by my having typed them correctly.
+
+  What is genuinely this build's model, and not from the baseline: the
+  split of the rover's 143 W between a 45 W standing load and a
+  speed-dependent term, and the factors by which a rotorcraft's draw
+  differs between hover, cruise, climb and descent. The baseline gives
+  totals, not breakdowns. The factors are chosen so both published rover
+  figures (3.0 h continuous, about 4 h mixed duty) and the published ARES-A
+  cruise band fall out of one model.
+
 ## Bugs found by running the thing
 
 - **Docked tricopter-1/tricopter-2 rendered as separate floating icons before

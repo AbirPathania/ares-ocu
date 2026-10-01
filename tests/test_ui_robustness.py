@@ -185,3 +185,44 @@ def test_cut_link_makes_the_divergence_visible_on_the_map(app):
     assert window.map_view._mesh_rover == window.map_view._mesh_aircraft
     assert window.map_view._holdings[(400, 160, 0)] == {"rover", "aircraft"}
     assert window.map_view._reconciled_flash > 0
+
+
+def test_battery_burns_on_mission_time_not_wall_clock(app):
+    """The director ticks in real seconds but the mission can be played back
+    faster. Integrating battery against the wall clock left a fast-forwarded
+    run showing a pack that had barely moved."""
+    slow, fast = MainWindow(), MainWindow()
+    slow.playback.set_speed(1.0)
+    fast.playback.set_speed(10.0)
+    slow.playback.play()
+    fast.playback.play()
+
+    for _ in range(50):
+        slow._on_director_tick()
+    for _ in range(5):
+        fast._on_director_tick()
+
+    # Same mission time elapsed either way, so the same charge should be gone.
+    slow_used = 96.0 - slow.units["rover"].battery_pct
+    fast_used = 96.0 - fast.units["rover"].battery_pct
+    assert slow_used > 0
+    assert abs(slow_used - fast_used) < slow_used * 0.05
+
+
+def test_battery_endurance_matches_the_published_platform_figures(app):
+    """The figures an investor can check against the spec sheet."""
+    window = MainWindow()
+    window._on_bay_launch_requested()
+    console = window.context_panel.launch_console
+    console._on_stage_clicked()
+    console._on_launch_confirmed()
+    pump(app, 60)
+
+    # A 3 hour rover must barely move across a 90 second mission.
+    for _ in range(900):
+        window._on_director_tick()
+    assert 96.0 - window.units["rover"].battery_pct < 1.0
+
+    # An 11 minute aircraft must lose a believable slice, not most of the pack.
+    used = 100.0 - window.units["tricopter-1"].battery_pct
+    assert 5.0 < used < 30.0

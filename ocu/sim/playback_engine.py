@@ -92,6 +92,10 @@ class PlaybackEngine(QObject):
         self._speed = speed
 
     @property
+    def speed(self) -> float:
+        return self._speed
+
+    @property
     def clock_s(self) -> float:
         return self._clock_s
 
@@ -133,7 +137,6 @@ class PlaybackEngine(QObject):
     def _apply_at(self, t: float) -> None:
         self._advance_phase(t)
         self._emit_unit_poses(t)
-        self._emit_batteries(t)
         self._emit_new_detections(t)
         self._emit_new_link_events(t)
         self._tick_reactive_sequencer()
@@ -164,12 +167,6 @@ class PlaybackEngine(QObject):
                     float(pose.get("z", 0.0)),
                     float(pose.get("heading", 0.0)),
                 )
-
-    def _emit_batteries(self, t: float) -> None:
-        for unit_id, keyframes in self._timeline.get("battery_pct", {}).items():
-            battery = _interpolate_series(keyframes, t)
-            if battery is not None:
-                self.unitBatteryChanged.emit(unit_id, float(battery.get("pct", 100.0)))
 
     def _emit_new_detections(self, t: float) -> None:
         for i, detection in enumerate(self._timeline.get("detections", [])):

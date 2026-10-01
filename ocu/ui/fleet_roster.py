@@ -52,6 +52,7 @@ class UnitCard(QWidget):
         self.link_state = "CONNECTED"
         self.current_task = "idle"
         self.manual_holder = False
+        self.endurance = ""
         self.docked = unit_id != "rover"
         self.selected = False
 
@@ -97,12 +98,23 @@ class UnitCard(QWidget):
         painter.fillRect(fill, battery_color(self.battery_pct))
 
         painter.setPen(QPen(battery_color(self.battery_pct)))
-        painter.setFont(QFont("DIN Condensed", 8 + 3, QFont.Bold))
+        painter.setFont(QFont("DIN Condensed", 11, QFont.Bold))
         painter.drawText(
             QRectF(rect.right() - 46, rect.top() + 21, 40, 14),
             Qt.AlignRight | Qt.AlignVCenter,
             f"{self.battery_pct:.0f}%",
         )
+
+        # Time remaining at the current draw. The percentage alone barely
+        # moves on a three hour platform, which tells an operator nothing.
+        if self.endurance:
+            painter.setPen(QPen(QColor("#7B8794")))
+            painter.setFont(QFont("Menlo", 8))
+            painter.drawText(
+                QRectF(rect.right() - 120, rect.top() + 36, 112, 14),
+                Qt.AlignRight | Qt.AlignVCenter,
+                self.endurance,
+            )
 
         task = "IN BAY" if self.docked else self.current_task.upper()
         painter.setPen(QPen(QColor("#7B8794") if self.docked else QColor("#7B8794")))
@@ -151,6 +163,7 @@ class FleetRoster(QWidget):
         link_state: str,
         current_task: str,
         manual_holder: bool = False,
+        endurance: str = "",
     ) -> None:
         card = self.cards.get(unit_id)
         if card is None:
@@ -160,4 +173,5 @@ class FleetRoster(QWidget):
         card.link_state = link_state
         card.current_task = current_task
         card.manual_holder = manual_holder
+        card.endurance = endurance
         card.update()
