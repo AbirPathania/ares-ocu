@@ -236,6 +236,21 @@ in the second category was cut.
   figures (3.0 h continuous, about 4 h mixed duty) and the published ARES-A
   cruise band fall out of one model.
 
+- **LiDAR range, angular resolution and scan rate** (`core/lidar.py`:
+  32 m, one ray per degree, 4 Hz). The technical baseline names LiDAR in
+  the rover's perception stack and says phase 2 runs "LiDAR inertial SLAM",
+  but specifies no unit. These are ordinary figures for a ground vehicle's
+  scanner and are this build's model.
+
+- **The terrain itself is generated, not surveyed.** `core/terrain.py`
+  builds a classified world from a fixed seed: open ground, a worn track,
+  scrub, tree cover and rock. It is a plausible piece of ground, not a real
+  place, and nothing about it should be read as site data. What is real is
+  the *process*: the rover's map is built only from what its scanner has
+  actually reached, with the ground truth kept strictly separate from the
+  rover's belief, so sensor shadows appear and close exactly where
+  occlusion says they should.
+
 ## Bugs found by running the thing
 
 - **Docked tricopter-1/tricopter-2 rendered as separate floating icons before

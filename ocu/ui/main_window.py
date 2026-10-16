@@ -33,6 +33,7 @@ from ocu.core.comms import GHOST, LCA, STANDARD, profile_for
 from ocu.core.control_authority import ControlAuthority
 from ocu.core.flight_director import AircraftMode, FlightDirector
 from ocu.core.geofence import Geofence
+from ocu.core.lidar import LIDAR_SCAN_HZ, cast_scan
 from ocu.core.mesh_state import MeshLink, VoxelObservation, voxel_key
 from ocu.core.power import (
     charge_pct_per_s,
@@ -44,6 +45,7 @@ from ocu.core.power import (
     tricopter_drain_pct_per_s,
     tricopter_endurance_s,
 )
+from ocu.core.terrain import PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
 from ocu.sim.playback_engine import PlaybackEngine
 from ocu.ui.alert_banner import AlertBanner
@@ -92,6 +94,10 @@ class MainWindow(QMainWindow):
         self._position_owner: dict[str, str] = {uid: "scripted" for uid in ALL_UNIT_IDS}
         self._keys_down: set[int] = set()
         self._comms = profile_for(STANDARD)
+        # Ground truth, and separately what the rover has actually seen of it.
+        self.terrain = TerrainWorld()
+        self.perception = PerceptionMap()
+        self._last_scan_s = -1e9
         self._last_downlink_s = 0.0
         self._silence_began_s: float | None = None
         self.setFocusPolicy(Qt.StrongFocus)
@@ -478,12 +484,33 @@ class MainWindow(QMainWindow):
                 self.context_panel.aircraft_panel.update_pose(z, heading)
 
         self._tick_power(dt)
+        self._tick_lidar()
 
         for unit_id, event in events:
             self._handle_director_event(unit_id, event)
 
         if self.selected_unit_id in TRICOPTER_IDS:
             self._refresh_aircraft_flight_state(self.selected_unit_id)
+
+    def _tick_lidar(self) -> None:
+        """Sweep the rover's scanner and fold the returns into its map.
+
+        The scan runs on the rover's own clock, not the operator's: the
+        vehicle keeps building its map whatever the downlink is doing. What
+        the comms posture decides is whether the operator gets to see it,
+        which is why Ghost freezes the picture while the map underneath
+        carries on filling in.
+        """
+        now = self.playback.clock_s
+        if now - self._last_scan_s < 1.0 / LIDAR_SCAN_HZ:
+            return
+        self._last_scan_s = now
+
+        rover = self.units["rover"]
+        cast_scan(self.terrain, self.perception, rover.pose.x, rover.pose.y)
+        new_cells = self.perception.drain_new()
+        if new_cells and self._comms.telemetry:
+            self.map_view.add_perception(new_cells, self.perception.coverage_m2())
 
     def _tick_power(self, dt_s: float) -> None:
         """Integrate every battery from what that unit is actually doing.
@@ -869,6 +896,9 @@ class MainWindow(QMainWindow):
     def _on_reset_clicked(self) -> None:
         self.playback.reset()
         self.map_view.clear()
+        self.perception.clear()
+        self.map_view.clear_perception()
+        self._last_scan_s = -1e9
         self.event_log.clear()
         self.threat_panel.clear()
         self.phase_label.setText("STANDBY")

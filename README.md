@@ -112,5 +112,6 @@ real decision from the team, not this build's placeholder.
 | Formation math, `core/formation.py` | Real, computed live from operator input |
 | Launch/recovery state machines | Real, tick on a real clock |
 | Camera feeds | Simulated, synthetic HUD panels watermarked "SIMULATED FEED — NO HARDWARE", never real footage (section 9.4's escape hatch, see DECISIONS.md) |
-| Map terrain features | Cosmetic, procedurally generated from a fixed seed — not real GIS data |
+| Terrain ground truth | Generated from a fixed seed. A plausible piece of ground, not a real place |
+| The rover's terrain map | Real. Built only from simulated LiDAR returns, with occlusion: unscanned ground stays unknown and obstacles cast shadows that close as the rover drives around them |
 | Mission theme | Generic hazard sweep, never labeled minefield |

@@ -104,3 +104,27 @@ def confidence_color(confidence: float, threshold: float) -> QColor:
 
 def hex_of(color: QColor) -> str:
     return color.name()
+
+
+# --- terrain basemap ------------------------------------------------------
+# Deliberately desaturated and dark. This layer is underneath everything
+# that carries status, and must never compete with red, amber or blue. It
+# answers "what is the ground", not "what should I worry about".
+
+TERRAIN_COLORS = {
+    # Open ground sits barely above the background: it reads as "swept" and
+    # nothing more. Anything a driver has to care about is lifted out of it.
+    "GROUND": QColor("#141A22"),
+    "TRACK": QColor("#4A4639"),   # the easiest going, so the brightest
+    "SCRUB": QColor("#1E2E1C"),   # low vegetation, passable
+    "TREE": QColor("#2C4A2E"),    # canopy: impassable, and it blocks the beam
+    "ROCK": QColor("#473E33"),    # impassable, and it blocks the beam
+}
+
+TERRAIN_LABELS = {
+    "TRACK": "track",
+    "GROUND": "open",
+    "SCRUB": "scrub",
+    "TREE": "tree",
+    "ROCK": "rock",
+}

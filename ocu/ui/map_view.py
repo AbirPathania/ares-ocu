@@ -19,11 +19,21 @@ import math
 import random
 
 from PySide6.QtCore import QPointF, QRectF, QTimer, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPolygonF,
+)
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD, TETHER_LIMIT_M
-from ocu.ui.theme import GRID, GRID_MAJOR, TERRAIN_CONTOUR, UNIT_TINTS
+from ocu.core.terrain import CELL_SIZE_M, WORLD_HALF_EXTENT_M, Terrain
+from ocu.ui.theme import GRID, GRID_MAJOR, TERRAIN_COLORS, TERRAIN_LABELS, UNIT_TINTS
 from ocu.core.mesh_state import voxel_key
 from ocu.ui.icons import (
     draw_friendly_air,
@@ -79,6 +89,15 @@ class MapView(QWidget):
         self._reconciled_flash = 0.0  # seconds of 'just reconciled' banner left
         self._stale = False
         self._stale_caption = ""
+
+        # The discovered map is cached as an image at one pixel per terrain
+        # cell. Only newly observed cells are painted into it; the whole
+        # thing is then blitted once per frame.
+        self._map_extent_cells = int(WORLD_HALF_EXTENT_M / CELL_SIZE_M)
+        span = self._map_extent_cells * 2 + 1
+        self._perception_image = QImage(span, span, QImage.Format_ARGB32_Premultiplied)
+        self._perception_image.fill(QColor(0, 0, 0, 0))
+        self._mapped_m2 = 0.0
         self._geofence_vertices: list[tuple[float, float]] = []
         self._formation_preview: list[tuple[float, float, float]] | None = None
         self._formation_origin: tuple[float, float] | None = None
@@ -258,6 +277,23 @@ class MapView(QWidget):
         self._mesh_diverged = diverged
         self.update()
 
+    def add_perception(self, cells, mapped_m2: float) -> None:
+        """Paint newly observed terrain into the cached map image."""
+        for (cx, cy), kind in cells:
+            px = cx + self._map_extent_cells
+            py = self._map_extent_cells - cy
+            if 0 <= px < self._perception_image.width() and 0 <= py < self._perception_image.height():
+                color = TERRAIN_COLORS.get(Terrain(kind).name)
+                if color is not None:
+                    self._perception_image.setPixelColor(px, py, color)
+        self._mapped_m2 = mapped_m2
+        self.update()
+
+    def clear_perception(self) -> None:
+        self._perception_image.fill(QColor(0, 0, 0, 0))
+        self._mapped_m2 = 0.0
+        self.update()
+
     def set_telemetry_stale(self, stale: bool, caption: str) -> None:
         """Mark the picture as last-known rather than live.
 
@@ -325,8 +361,8 @@ class MapView(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), QColor("#0A0E12"))
 
+        self._draw_perception(painter)
         self._draw_grid(painter)
-        self._draw_terrain(painter)
         self._draw_geofence(painter)
         self._draw_tether_ring(painter)
         self._draw_radar_sweep(painter)
@@ -337,7 +373,9 @@ class MapView(QWidget):
         self._draw_rover_bay(painter)
         if self._compass_active:
             self._draw_bearing_compass(painter)
+        self._draw_deploy_point(painter)
         self._draw_north_indicator(painter)
+        self._draw_legend(painter)
         self._draw_scale_bar(painter)
         self._draw_mesh_banner(painter)
         if self._stale:
@@ -345,6 +383,53 @@ class MapView(QWidget):
         self._draw_cursor_readout(painter)
 
         painter.end()
+
+    def _draw_perception(self, painter: QPainter) -> None:
+        """The map the rover has built, blitted in one call.
+
+        Unknown ground is transparent, so the background shows through and
+        the operator can see at a glance how much has actually been swept
+        and where the sensor shadows still are.
+        """
+        top_left = self._to_screen(-WORLD_HALF_EXTENT_M, WORLD_HALF_EXTENT_M)
+        bottom_right = self._to_screen(WORLD_HALF_EXTENT_M, -WORLD_HALF_EXTENT_M)
+        target = QRectF(top_left, bottom_right)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+        painter.drawImage(target, self._perception_image)
+
+    def _draw_deploy_point(self, painter: QPainter) -> None:
+        """Point A. Everything on this map is referenced to it, and the rover
+        holds that frame on its own compass and inertial solution."""
+        centre = self._to_screen(0.0, 0.0)
+        pen = QPen(QColor(124, 135, 148, 170))
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(centre, 7.0, 7.0)
+        painter.drawLine(centre + QPointF(-11, 0), centre + QPointF(11, 0))
+        painter.drawLine(centre + QPointF(0, -11), centre + QPointF(0, 11))
+        painter.setFont(QFont("Menlo", 8))
+        painter.drawText(centre + QPointF(14, 4), "DEPLOY")
+
+    def _draw_legend(self, painter: QPainter) -> None:
+        x, y = 16.0, self.height() - 118.0
+        painter.setFont(QFont("DIN Condensed", 12, QFont.Bold))
+        painter.setPen(QPen(QColor("#7B8794")))
+        painter.drawText(QRectF(x, y - 15, 220, 13), Qt.AlignLeft, "LIDAR TERRAIN")
+
+        painter.setFont(QFont("Menlo", 8))
+        for i, key in enumerate(("TRACK", "GROUND", "SCRUB", "TREE", "ROCK")):
+            row = y + i * 13
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(TERRAIN_COLORS[key]))
+            painter.drawRect(QRectF(x, row, 10, 9))
+            painter.setPen(QPen(QColor(124, 135, 148, 190)))
+            painter.drawText(QRectF(x + 15, row - 2, 110, 13), Qt.AlignLeft, TERRAIN_LABELS[key])
+
+        painter.setPen(QPen(QColor("#7B8794")))
+        painter.drawText(
+            QRectF(x, y + 66, 220, 13), Qt.AlignLeft, f"mapped {self._mapped_m2:,.0f} m\u00b2"
+        )
 
     def _draw_grid(self, painter: QPainter) -> None:
         """A 10 m grid with coordinates on the majors, so distances on this
