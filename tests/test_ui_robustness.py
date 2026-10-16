@@ -14,6 +14,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from ocu.ui.main_window import MainWindow  # noqa: E402
@@ -25,6 +26,31 @@ TRICOPTERS = ["tricopter-1", "tricopter-2", "tricopter-3"]
 def app():
     application = QApplication.instance() or QApplication([])
     yield application
+
+
+@pytest.fixture(autouse=True)
+def stop_windows_after_each_test(monkeypatch):
+    """Stop every window a test opened once the test is over.
+
+    These tests build a real window each and never close it, so by the end
+    of the module dozens are alive with their timers running, and every
+    processEvents() call runs the director tick, the LiDAR scan and the
+    camera render for all of them. The later a test sits in the file the
+    slower it gets, for no reason to do with what it checks.
+    """
+    created = []
+    original = MainWindow.__init__
+
+    def tracking(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(MainWindow, "__init__", tracking)
+    yield
+    for window in created:
+        for timer in window.findChildren(QTimer):
+            timer.stop()
+        window.close()
 
 
 def pump(app, iterations=40):
@@ -52,6 +78,7 @@ def test_random_operator_actions_never_raise(app):
         lambda: window._on_take_manual(rng.choice(["rover", "tricopter-1"])),
         lambda: window._on_release_manual(),
         lambda: window._on_director_tick(),
+        lambda: window._tick_cameras(),
     ]
 
     for i in range(400):
@@ -330,3 +357,90 @@ def test_standard_reports_the_real_link_state(app):
     window._refresh_all_rows()
     pump(app)
     assert "CONNECTED" in window.link_chip.text()
+
+
+# --- camera tiles ------------------------------------------------------------
+
+
+def _undock_all(window):
+    for unit_id in TRICOPTERS:
+        window._set_docked(unit_id, False)
+
+
+def test_the_rover_tile_shows_a_picture_from_the_world(app):
+    window = MainWindow()
+    assert window.camera_feeds["rover"]._frame is None
+    for _ in range(4):
+        window._tick_cameras()
+    assert window.camera_feeds["rover"]._frame is not None
+
+
+def test_aircraft_in_their_bay_have_no_picture_to_show(app):
+    """The bay is dark. Showing the ground from an aircraft that has not
+    left it would be showing something that is not happening."""
+    window = MainWindow()
+    for _ in range(20):
+        window._tick_cameras()
+    assert all(window.camera_feeds[uid]._frame is None for uid in TRICOPTERS)
+
+
+def test_every_live_tile_gets_its_turn(app):
+    window = MainWindow()
+    _undock_all(window)
+    for _ in range(8):
+        window._tick_cameras()
+    assert all(feed._frame is not None for feed in window.camera_feeds.values())
+
+
+def test_a_recalled_aircraft_does_not_keep_showing_its_last_frame(app):
+    window = MainWindow()
+    _undock_all(window)
+    for _ in range(8):
+        window._tick_cameras()
+    assert window.camera_feeds["tricopter-2"]._frame is not None
+
+    window._set_docked("tricopter-2", True)
+    assert window.camera_feeds["tricopter-2"]._frame is None
+
+
+def test_no_video_means_no_new_frames_in_ghost_or_autonomous(app):
+    """The link decides, not the camera. The aircraft's camera is running;
+    nothing is being sent, so nothing new arrives."""
+    for mode in ("GHOST", "AUTONOMOUS"):
+        window = MainWindow()
+        for _ in range(4):
+            window._tick_cameras()
+        before = window.camera_feeds["rover"]._frame
+
+        _select_mode(window, mode)
+        pump(app)
+        for _ in range(8):
+            window._tick_cameras()
+        assert window.camera_feeds["rover"]._frame is before, f"{mode} must not deliver video"
+        assert window.camera_feeds["rover"]._emcon
+
+
+def test_video_resumes_when_the_link_carries_it_again(app):
+    window = MainWindow()
+    _select_mode(window, "GHOST")
+    pump(app)
+    for _ in range(4):
+        window._tick_cameras()
+    assert window.camera_feeds["rover"]._frame is None
+
+    _select_mode(window, "STANDARD")
+    pump(app)
+    for _ in range(4):
+        window._tick_cameras()
+    assert window.camera_feeds["rover"]._frame is not None
+    assert not window.camera_feeds["rover"]._emcon
+
+
+def test_a_tile_is_rendered_at_a_sensible_size_for_its_shape(app):
+    window = MainWindow()
+    window.resize(1760, 1040)
+    window.show()
+    pump(app)
+    width, height = window.camera_feeds["rover"].render_size()
+    assert 96 <= width <= 240 and 40 <= height <= 96
+    assert width / height > 1.8, "tiles are wide, and frames should match"

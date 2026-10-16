@@ -1,23 +1,24 @@
-"""Simulated camera feed thumbnails, one per unit, left side of the app.
+"""Camera feed tiles, one per unit, left side of the app.
 
-Section 13 of the build spec leaves camera feeds out of version one for a
-specific reason: "no hardware exists yet," and a rendered feed could be
-mistaken for real footage. The spec's own escape hatch is section 9.4's
-note: "add it later only with SIMULATED FEED clearly labeled if a future
-version needs one." This widget is that: a synthetic HUD-style panel, not
-a photograph of anything, watermarked so it can never read as live video.
-Nothing here is generated from or claims to be sensor data.
+Each tile shows a view rendered from the same simulated world the sensors
+are simulated against (core/camera.py): the rover's forward camera, and the
+tricopters' straight-down cameras. A camera sees the world rather than the
+map, so what is on a tile is what is actually out there, including ground
+the LiDAR has not reached yet.
+
+The widget itself only presents frames and the status around them. Whether
+a frame is available is the link's decision, not the camera's: in
+Autonomous the aircraft is flying and its camera is running, the link just
+is not carrying video, and in Ghost nothing is radiated at all. The tile
+says which, instead of going blank as though the feed had failed.
 """
 
 from __future__ import annotations
 
-import random
-
-from PySide6.QtCore import QPointF, QRectF, QTimer, Qt
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
+import numpy as np
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QWidget
-
-TICK_MS = 220
 
 LINK_COLORS = {
     "CONNECTED": QColor("#4A9FD4"),
@@ -33,22 +34,39 @@ class SimulatedCameraFeed(QWidget):
         self._label = label
         self._link_state = "CONNECTED"
         self._telemetry = ""
-        self._rng = random.Random(hash(unit_id) & 0xFFFF)
-        self._noise_offset = 0.0
         self._active = False
         self._emcon = False
         self._downlink_reason = ""
+        self._frame: QImage | None = None
 
         self.setMinimumHeight(104)
         self.setMaximumHeight(124)
 
-        self._timer = QTimer(self)
-        self._timer.setInterval(TICK_MS)
-        self._timer.timeout.connect(self._on_tick)
-        self._timer.start()
-
     def set_active(self, active: bool) -> None:
         self._active = active
+        if not active:
+            self._frame = None  # a unit back in its bay has no picture to show
+        self.update()
+
+    def render_size(self) -> tuple[int, int]:
+        """The resolution frames should be rendered at for this tile.
+
+        Rendered below display size and scaled up smoothly, which is also
+        what a small camera sensor looks like, and is a fraction of the cost
+        of rendering every device pixel.
+        """
+        scale = 1.7
+        return (
+            int(min(max(self.width() / scale, 96), 240)),
+            int(min(max(self.height() / scale, 40), 96)),
+        )
+
+    def set_frame(self, rgb: np.ndarray) -> None:
+        """Show a rendered frame. `rgb` is (height, width, 3) uint8."""
+        frame = np.ascontiguousarray(rgb)
+        height, width, _ = frame.shape
+        # copy(): QImage borrows the array's memory, which will not outlive it.
+        self._frame = QImage(frame.data, width, height, 3 * width, QImage.Format_RGB888).copy()
         self.update()
 
     def set_downlink(self, video: bool, mode: str) -> None:
@@ -81,10 +99,6 @@ class SimulatedCameraFeed(QWidget):
         self._telemetry = text
         self.update()
 
-    def _on_tick(self) -> None:
-        self._noise_offset = self._rng.uniform(0, 1000)
-        self.update()
-
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -114,22 +128,37 @@ class SimulatedCameraFeed(QWidget):
             painter.end()
             return
 
-        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        gradient.setColorAt(0.0, QColor("#141C24"))
-        gradient.setColorAt(1.0, QColor("#0C1116"))
-        painter.fillRect(rect, gradient)
-
-        # cheap synthetic "static": a handful of translucent bars, reseeded each tick
-        rng = random.Random(int(self._noise_offset * 997) ^ hash(self.unit_id))
-        for _ in range(20):
-            x = rng.uniform(0, rect.width())
-            y = rng.uniform(0, rect.height())
-            w = rng.uniform(4, 22)
-            h = rng.uniform(1, 3)
-            alpha = rng.randint(6, 22)
-            painter.fillRect(QRectF(x, y, w, h), QColor(255, 255, 255, alpha))
-
         link_color = LINK_COLORS.get(self._link_state, QColor("#666666"))
+
+        if self._frame is not None:
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            # Fill the tile and crop, rather than letterbox: a thin black bar
+            # above and below a 2.7:1 tile is a lot of its height.
+            source = QRectF(self._frame.rect())
+            scale = max(rect.width() / source.width(), rect.height() / source.height())
+            shown_w, shown_h = rect.width() / scale, rect.height() / scale
+            crop = QRectF(
+                (source.width() - shown_w) / 2, (source.height() - shown_h) / 2, shown_w, shown_h
+            )
+            painter.drawImage(rect, self._frame, crop)
+        else:
+            gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            gradient.setColorAt(0.0, QColor("#141C24"))
+            gradient.setColorAt(1.0, QColor("#0C1116"))
+            painter.fillRect(rect, gradient)
+
+        # Scrims behind the text, so the label and telemetry stay legible
+        # over whatever the camera happens to be looking at, bright sky
+        # included.
+        for edge_top, edge_bottom, a_top, a_bottom in (
+            (0.0, 18.0, 150, 0),
+            (rect.height() - 18.0, rect.height(), 0, 150),
+        ):
+            scrim = QLinearGradient(0, edge_top, 0, edge_bottom)
+            scrim.setColorAt(0.0, QColor(6, 9, 12, a_top))
+            scrim.setColorAt(1.0, QColor(6, 9, 12, a_bottom))
+            painter.fillRect(QRectF(0, edge_top, rect.width(), edge_bottom - edge_top), scrim)
+
         pen = QPen(link_color)
         pen.setWidth(1)
         painter.setPen(pen)
@@ -141,14 +170,19 @@ class SimulatedCameraFeed(QWidget):
         painter.drawLine(cx - 6, cy, cx + 6, cy)
         painter.drawLine(cx, cy - 6, cx, cy + 6)
 
+        label_rect = QRectF(5, 2, rect.width() - 10, 12)
         painter.setFont(QFont("DIN Condensed", 7 + 3, QFont.Bold))
-        painter.setPen(QPen(QColor("#C6D0DA")))
-        painter.drawText(QRectF(4, 2, rect.width() - 8, 11), Qt.AlignLeft, self._label)
+        painter.setPen(QPen(QColor(0, 0, 0, 170)))
+        painter.drawText(label_rect.translated(1, 1), Qt.AlignLeft, self._label)
+        painter.setPen(QPen(QColor("#E4EBF1")))
+        painter.drawText(label_rect, Qt.AlignLeft, self._label)
 
-        painter.setPen(QPen(QColor("#7B8794")))
+        telemetry_rect = QRectF(5, rect.height() - 14, rect.width() - 10, 12)
         painter.setFont(QFont("Menlo", 7))
-        painter.drawText(QRectF(4, rect.height() - 13, rect.width() - 8, 11), Qt.AlignLeft, self._telemetry)
-
+        painter.setPen(QPen(QColor(0, 0, 0, 170)))
+        painter.drawText(telemetry_rect.translated(1, 1), Qt.AlignLeft, self._telemetry)
+        painter.setPen(QPen(QColor("#C3CED8")))
+        painter.drawText(telemetry_rect, Qt.AlignLeft, self._telemetry)
 
         painter.end()
 

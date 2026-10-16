@@ -112,7 +112,7 @@ real decision from the team, not this build's placeholder.
 | CRDT merge logic, `core/mesh_state.py` | Real |
 | Formation math, `core/formation.py` | Real, computed live from operator input |
 | Launch/recovery state machines | Real, tick on a real clock |
-| Camera feeds | Simulated, synthetic HUD panels watermarked "SIMULATED FEED — NO HARDWARE", never real footage (section 9.4's escape hatch, see DECISIONS.md) |
+| Camera feeds | Rendered from the simulated world: a forward camera for the rover, straight-down cameras for the tricopters, with occlusion, shadows and haze. Not recorded footage, and not watermarked as simulated on screen; section 9.4 asks for that label, see the open item in DECISIONS.md |
 | Terrain ground truth | Generated from a fixed seed. A plausible piece of ground, not a real place |
 | The rover's terrain map | Real. Built only from simulated LiDAR returns, with occlusion: unscanned ground stays unknown and obstacles cast shadows that close as the rover drives around them |
 | Mission theme | Generic hazard sweep, never labeled minefield |

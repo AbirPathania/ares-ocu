@@ -388,3 +388,53 @@ can support. The eighth class remains unnamed and unguessed.
 square metres the LiDAR maps. The vehicle sees a long way and clears a
 hand's breadth; that is the honest shape of clearance work and it is not
 flattered here.
+
+## Camera feeds
+
+**Rendered from the world, not drawn over it.** The tiles previously showed
+a gradient with random bars on it. They now show views rendered from the
+same ground truth the sensors are simulated against (`ocu/core/camera.py`):
+a forward camera for the rover, straight-down cameras for the tricopters. A
+camera sees the world and not the map, so a tile shows what is actually out
+there, including ground the LiDAR has not reached and objects it has not
+yet classified.
+
+**Method.** The rover's view is the standard heightfield projection: a ray
+per pixel column, ground and standing objects projected by depth. Occlusion
+needs no special handling, because a pixel belongs to the nearest sample
+whose projected top has reached it. That is a running minimum and an argmax,
+so every sample along every ray is resolved in one batch rather than in a
+per-step loop. The aircraft view is a nadir projection whose footprint is
+set by altitude, so climbing widens what is seen and costs resolution.
+Tall things cast shadows away from a fixed sun, because from above a tree is
+a green shape and its shadow is what says it is tall.
+
+**Smooth fields, not cells.** The terrain is half-metre cells. Sampled
+directly, every slope becomes a staircase and every tree a tower. Ground
+colour, elevation, and the height of standing things are built once as smooth
+fields and sampled bilinearly; edges of crowns and rocks are thresholded
+against fine world-anchored noise so they are ragged the way real ones are,
+and texture is value noise rather than a constant per cell, which would show
+as squares the moment a cell covers several pixels.
+
+**Cost.** One tile is rendered per 85 ms tick, in turn, so no tick does more
+than one frame of work and each tile refreshes about three times a second.
+Frames are rendered at roughly 1/1.7 of tile size and scaled up smoothly.
+
+**The link decides, not the camera.** In Autonomous the aircraft's camera is
+running and the link is not carrying video; in Ghost nothing is radiated. In
+both the tile keeps saying so (`set_downlink`) and no new frames arrive. A
+unit in its bay has no picture, and a recalled aircraft's last frame is
+cleared rather than left on screen.
+
+**Open: the section 9.4 label.** Section 9.4 of the technical baseline says a
+camera feed, if ever added, should be "clearly labeled" as simulated. The
+tiles carry no such label on screen, as they did not before this change. The
+views are rendered rather than recorded, and nothing on screen says so. That
+is a presentation decision, and it is Abir's, not this file's.
+
+**Not modelled.** Lens distortion, exposure adaptation, motion blur, rain or
+dust on the lens. The aircraft's own shadow and the other aircraft are not
+drawn into its frame. The rover is drawn into an aircraft's frame when it is
+inside the footprint, because a vehicle is part of the scene an aircraft
+looks down on.

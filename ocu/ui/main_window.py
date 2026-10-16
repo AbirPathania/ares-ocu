@@ -55,6 +55,7 @@ from ocu.core.terrain import CELL_SIZE_M, PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
 from ocu.sim.playback_engine import PlaybackEngine
 from ocu.ui.alert_banner import AlertBanner
+from ocu.core.camera import CameraRig
 from ocu.ui.camera_feed import SimulatedCameraFeed
 from ocu.ui.context_panel import ContextPanel
 from ocu.ui.event_log import EventLog
@@ -68,6 +69,10 @@ TRICOPTER_IDS = ["tricopter-1", "tricopter-2", "tricopter-3"]
 ALL_UNIT_IDS = ["rover"] + TRICOPTER_IDS
 LINK_SEVERITY = {state: i for i, state in enumerate(("CONNECTED", "DEGRADED", "LOST"))}
 DIRECTOR_TICK_MS = 100
+
+#: Interval between camera frames. One tile is rendered per tick, so with
+#: four units each tile refreshes at about 1000 / (4 * this) Hz.
+CAMERA_TICK_MS = 85
 
 SCANNING_PHASES = {"drive_and_scan", "reactive_launch", "aerial_recon", "fusion", "alert"}
 
@@ -141,6 +146,17 @@ class MainWindow(QMainWindow):
         self._director_timer.setInterval(DIRECTOR_TICK_MS)
         self._director_timer.timeout.connect(self._on_director_tick)
         self._director_timer.start()
+
+        # Camera views are rendered from the same world the sensors read.
+        # One tile per tick, in turn: a frame is a few tens of milliseconds
+        # and rendering all four at once would stall the display every time
+        # it happened. Each tile still refreshes about three times a second.
+        self.camera_rig = CameraRig(self.terrain)
+        self._camera_turn = 0
+        self._camera_timer = QTimer(self)
+        self._camera_timer.setInterval(CAMERA_TICK_MS)
+        self._camera_timer.timeout.connect(self._tick_cameras)
+        self._camera_timer.start()
 
         self._build_ui()
         self._wire_signals()
@@ -526,6 +542,40 @@ class MainWindow(QMainWindow):
 
         if self.selected_unit_id in TRICOPTER_IDS:
             self._refresh_aircraft_flight_state(self.selected_unit_id)
+
+    def _tick_cameras(self) -> None:
+        """Render the next live unit's camera into its tile.
+
+        What a tile shows is decided by the link, not the camera: when the
+        mode's downlink carries no video the tile says so (set_downlink) and
+        there is nothing to render. A unit in its bay has no view either.
+        """
+        if not self._comms.video:
+            return
+
+        live = [
+            uid for uid in ALL_UNIT_IDS
+            if uid == "rover" or not self._docked_state.get(uid, True)
+        ]
+        if not live:
+            return
+        self._camera_turn = (self._camera_turn + 1) % len(live)
+        unit_id = live[self._camera_turn]
+
+        feed = self.camera_feeds[unit_id]
+        width, height = feed.render_size()
+        pose = self.units[unit_id].pose
+        if unit_id == "rover":
+            frame = self.camera_rig.forward_view(
+                pose.x, pose.y, pose.heading, width, height, sensor_noise=2.2
+            )
+        else:
+            rover = self.units["rover"].pose
+            frame = self.camera_rig.nadir_view(
+                pose.x, pose.y, pose.z, pose.heading, width, height,
+                rover=(rover.x, rover.y, rover.heading), sensor_noise=2.2,
+            )
+        feed.set_frame(frame)
 
     def _begin_autonomous_sweep(self) -> None:
         """Hand the rover its next lane point and let it drive itself."""
