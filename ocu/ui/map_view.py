@@ -31,7 +31,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
-from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD, TETHER_LIMIT_M
+from ocu.core.constants import (
+    ALERT_CONFIDENCE_THRESHOLD,
+    PULSE_INDUCTION_SWEEP_WIDTH_CM,
+    TETHER_LIMIT_M,
+)
 from ocu.core.lidar import LIDAR_RANGE_M
 from ocu.core.terrain import CELL_SIZE_M, WORLD_HALF_EXTENT_M, Terrain
 from ocu.ui.theme import (
@@ -54,6 +58,12 @@ from ocu.ui.launch_console import short_label
 
 SCALE_PX_PER_M = 9.0
 TRAIL_MAX_POINTS = 240
+
+#: The band the detection array actually covers, drawn at the width it
+#: really is. Showing it true to scale against the area the LiDAR maps is
+#: the honest picture of clearance work: the vehicle sees a long way and
+#: clears a hand's breadth.
+SWEPT_WIDTH_M = PULSE_INDUCTION_SWEEP_WIDTH_CM / 100.0
 COMPASS_RADIUS_PX = 60.0
 RADAR_TICK_MS = 60
 TERRAIN_SEED = 20260930
@@ -88,6 +98,11 @@ class MapView(QWidget):
         self._units: dict[str, dict] = {}
         self._docked: dict[str, bool] = {uid: True for uid in BAY_SLOT_ORDER}
         self._trails: dict[str, list[tuple[float, float]]] = {}
+        # Ground the detection array has actually passed over. Kept as runs
+        # so a gap -- the suite off, the link down -- stays a gap instead of
+        # being bridged by a line across ground nobody swept.
+        self._swept: list[list[tuple[float, float]]] = []
+        self._lane_plan: list[tuple[float, float, str]] = []
         self._detections: list[dict] = []
         self._detection_by_key: dict[tuple, dict] = {}
         self._holdings: dict[tuple, set[str]] = {}
@@ -110,6 +125,8 @@ class MapView(QWidget):
         self._cloud_points = 0
         self._fresh_returns = []
         self._fresh_age = 0.0
+        self._planned_path: list[tuple[float, float]] = []
+        self._planned_goal: tuple[float, float] | None = None
         self._lidar_stats: dict[str, float] = {}
         self._geofence_vertices: list[tuple[float, float]] = []
         self._formation_preview: list[tuple[float, float, float]] | None = None
@@ -236,6 +253,7 @@ class MapView(QWidget):
     def clear(self) -> None:
         self._units.clear()
         self._trails.clear()
+        self._swept.clear()
         self._detections.clear()
         self._detection_by_key.clear()
         self._holdings.clear()
@@ -289,6 +307,36 @@ class MapView(QWidget):
         self._mesh_rover = rover_voxels
         self._mesh_aircraft = aircraft_voxels
         self._mesh_diverged = diverged
+        self.update()
+
+    def set_lane_plan(self, points: list[tuple[float, float, str]]) -> None:
+        """The lanes the vehicle has been tasked to sweep."""
+        self._lane_plan = list(points)
+        self.update()
+
+    def add_swept(self, x: float, y: float, continuing: bool) -> None:
+        """Record a point of ground the detection array has covered."""
+        if not continuing or not self._swept:
+            self._swept.append([])
+        run = self._swept[-1]
+        if not run or run[-1] != (x, y):
+            run.append((x, y))
+
+    def clear_swept(self) -> None:
+        self._swept.clear()
+
+    def set_planned_path(
+        self, path: list[tuple[float, float]], goal: tuple[float, float] | None
+    ) -> None:
+        """The route the rover has planned for itself, and where it is going.
+
+        This is the output of the planner, not an operator-drawn line. Seeing
+        it bend around something the rover has only just mapped is the whole
+        point: it is the difference between a vehicle following a line and a
+        vehicle deciding on one.
+        """
+        self._planned_path = list(path)
+        self._planned_goal = goal
         self.update()
 
     def add_returns(self, returns, mapped_m2: float, stats: dict) -> None:
@@ -432,6 +480,9 @@ class MapView(QWidget):
         self._draw_grid(painter)
         self._draw_geofence(painter)
         self._draw_tether_ring(painter)
+        self._draw_lane_plan(painter)
+        self._draw_swept(painter)
+        self._draw_planned_path(painter)
         self._draw_trails(painter)
         self._draw_formation_preview(painter)
         self._draw_detections(painter)
@@ -480,6 +531,81 @@ class MapView(QWidget):
             color.setAlpha(int(200 * fade * (0.4 + 0.6 * ret.intensity)))
             painter.setPen(QPen(color))
             painter.drawPoint(self._to_screen(ret.x, ret.y))
+
+    def _draw_lane_plan(self, painter: QPainter) -> None:
+        """The lanes the vehicle was tasked with, so the ground it has
+        covered can be read against the ground it was asked to cover."""
+        if not self._lane_plan:
+            return
+        pen = QPen(QColor(124, 135, 148, 58))
+        pen.setWidth(1)
+        pen.setStyle(Qt.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        run: list[tuple[float, float, str]] = []
+        for point in list(self._lane_plan) + [None]:
+            if point is not None and (not run or point[2] == run[0][2]):
+                run.append(point)
+                continue
+            if len(run) > 1:
+                painter.drawPolyline([self._to_screen(x, y) for x, y, _ in run])
+                painter.setFont(QFont("Menlo", 7))
+                painter.drawText(self._to_screen(run[0][0], run[0][1]) + QPointF(5, -4), run[0][2])
+            run = [point] if point is not None else []
+
+    def _draw_swept(self, painter: QPainter) -> None:
+        """Ground the detection array has covered, at the width it covers.
+
+        This is the mission's actual product. Drawn true to scale it is a
+        narrow ribbon inside a very large mapped area, which is the honest
+        shape of clearance work and the thing an operator is really
+        tracking: not how far the vehicle has been, but how much of where
+        it has been has been cleared.
+        """
+        if not self._swept:
+            return
+        pen = QPen(QColor(122, 196, 236, 52))
+        pen.setWidthF(max(SWEPT_WIDTH_M * SCALE_PX_PER_M, 1.5))
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        for run in self._swept:
+            if len(run) > 1:
+                painter.drawPolyline([self._to_screen(x, y) for x, y in run])
+
+    def _draw_planned_path(self, painter: QPainter) -> None:
+        """The planned route, and the waypoint it terminates at."""
+        if not self._planned_path:
+            return
+
+        points = [self._to_screen(x, y) for x, y in self._planned_path]
+
+        # Drawn twice: a wide translucent casing so the line reads over the
+        # point cloud, and a thin bright core so its corners stay legible.
+        casing = QPen(QColor(79, 157, 105, 110))
+        casing.setWidth(5)
+        casing.setCapStyle(Qt.RoundCap)
+        casing.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(casing)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPolyline(points)
+
+        core = QPen(QColor(126, 219, 158, 255))
+        core.setWidthF(1.6)
+        painter.setPen(core)
+        painter.drawPolyline(points)
+
+        if self._planned_goal is not None:
+            goal = self._to_screen(*self._planned_goal)
+            pen = QPen(QColor(110, 198, 140, 200))
+            pen.setWidth(1)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(goal, 5.5, 5.5)
+            painter.drawLine(goal + QPointF(-9, 0), goal + QPointF(9, 0))
+            painter.drawLine(goal + QPointF(0, -9), goal + QPointF(0, 9))
 
     def _draw_sensor_range(self, painter: QPainter) -> None:
         """Where the scanner stops. A range ring is standard on any sensor

@@ -197,7 +197,7 @@ def test_classification_never_invents_an_eighth_class():
 
     for confidences in ({"gpr": 0.9}, {"pulse_induction": 0.9}, {"saw_voc": 0.3}, {}):
         label = classify(confidences)
-        assert label in set(THREAT_CLASSES) | {"TBD"}
+        assert label in set(THREAT_CLASSES)
 
 
 # --- the field ------------------------------------------------------------

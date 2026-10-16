@@ -236,19 +236,28 @@ def fuse(confidences: dict[str, float]) -> float:
 def classify(confidences: dict[str, float], target_hint: str = "") -> str:
     """The suite's best guess at what it is looking at.
 
-    Deliberately conservative. Metal with no vapour reads as inert; vapour
-    with metal reads as a candidate; anything thin reads unknown. The
-    eighth threat class is still open (section 14), so nothing here
-    invents a label beyond the seven that are named.
+    Deliberately conservative, and limited to the seven classes section
+    12.2 actually names. The eighth is an open item (section 14) and
+    nothing here invents it.
+
+    The reasoning is the sensors': explosive vapour over a metal signature
+    is a buried charge; metal with no vapour and no subsurface structure
+    is scrap; structure in the ground with no metal at all is ground that
+    has been worked. Anything thinner than that stays unknown, which is a
+    real answer and the one the operator needs when the evidence is thin.
     """
-    metal = max(confidences.get("pulse_induction", 0.0), confidences.get("magnetic_gradiometer", 0.0))
+    metal = max(
+        confidences.get("pulse_induction", 0.0), confidences.get("magnetic_gradiometer", 0.0)
+    )
     vapour = confidences.get("saw_voc", 0.0)
     anomaly = confidences.get("gpr", 0.0)
 
+    # Telling a mine from an IED takes more than four sensors, so of the
+    # two this suite reports the one it can actually support.
+    if vapour > 0.0 and metal > 0.30:
+        return "mine"
     if metal > 0.45 and vapour <= 0.0 and anomaly < 0.35:
         return "safe_object"
-    if metal > 0.3 and vapour > 0.0:
-        return "TBD"
-    if anomaly > 0.3 or metal > 0.3:
-        return "unknown"
+    if anomaly > 0.45 and metal < 0.25:
+        return "disturbed_soil"
     return "unknown"

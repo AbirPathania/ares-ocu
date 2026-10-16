@@ -324,3 +324,67 @@ in the second category was cut.
   `min-width` on `QTabBar::tab` in `style.qss`, explicit initial
   `QSplitter.setSizes(...)`, and abbreviated link-state text
   (`CONNECTED` → `OK`) so the roster fits without a horizontal scrollbar.
+
+## Autonomous navigation and the clearance sweep
+
+**Why the navigation stack is implemented rather than imported.** Section
+11.1 of the technical baseline rules out ROS 2 (Tier 3 on macOS), Gazebo
+(the Metal threading crash open since 2021) and MuJoCo ("a separate and
+much larger undertaking") for this build. Nothing in that decision is
+revisited here. What it rules out is also not what was needed: MuJoCo is a
+rigid-body contact solver, and the question this demonstrator has to answer
+is not how a wheel loads a rock but how a vehicle maps ground it has not
+seen, plans across it, and changes its mind when the map changes. That is
+the nav2 stack, and its parts are small enough to implement directly and
+test: a costmap with obstacle inflation, A* over it, replanning on
+invalidation (what D* Lite does more efficiently; at this map size a fresh
+A* is cheaper than the bookkeeping to avoid one), and pure pursuit to
+follow the result. MuJoCo remains the right tool if rocker-bogie contact
+dynamics ever become the question. See `ocu/core/navigation.py`.
+
+**The sweep axis is chosen, not fixed.** A clearance sweep laid across a
+rock field is a sweep the vehicle spends its mission detouring around, and
+ground that is detoured around is ground nobody looked at. The axis is
+scored against the terrain at every fifteen degrees and the clearest taken
+(`ocu/core/sweep.py`). Scoring against ground truth is mission planning,
+not navigation: a clearance task is planned on prior imagery before
+anything drives into it. Everything after that point uses only the map the
+rover builds for itself.
+
+**Lane points, not lane ends.** A* minimises traverse cost, which is the
+right objective for getting from A to B and the wrong one for clearance:
+given scrub on the lane and bare ground two metres off it, the cheapest
+route is off the lane. Two corrections, both in the objective rather than
+in the output. Lanes carry a point every 3 m, and each leg is planned with
+a corridor penalty on distance from the lane (`navigation.Corridor`). The
+penalty is a preference, not an override -- a rock on the lane is still a
+rock, and the vehicle goes round it and reports the lane points it cannot
+reach at all.
+
+**Buried objects are placed relative to the sweep.** Since the axis is
+chosen from the terrain, an object buried at a fixed coordinate would end
+up wherever the lanes did not go the moment the ground changed, and the
+demonstration would silently become one where the vehicle sweeps empty
+dirt. `targets.default_field` places them by lane, distance along it and
+offset across it.
+
+**Wind bearing is derived from the sweep, and is a scenario choice.** The
+SAW VOC sensor only reads when the vehicle is on the plume side of a
+source. With the axis chosen from terrain, a fixed wind bearing would put
+the plume along or across the lanes by luck of the seed. It is set 25
+degrees off the reciprocal of the outbound lane heading, which means the
+vapour sensor confirms on outbound lanes and not on return ones. The
+sensor model is unchanged; only the environment is chosen.
+
+**Classification reports only the seven named classes.** An earlier
+revision returned the literal string "TBD" for metal-plus-vapour, which put
+section 14's open item in front of the operator as a threat label. Metal
+with explosive vapour is reported as `mine`: telling a mine from an IED
+takes more than four sensors, so of the two the suite reports the one it
+can support. The eighth class remains unnamed and unguessed.
+
+**The swept band is drawn at its true width.** The pulse induction array is
+40 cm across, and the map shows exactly that against the thousands of
+square metres the LiDAR maps. The vehicle sees a long way and clears a
+hand's breadth; that is the honest shape of clearance work and it is not
+flattered here.

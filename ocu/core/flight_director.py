@@ -55,8 +55,28 @@ from ocu.core.constants import (
     TRICOPTER_VERTICAL_ACCEL_MS2,
 )
 from ocu.core.formation import clamp_to_tether
+from ocu.core.navigation import (
+    WAYPOINT_TOLERANCE_M,
+    Corridor,
+    build_costmap,
+    path_is_clear,
+    plan_path,
+    pure_pursuit_target,
+    reachable_goal,
+    smooth,
+    update_costmap,
+)
 from ocu.core.motion import KinematicBody, MotionLimits
 from ocu.core.recovery_sequencer import RecoveryStage
+
+#: A failed plan is retried at 1 Hz, not at tick rate. The map is still
+#: changing so retrying is right, but a search that cannot succeed is the
+#: most expensive search there is.
+PLAN_RETRY_TICKS = 10
+
+#: After this many consecutive failures the waypoint is called unreachable
+#: and the operator is told, rather than the vehicle holding in silence.
+MAX_PLAN_FAILURES = 3
 
 TOUCHDOWN_ALTITUDE_M = 0.06
 
@@ -96,6 +116,7 @@ class AircraftMode(str, Enum):
 
 class RoverMode(str, Enum):
     NORMAL = "NORMAL"
+    NAVIGATING = "NAVIGATING"
     MANUAL = "MANUAL"
     RETURNING = "RETURNING"
     AT_BASE = "AT_BASE"
@@ -153,6 +174,20 @@ class FlightDirector:
         self._rover_speed_ms = 0.0
         self._rover_velocity: tuple[float, float] = (0.0, 0.0)
         self._last_rover_xy: tuple[float, float] | None = None
+        self.path: list[tuple[float, float]] = []
+        # The dense cell path is kept alongside the simplified world path:
+        # simplify() collapses a straight run to its two endpoints, so
+        # checking only those would miss an obstacle discovered in the
+        # middle of it and the rover would drive straight into the thing
+        # it had just mapped.
+        self._path_cells: list[tuple[int, int]] = []
+        self.goal: tuple[float, float] | None = None
+        self.lane_from: tuple[float, float] | None = None
+        self._costmap = None
+        self._plan_failures = 0
+        self._ticks_since_attempt = 0
+        self.plan_failed = False
+        self._replans = 0
 
     # --- ownership ---
 
@@ -183,13 +218,27 @@ class FlightDirector:
         self._rover_speed_ms = 0.0
         self._rover_velocity = (0.0, 0.0)
         self._last_rover_xy = None
+        self.path = []
+        self._path_cells = []
+        self.goal = None
+        self.lane_from = None
+        self._replans = 0
+        self._costmap = None
+        self._plan_failures = 0
+        self._ticks_since_attempt = 0
+        self.plan_failed = False
 
     @property
     def airborne_ids(self) -> list[str]:
         return [a.unit_id for a in self.aircraft.values() if a.mode != AircraftMode.DOCKED]
 
     def owns_rover(self) -> bool:
-        return self.rover_mode in (RoverMode.RETURNING, RoverMode.AT_BASE, RoverMode.MANUAL)
+        return self.rover_mode in (
+            RoverMode.RETURNING,
+            RoverMode.AT_BASE,
+            RoverMode.MANUAL,
+            RoverMode.NAVIGATING,
+        )
 
     # --- operator commands ---
 
@@ -285,6 +334,126 @@ class FlightDirector:
         self.rover_manual = ManualInput()
         return self.recall()
 
+    def navigate_to(
+        self, goal_x: float, goal_y: float, lane_from: tuple[float, float] | None = None
+    ) -> None:
+        """Send the rover somewhere under its own navigation.
+
+        With `lane_from`, the leg is treated as a lane to be held rather
+        than two points to get between, and the planner is penalised for
+        straying off it.
+        """
+        self.goal = (goal_x, goal_y)
+        self.lane_from = lane_from
+        self.path = []
+        self._path_cells = []
+        self._plan_failures = 0
+        self._ticks_since_attempt = 0
+        self.plan_failed = False
+        self.rover_mode = RoverMode.NAVIGATING
+
+    def replan(self, perception, cell_size_m: float) -> bool:
+        """Plan, or replan, against what the rover currently knows.
+
+        A route is only valid against the map that existed when it was
+        made, and that map is being built as the vehicle drives. So the
+        plan is checked against the current costmap every tick and rebuilt
+        the moment newly discovered ground blocks it. That is the whole
+        behaviour: drive, see a rock, go round it.
+        """
+        if self.goal is None:
+            return False
+
+        # The costmap is kept, not rebuilt. Only what the last scan
+        # discovered has to be folded in, which is what makes revalidating
+        # the route every tick affordable.
+        if self._costmap is None or self._costmap.cell_size_m != cell_size_m:
+            self._costmap = build_costmap(perception, cell_size_m)
+        else:
+            update_costmap(self._costmap, perception)
+        costmap = self._costmap
+
+        if self._path_cells and path_is_clear(costmap, self._path_cells):
+            self._plan_failures = 0
+            return False
+
+        # A route the map has just invalidated must not keep being driven
+        # while a replan is pending. The vehicle holds instead.
+        self.path = []
+        self._path_cells = []
+
+        # Having failed once, back off. The map is still changing, so trying
+        # again is right; trying again ten times a second is not, and a
+        # search that cannot succeed is the most expensive one there is.
+        if self._plan_failures:
+            self._ticks_since_attempt += 1
+            if self._ticks_since_attempt < PLAN_RETRY_TICKS:
+                return False
+        self._ticks_since_attempt = 0
+
+        start = (
+            int(math.floor(self.rover_body.x / cell_size_m)),
+            int(math.floor(self.rover_body.y / cell_size_m)),
+        )
+        requested_cell = (
+            int(math.floor(self.goal[0] / cell_size_m)),
+            int(math.floor(self.goal[1] / cell_size_m)),
+        )
+        goal_cell = reachable_goal(costmap, requested_cell)
+        corridor = None
+        if self.lane_from is not None and goal_cell is not None:
+            # Both ends in the same units the corridor measures in: world
+            # metres divided by cell size. The goal end is the lane point
+            # itself, not the centre of the cell it happens to fall in.
+            corridor = Corridor(
+                ax=self.lane_from[0] / cell_size_m,
+                ay=self.lane_from[1] / cell_size_m,
+                bx=self.goal[0] / cell_size_m,
+                by=self.goal[1] / cell_size_m,
+            )
+        planned = (
+            plan_path(costmap, start, goal_cell, corridor=corridor) if goal_cell else []
+        )
+        if not planned:
+            self._plan_failures += 1
+            if self._plan_failures >= MAX_PLAN_FAILURES:
+                self.plan_failed = True
+            return False
+
+        # Only if the goal was actually moved for clearance does the stored
+        # goal change, and then the arrival test moves with it. Rewriting it
+        # unconditionally would snap every waypoint to the centre of its
+        # cell -- up to a third of a metre off the lane point that was
+        # asked for, on every leg, which is most of a sensor swath.
+        if goal_cell != requested_cell:
+            self.goal = (
+                goal_cell[0] * cell_size_m + cell_size_m / 2,
+                goal_cell[1] * cell_size_m + cell_size_m / 2,
+            )
+        self._plan_failures = 0
+        self.plan_failed = False
+        self._path_cells = planned
+
+        # Followed as a smoothed line, checked for validity as the cells it
+        # came from. The ends are the vehicle's actual position and the
+        # actual lane point, not the centres of the cells those fall in: a
+        # cell centre is up to a third of a metre from the point it stands
+        # for, and the smoother holds its endpoints, so quantising them
+        # would bake that error into every leg.
+        world = [
+            (cx * cell_size_m + cell_size_m / 2, cy * cell_size_m + cell_size_m / 2)
+            for cx, cy in planned
+        ]
+        world[0] = (self.rover_body.x, self.rover_body.y)
+        world[-1] = self.goal
+        self.path = smooth(world, costmap)
+        self._replans += 1
+        return True
+
+    @property
+    def replan_count(self) -> int:
+        return self._replans
+
     def cancel_return(self) -> None:
         if self.rover_mode == RoverMode.RETURNING:
             self.rover_mode = RoverMode.NORMAL
@@ -325,6 +494,48 @@ class FlightDirector:
             body.apply_horizontal_command(
                 demand * math.sin(heading_rad), demand * math.cos(heading_rad), dt_s
             )
+            self._rover_speed_ms = body.speed_ms
+            self._rover_velocity = (body.vx, body.vy)
+            self._last_rover_xy = (body.x, body.y)
+            return (body.x, body.y, body.heading)
+
+        if self.rover_mode == RoverMode.NAVIGATING:
+            if self.plan_failed:
+                # Nowhere to go and nowhere clear nearby. Holding here
+                # silently would leave the operator watching a stopped
+                # vehicle with no reason given.
+                self.goal = None
+                self.path = []
+                self._path_cells = []
+                self.plan_failed = False
+                body.halt(dt_s)
+                self._rover_speed_ms = body.speed_ms
+                self._last_rover_xy = (body.x, body.y)
+                events.append(("rover", "WAYPOINT_UNREACHABLE"))
+                return (body.x, body.y, body.heading)
+
+            if not self.path or self.goal is None:
+                body.halt(dt_s)
+                self._rover_speed_ms = body.speed_ms
+                self._last_rover_xy = (body.x, body.y)
+                return (body.x, body.y, body.heading)
+
+            # Pure pursuit: steer at a point a fixed distance ahead on the
+            # planned line. A wheeled vehicle also cannot drive sideways, so
+            # it turns onto the bearing before it can build speed.
+            target = pure_pursuit_target(self.path, body.x, body.y)
+            if target is not None:
+                dx, dy = target[0] - body.x, target[1] - body.y
+                if math.hypot(dx, dy) > 0.2:
+                    body.step_heading(math.degrees(math.atan2(dx, dy)) % 360.0, dt_s)
+                body.step_toward(target[0], target[1], dt_s)
+
+            if math.hypot(self.goal[0] - body.x, self.goal[1] - body.y) < WAYPOINT_TOLERANCE_M:
+                self.goal = None
+                self.path = []
+                self._path_cells = []
+                events.append(("rover", "WAYPOINT_REACHED"))
+
             self._rover_speed_ms = body.speed_ms
             self._rover_velocity = (body.vx, body.vy)
             self._last_rover_xy = (body.x, body.y)

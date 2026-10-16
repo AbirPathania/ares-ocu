@@ -57,7 +57,7 @@ def draw_threat_glyph(painter: QPainter, center: QPointF, radius: float, threat_
         painter.drawLine(p1, p2)
         painter.drawLine(p2, p3)
 
-    else:  # "unknown", "TBD", or anything not yet classified
+    else:  # "unknown", or anything not yet classified
         font = QFont("Menlo", int(max(r, 6)))
         font.setBold(True)
         painter.setFont(font)

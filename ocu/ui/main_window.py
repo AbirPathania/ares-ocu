@@ -37,6 +37,7 @@ from ocu.core.flight_director import AircraftMode, FlightDirector
 from ocu.core.geofence import Geofence
 from ocu.core.detection import REPORT_FLOOR, classify, fuse, sweep
 from ocu.core.lidar import LIDAR_RANGE_M, LIDAR_SCAN_HZ, cast_scan
+from ocu.core.navigation import WAYPOINT_TOLERANCE_M
 from ocu.core.mesh_state import MeshLink, VoxelObservation, voxel_key
 from ocu.core.power import (
     charge_pct_per_s,
@@ -48,8 +49,9 @@ from ocu.core.power import (
     tricopter_drain_pct_per_s,
     tricopter_endurance_s,
 )
+from ocu.core.sweep import plan_lane_sweep
 from ocu.core.targets import default_field
-from ocu.core.terrain import PerceptionMap, TerrainWorld
+from ocu.core.terrain import CELL_SIZE_M, PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
 from ocu.sim.playback_engine import PlaybackEngine
 from ocu.ui.alert_banner import AlertBanner
@@ -100,16 +102,34 @@ class MainWindow(QMainWindow):
         self._comms = profile_for(STANDARD)
         # Ground truth, and separately what the rover has actually seen of it.
         self.terrain = TerrainWorld()
-        # What is actually buried out there, and what the suite has
-        # accumulated about each object it has swept over.
-        self.target_field = default_field()
+        # The clearance task: a serpentine lane sweep away from the deploy
+        # point, laid out on the clearest axis the terrain offers. See
+        # core/sweep.py for why the axis is chosen rather than fixed.
+        self.sweep = plan_lane_sweep(self.terrain)
+        # What is actually buried out there, placed relative to the lanes,
+        # and what the suite has accumulated about each object swept over.
+        self.target_field = default_field(sweep=self.sweep)
         self._target_evidence: dict[int, dict[str, float]] = {}
         self._escalated: set = set()
-        self.wind_bearing_deg = 215.0
+        # Which way the vapour plume runs. The SAW sensor only reads when
+        # the vehicle is on the plume side of a source, so on this ground
+        # it confirms on the outbound lanes and not on the return ones --
+        # which is the sensor behaving, not the demonstration arranging
+        # itself. Set relative to the sweep because the sweep's axis is
+        # chosen from the terrain; a fixed bearing would put the plume
+        # across the lanes or along them purely by luck of the seed.
+        self.wind_bearing_deg = (self.sweep.bearing_deg + 205.0) % 360.0
         self._last_sweep_xy: tuple[float, float] | None = None
+        self._sweeping = False
         self.perception = PerceptionMap()
         self._last_scan_s = -1e9
         self._obstacle_returns = 0
+
+        self._mission_waypoints = self.sweep.points
+        self._waypoint_index = 0
+        self._current_lane: str | None = None
+        self._last_replan_s = -1e9
+        self._last_replan_waypoint = -1
         self._last_downlink_s = 0.0
         self._silence_began_s: float | None = None
         self.setFocusPolicy(Qt.StrongFocus)
@@ -149,6 +169,7 @@ class MainWindow(QMainWindow):
         self.alert_banner = AlertBanner()
         map_layout.addWidget(self.alert_banner)
         self.map_view = MapView()
+        self.map_view.set_lane_plan(self.sweep.points)
         map_layout.addWidget(self.map_view, stretch=1)
         splitter.addWidget(map_container)
 
@@ -496,6 +517,7 @@ class MainWindow(QMainWindow):
                 self.context_panel.aircraft_panel.update_pose(z, heading)
 
         self._tick_power(dt)
+        self._tick_navigation()
         self._tick_lidar()
         self._tick_detection_suite()
 
@@ -504,6 +526,68 @@ class MainWindow(QMainWindow):
 
         if self.selected_unit_id in TRICOPTER_IDS:
             self._refresh_aircraft_flight_state(self.selected_unit_id)
+
+    def _begin_autonomous_sweep(self) -> None:
+        """Hand the rover its next lane point and let it drive itself."""
+        if self._waypoint_index >= len(self._mission_waypoints):
+            self.flight_director.goal = None
+            self.map_view.set_planned_path([], None)
+            return
+
+        goal_x, goal_y, lane = self._mission_waypoints[self._waypoint_index]
+        rover = self.units["rover"]
+        self.flight_director.rover_body.x = rover.pose.x
+        self.flight_director.rover_body.y = rover.pose.y
+        self.flight_director.rover_body.heading = rover.pose.heading
+        # The leg is a lane to be held, not two points to get between, so
+        # the planner is told where it starts.
+        lane_from = (rover.pose.x, rover.pose.y)
+        if self._waypoint_index > 0:
+            previous = self._mission_waypoints[self._waypoint_index - 1]
+            if previous[2] == lane:
+                lane_from = (previous[0], previous[1])
+        self.flight_director.navigate_to(goal_x, goal_y, lane_from=lane_from)
+        self._position_owner["rover"] = "operator"
+
+        # One line per lane, not per point. Nineteen "navigating to waypoint
+        # n of nineteen" entries tell the operator nothing and bury the
+        # entries that matter.
+        if lane != self._current_lane:
+            self._current_lane = lane
+            self.event_log.log(self.playback.clock_s, f"Sweeping {lane}")
+
+        # Plan immediately. The next director tick runs before the next
+        # navigation tick, and a NAVIGATING rover with no path halts, so
+        # deferring this would brake the vehicle at every lane point.
+        self._tick_navigation()
+
+    def _tick_navigation(self) -> None:
+        """Replan against what the rover now knows, and draw the result.
+
+        A route is only valid against the map that existed when it was made,
+        and that map is being built as the vehicle drives. Checking it every
+        tick is what turns a plan into navigation.
+        """
+        if self.flight_director.goal is None:
+            return
+        before = self.flight_director.replan_count
+        if self.flight_director.replan(self.perception, CELL_SIZE_M):
+            # Every leg is planned, so most replans are routine and saying
+            # so every time buries the entries that are not. Only a reroute
+            # of a leg already under way is worth the operator's attention,
+            # and only once in a while.
+            reroute = before > 0 and self._waypoint_index == self._last_replan_waypoint
+            if reroute and self.playback.clock_s - self._last_replan_s > 4.0:
+                self._last_replan_s = self.playback.clock_s
+                self.event_log.log(
+                    self.playback.clock_s,
+                    "Route blocked by newly mapped terrain, rerouted",
+                )
+            self._last_replan_waypoint = self._waypoint_index
+        if self._comms.telemetry:
+            self.map_view.set_planned_path(
+                self.flight_director.path, self.flight_director.goal
+            )
 
     def _tick_lidar(self) -> None:
         """Sweep the rover's scanner and fold the returns into its map.
@@ -575,6 +659,12 @@ class MainWindow(QMainWindow):
             )
             for i in range(samples + 1)
         ]
+
+        # The swept band on the map is this same ground: what the array
+        # covered, recorded where it covered it.
+        if scanning and travelled > 0.0:
+            self.map_view.add_swept(rover.pose.x, rover.pose.y, self._sweeping)
+        self._sweeping = scanning and travelled > 0.0
 
         for buried in self.target_field.near(rover.pose.x, rover.pose.y, 4.0):
             readings = []
@@ -697,6 +787,24 @@ class MainWindow(QMainWindow):
             )
         elif event == "DOCKING":
             self.event_log.log(self.playback.clock_s, f"{short_label(unit_id)} cleared to dock")
+        elif event == "WAYPOINT_UNREACHABLE":
+            _, _, lane = self._mission_waypoints[
+                min(self._waypoint_index, len(self._mission_waypoints) - 1)
+            ]
+            self.event_log.log(
+                self.playback.clock_s,
+                f"{lane} point blocked with no clearance, skipping to the next",
+            )
+            self._waypoint_index += 1
+            self._begin_autonomous_sweep()
+        elif event == "WAYPOINT_REACHED":
+            self._waypoint_index += 1
+            if self._waypoint_index >= len(self._mission_waypoints):
+                self.event_log.log(
+                    self.playback.clock_s,
+                    f"Lane sweep complete, {self.perception.coverage_m2():,.0f} m² mapped",
+                )
+            self._begin_autonomous_sweep()
         elif event == "AT_BASE":
             self.event_log.log(self.playback.clock_s, "Rover at base, stationary. Docking may proceed.")
         elif event.startswith("RECOVERY:"):
@@ -1001,6 +1109,8 @@ class MainWindow(QMainWindow):
         else:
             self.playback.play()
             self.play_btn.setText("⏸ HOLD")
+            if self.flight_director.goal is None and self._waypoint_index == 0:
+                self._begin_autonomous_sweep()
 
     def _on_reset_clicked(self) -> None:
         self.playback.reset()
@@ -1009,6 +1119,14 @@ class MainWindow(QMainWindow):
         self.map_view.clear_perception()
         self._last_scan_s = -1e9
         self._obstacle_returns = 0
+        self._waypoint_index = 0
+        self._current_lane = None
+        self._last_replan_s = -1e9
+        self._last_replan_waypoint = -1
+        self.map_view.set_planned_path([], None)
+        self.map_view.clear_swept()
+        self._sweeping = False
+        self._last_sweep_xy = None
         self.event_log.clear()
         self.threat_panel.clear()
         self.phase_label.setText("STANDBY")

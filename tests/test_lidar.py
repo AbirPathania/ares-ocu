@@ -20,9 +20,7 @@ from ocu.core.terrain import (
 
 def blank_world() -> TerrainWorld:
     """Open ground, nothing in it, for controlled occlusion tests."""
-    world = TerrainWorld(_cells={"placeholder": Terrain.GROUND})
-    world._cells = {}
-    return world
+    return TerrainWorld.blank(half_extent_m=60.0)
 
 
 # --- the map starts empty -------------------------------------------------
@@ -65,7 +63,7 @@ def test_a_rock_casts_a_shadow_the_rover_cannot_see_into():
     world, perception = blank_world(), PerceptionMap()
     # A wall of rock due north at 5 m.
     for dx in range(-6, 7):
-        world._cells[(dx, 10)] = Terrain.ROCK
+        world.set_cell((dx, 10), Terrain.ROCK)
 
     cast_scan(world, perception, 0.0, 0.0)
 
@@ -77,7 +75,7 @@ def test_a_rock_casts_a_shadow_the_rover_cannot_see_into():
 def test_driving_around_an_obstacle_fills_in_its_shadow():
     world, perception = blank_world(), PerceptionMap()
     for dx in range(-6, 7):
-        world._cells[(dx, 10)] = Terrain.ROCK
+        world.set_cell((dx, 10), Terrain.ROCK)
 
     cast_scan(world, perception, 0.0, 0.0)
     assert not perception.is_known((0, 16))
@@ -91,7 +89,7 @@ def test_trees_occlude_and_rocks_occlude():
     for kind in (Terrain.TREE, Terrain.ROCK):
         world, perception = blank_world(), PerceptionMap()
         for dx in range(-8, 9):
-            world._cells[(dx, 8)] = kind
+            world.set_cell((dx, 8), kind)
         cast_scan(world, perception, 0.0, 0.0)
         assert perception.at((0, 8)) is kind
         assert not perception.is_known((0, 20)), f"{kind.name} must block the beam"
@@ -101,7 +99,7 @@ def test_scrub_does_not_occlude():
     """Low vegetation is driven over and seen past; it is not a wall."""
     world, perception = blank_world(), PerceptionMap()
     for dx in range(-8, 9):
-        world._cells[(dx, 8)] = Terrain.SCRUB
+        world.set_cell((dx, 8), Terrain.SCRUB)
     cast_scan(world, perception, 0.0, 0.0)
     assert perception.at((0, 8)) is Terrain.SCRUB
     assert perception.is_known((0, 20)), "scrub must not cast a shadow"
@@ -110,7 +108,7 @@ def test_scrub_does_not_occlude():
 def test_line_of_sight_agrees_with_the_scan():
     world = blank_world()
     for dx in range(-6, 7):
-        world._cells[(dx, 10)] = Terrain.ROCK
+        world.set_cell((dx, 10), Terrain.ROCK)
     assert has_line_of_sight(world, 0.0, 0.0, 0.0, 4.0)
     assert not has_line_of_sight(world, 0.0, 0.0, 0.0, 9.0)
 
@@ -118,25 +116,44 @@ def test_line_of_sight_agrees_with_the_scan():
 # --- the generated world --------------------------------------------------
 
 
+_SHARED: list = []
+
+
+def shared_world() -> TerrainWorld:
+    """Generating a full landscape is not cheap, so the tests that only
+    inspect the default world share one."""
+    if not _SHARED:
+        _SHARED.append(TerrainWorld())
+    return _SHARED[0]
+
+
 def test_the_deploy_point_is_clear_ground():
     """A rover does not start inside a tree."""
-    world = TerrainWorld()
-    assert world.classify(0.0, 0.0) not in IMPASSABLE
+    assert shared_world().classify(0.0, 0.0) not in IMPASSABLE
 
 
 def test_the_world_contains_every_class():
-    world = TerrainWorld()
-    present = set(world._cells.values())
+    import numpy as np
+
+    present = set(np.unique(shared_world()._grid).tolist())
     for kind in (Terrain.TRACK, Terrain.SCRUB, Terrain.TREE, Terrain.ROCK):
-        assert kind in present, f"generated world has no {kind.name}"
+        assert int(kind) in present, f"generated world has no {kind.name}"
 
 
 def test_the_world_is_deterministic_for_a_given_seed():
-    assert TerrainWorld(seed=7)._cells == TerrainWorld(seed=7)._cells
+    import numpy as np
+
+    a = TerrainWorld(seed=7, half_extent_m=20.0)
+    b = TerrainWorld(seed=7, half_extent_m=20.0)
+    assert np.array_equal(a._grid, b._grid)
 
 
 def test_different_seeds_give_different_ground():
-    assert TerrainWorld(seed=1)._cells != TerrainWorld(seed=2)._cells
+    import numpy as np
+
+    a = TerrainWorld(seed=1, half_extent_m=20.0)
+    b = TerrainWorld(seed=2, half_extent_m=20.0)
+    assert not np.array_equal(a._grid, b._grid)
 
 
 def test_occluding_and_impassable_agree():
@@ -145,7 +162,7 @@ def test_occluding_and_impassable_agree():
 
 
 def test_coverage_grows_as_the_vehicle_drives():
-    world, perception = TerrainWorld(), PerceptionMap()
+    world, perception = shared_world(), PerceptionMap()
     cast_scan(world, perception, 0.0, 0.0)
     first = perception.coverage_m2()
     cast_scan(world, perception, 20.0, 20.0)
@@ -173,7 +190,7 @@ def test_obstacles_return_harder_than_open_ground():
     """A rock face is near normal to the beam; ground is grazed."""
     world, perception = blank_world(), PerceptionMap()
     for dx in range(-3, 4):
-        world._cells[(dx, 8)] = Terrain.ROCK
+        world.set_cell((dx, 8), Terrain.ROCK)
     result = cast_scan(world, perception, 0.0, 0.0, seed=2)
 
     rock = [r.intensity for r in result.returns if r.kind is Terrain.ROCK]
@@ -194,7 +211,7 @@ def test_intensity_falls_off_with_range():
 def test_no_returns_come_from_behind_an_obstacle():
     world, perception = blank_world(), PerceptionMap()
     for dx in range(-10, 11):
-        world._cells[(dx, 10)] = Terrain.ROCK
+        world.set_cell((dx, 10), Terrain.ROCK)
     result = cast_scan(world, perception, 0.0, 0.0, seed=4)
     # Nothing measured beyond the wall on the bearings it covers.
     behind = [r for r in result.returns if r.y > 6.0 and abs(r.x) < 4.0 and r.kind is not Terrain.ROCK]
@@ -205,7 +222,7 @@ def test_every_ray_that_hits_reports_a_hit():
     world, perception = blank_world(), PerceptionMap()
     for dx in range(-40, 41):
         for dy in range(6, 9):
-            world._cells[(dx, dy)] = Terrain.TREE
+            world.set_cell((dx, dy), Terrain.TREE)
     result = cast_scan(world, perception, 0.0, 0.0, seed=5)
     assert result.hits > 0
     tree_returns = [r for r in result.returns if r.kind is Terrain.TREE]

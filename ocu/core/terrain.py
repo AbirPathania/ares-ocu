@@ -1,40 +1,45 @@
-"""The ground the rover is actually driving over, and what it is made of.
+"""The ground the rover drives over: an actual landscape, not stamped shapes.
+
+The first version scattered circular blobs and called them trees, which
+looked like what it was. Real ground is not a set of independent shapes
+dropped on a plane, it is correlated. Rock is exposed where the slope is
+steep enough to shed soil. Vegetation grows where there is moisture and
+the ground is not too steep. Dense tree cover sits in the wetter hollows,
+scrub takes the margins, and a worn track follows the easiest line
+through all of it.
+
+So the landscape is generated the way terrain generators actually work:
+fractal Brownian motion over simplex noise gives an elevation field, a
+second field gives moisture, and the classification falls out of
+elevation, slope and moisture together. Nothing is stamped. The shapes
+are irregular because they are the contours of a field, which is also why
+trees end up in the hollows and rock on the ridges without either being
+placed there deliberately.
 
 Two separate things live here and must not be confused:
 
-- **Ground truth.** A procedurally generated world of classified cells:
-  open ground, scrub, trees, rock, and a track running through it. This is
-  what is really there. The operator never sees it directly.
-- **The rover's map.** What the rover has actually observed, accumulated
-  from LiDAR returns. It starts entirely unknown and fills in only where
-  the sensor has reached. Everything the operator sees comes from this.
+- **Ground truth.** The generated world. The operator never sees it.
+- **The rover's map.** What LiDAR has actually returned, accumulated. It
+  starts empty and fills in only where the sensor reached.
 
-Keeping them apart is the whole point. A map that is simply drawn on
-screen is a picture; a map that is built from returns, with shadows behind
-every rock and nothing at all beyond sensor range, is perception. The
-second one is what the vehicle does, and the difference is visible in
-about two seconds of watching it drive.
+Everything is referenced to the deploy point at the origin, with +y along
+true north. The rover carries its own compass and inertial solution, so
+the whole picture is held in that frame with no external reference.
 
-Everything is referenced to the deploy point, which is the origin, with
-the y axis along true north. The rover carries its own compass and inertial
-solution, so the whole picture is built in that frame rather than needing
-an external reference, which is what lets this work with no GPS at all.
-
-No Qt import belongs in this file.
+Uses numpy and opensimplex, both open source. No Qt import belongs here.
 """
 
 from __future__ import annotations
 
 import math
-import random
 from dataclasses import dataclass, field
 from enum import IntEnum
 
+import numpy as np
+from opensimplex import OpenSimplex
+
 
 class Terrain(IntEnum):
-    """Cell classification. Ordered so higher values take precedence when
-    features overlap during generation."""
-
     UNKNOWN = 0
     GROUND = 1  # open, traversable
     TRACK = 2  # a worn path; the easiest going
@@ -43,14 +48,84 @@ class Terrain(IntEnum):
     TREE = 5  # impassable, and it blocks the beam
 
 
-#: Classes that stop a LiDAR ray. Everything else is driven over and seen past.
+#: Classes that stop a LiDAR ray.
 OCCLUDING = frozenset({Terrain.ROCK, Terrain.TREE})
 
 #: Classes a rover cannot drive through.
 IMPASSABLE = OCCLUDING
 
+#: Relative cost of crossing each traversable class, for the planner.
+TRAVERSE_COST = {
+    Terrain.TRACK: 1.0,
+    Terrain.GROUND: 1.4,
+    Terrain.SCRUB: 3.2,
+    Terrain.UNKNOWN: 2.0,  # worth probing, but not preferred over known ground
+}
+
 CELL_SIZE_M = 0.5
 WORLD_HALF_EXTENT_M = 110.0
+
+# Classification thresholds, tuned so the operating area reads as mixed
+# open country: mostly traversable, with enough tree and rock to cast real
+# sensor shadows and to give the planner something to route around. Too
+# much impassable ground and the scanner cannot see out of its own
+# clearing, which is both unrealistic and a poor demonstration.
+SCRUB_MOISTURE = 0.06
+TREE_MOISTURE = 0.34
+TREE_MAX_SLOPE = 0.22
+ROCK_SLOPE = 0.46
+ROCK_EXPOSED_SLOPE = 0.34
+ROCK_ELEVATION_PERCENTILE = 93.0
+
+
+def _fbm(seed: int, coords: np.ndarray, scale_m: float, octaves: int) -> np.ndarray:
+    """Fractal Brownian motion: octaves of simplex noise at halving amplitude.
+
+    One octave of noise is smooth and synthetic looking. Summing octaves at
+    halving amplitude and doubling frequency is what gives natural terrain
+    detail at every scale, which is why it is the standard approach.
+    """
+    noise = OpenSimplex(seed)
+    total = np.zeros((coords.size, coords.size), dtype=np.float64)
+    amplitude, frequency, norm = 1.0, 1.0 / scale_m, 0.0
+    for _ in range(octaves):
+        total += amplitude * noise.noise2array(coords * frequency, coords * frequency)
+        norm += amplitude
+        amplitude *= 0.5
+        frequency *= 2.0
+    return total / norm
+
+
+def _bilinear_upsample(field: np.ndarray, span: int) -> np.ndarray:
+    """Resample a coarse field up to the working grid."""
+    height, width = field.shape
+    yi = np.linspace(0, height - 1, span)
+    xi = np.linspace(0, width - 1, span)
+    y0 = np.floor(yi).astype(int)
+    x0 = np.floor(xi).astype(int)
+    y1 = np.minimum(y0 + 1, height - 1)
+    x1 = np.minimum(x0 + 1, width - 1)
+    wy = (yi - y0)[:, None]
+    wx = (xi - x0)[None, :]
+
+    top = field[np.ix_(y0, x0)] * (1 - wx) + field[np.ix_(y0, x1)] * wx
+    bottom = field[np.ix_(y1, x0)] * (1 - wx) + field[np.ix_(y1, x1)] * wx
+    return top * (1 - wy) + bottom * wy
+
+
+def _field(seed: int, span: int, extent: int, cell_size_m: float,
+           scale_m: float, octaves: int, coarse: int) -> np.ndarray:
+    """A noise field generated coarsely and resampled up.
+
+    These fields vary over tens of metres, so evaluating simplex noise at
+    every half-metre cell is roughly fifteen times the work for detail that
+    is not there. Generating at a few metres and resampling is visually
+    identical and takes the world build from seventeen seconds to about
+    one, which matters because it happens on launch.
+    """
+    coarse_span = max(8, span // coarse)
+    coords = (np.linspace(-extent, extent, coarse_span)) * cell_size_m
+    return _bilinear_upsample(_fbm(seed, coords, scale_m, octaves), span)
 
 
 @dataclass
@@ -59,12 +134,27 @@ class TerrainWorld:
 
     cell_size_m: float = CELL_SIZE_M
     half_extent_m: float = WORLD_HALF_EXTENT_M
-    seed: int = 20261002
-    _cells: dict[tuple[int, int], Terrain] = field(default_factory=dict)
+    seed: int = 20261016
+    _grid: np.ndarray = field(default=None, repr=False)
+    _elevation: np.ndarray = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        if not self._cells:
+        self._extent = int(self.half_extent_m / self.cell_size_m)
+        self._span = self._extent * 2 + 1
+        if self._grid is None:
             self._generate()
+
+    @classmethod
+    def blank(cls, half_extent_m: float = WORLD_HALF_EXTENT_M, cell_size_m: float = CELL_SIZE_M):
+        """Featureless open ground, for controlled tests of the sensor."""
+        extent = int(half_extent_m / cell_size_m)
+        span = extent * 2 + 1
+        return cls(
+            cell_size_m=cell_size_m,
+            half_extent_m=half_extent_m,
+            _grid=np.full((span, span), int(Terrain.GROUND), dtype=np.uint8),
+            _elevation=np.zeros((span, span), dtype=np.float64),
+        )
 
     # --- frame conversion -------------------------------------------------
 
@@ -74,11 +164,27 @@ class TerrainWorld:
     def to_world(self, cell: tuple[int, int]) -> tuple[float, float]:
         return (cell[0] * self.cell_size_m, cell[1] * self.cell_size_m)
 
-    def classify(self, x: float, y: float) -> Terrain:
-        return self._cells.get(self.to_cell(x, y), Terrain.GROUND)
+    def _index(self, cell: tuple[int, int]) -> tuple[int, int] | None:
+        ix, iy = cell[0] + self._extent, cell[1] + self._extent
+        if 0 <= ix < self._span and 0 <= iy < self._span:
+            return ix, iy
+        return None
 
     def at(self, cell: tuple[int, int]) -> Terrain:
-        return self._cells.get(cell, Terrain.GROUND)
+        index = self._index(cell)
+        return Terrain(self._grid[index]) if index else Terrain.GROUND
+
+    def set_cell(self, cell: tuple[int, int], kind: Terrain) -> None:
+        index = self._index(cell)
+        if index:
+            self._grid[index] = int(kind)
+
+    def classify(self, x: float, y: float) -> Terrain:
+        return self.at(self.to_cell(x, y))
+
+    def elevation_at(self, cell: tuple[int, int]) -> float:
+        index = self._index(cell)
+        return float(self._elevation[index]) if index else 0.0
 
     def blocks_beam(self, cell: tuple[int, int]) -> bool:
         return self.at(cell) in OCCLUDING
@@ -86,69 +192,88 @@ class TerrainWorld:
     # --- generation -------------------------------------------------------
 
     def _generate(self) -> None:
-        rng = random.Random(self.seed)
-        extent = int(self.half_extent_m / self.cell_size_m)
+        span, extent, cell = self._span, self._extent, self.cell_size_m
 
-        self._scatter_clusters(rng, extent, Terrain.SCRUB, patches=90, radius_m=(2.0, 6.0))
-        self._scatter_clusters(rng, extent, Terrain.TREE, patches=55, radius_m=(1.5, 5.0))
-        self._scatter_clusters(rng, extent, Terrain.ROCK, patches=70, radius_m=(1.2, 4.0))
+        elevation = _field(self.seed, span, extent, cell, 85.0, 5, coarse=4) * 14.0
+        moisture = _field(self.seed + 977, span, extent, cell, 42.0, 3, coarse=4)
+        detail = _field(self.seed + 1511, span, extent, cell, 9.0, 2, coarse=2)
 
-        # A track is carved last so it cuts through whatever it crosses: a
-        # path exists because something has already driven the scrub down.
-        self._carve_track(rng, extent)
+        # Rock is exposed where the ground is too steep to hold soil, so the
+        # slope of the elevation field is what places it. The gradient is
+        # taken before resampling: differentiating an interpolated field
+        # gives a slope that is flat inside each coarse cell and steps at
+        # the seams, which would put rock in a grid pattern.
+        coarse_span = max(8, span // 4)
+        coarse_coords = np.linspace(-extent, extent, coarse_span) * cell
+        coarse_elevation = _fbm(self.seed, coarse_coords, 85.0, 5) * 14.0
+        coarse_step = (coarse_coords[-1] - coarse_coords[0]) / max(1, coarse_span - 1)
+        cgy, cgx = np.gradient(coarse_elevation, coarse_step)
+        slope = _bilinear_upsample(np.hypot(cgx, cgy), span)
 
-    def _scatter_clusters(
-        self, rng: random.Random, extent: int, kind: Terrain, patches: int, radius_m: tuple[float, float]
-    ) -> None:
-        for _ in range(patches):
-            cx = rng.uniform(-self.half_extent_m, self.half_extent_m)
-            cy = rng.uniform(-self.half_extent_m, self.half_extent_m)
-            # Keep the deploy point itself clear; a rover does not start
-            # inside a tree.
-            if math.hypot(cx, cy) < 8.0:
-                continue
-            radius = rng.uniform(*radius_m)
-            self._stamp_blob(rng, cx, cy, radius, kind, extent)
+        grid = np.full((self._span, self._span), int(Terrain.GROUND), dtype=np.uint8)
 
-    def _stamp_blob(
-        self, rng: random.Random, cx: float, cy: float, radius_m: float, kind: Terrain, extent: int
-    ) -> None:
-        """An irregular blob, so nothing reads as a perfect circle."""
-        cells = int(radius_m / self.cell_size_m) + 1
-        centre = self.to_cell(cx, cy)
-        wobble = rng.uniform(0.6, 1.0)
-        phase = rng.uniform(0, math.tau)
-        for dx in range(-cells, cells + 1):
-            for dy in range(-cells, cells + 1):
-                distance = math.hypot(dx, dy) * self.cell_size_m
-                angle = math.atan2(dy, dx)
-                edge = radius_m * (wobble + 0.4 * math.sin(3 * angle + phase))
-                if distance > edge:
-                    continue
-                cell = (centre[0] + dx, centre[1] + dy)
-                if abs(cell[0]) > extent or abs(cell[1]) > extent:
-                    continue
-                if kind >= self._cells.get(cell, Terrain.GROUND):
-                    self._cells[cell] = kind
+        scrub = (moisture + 0.25 * detail) > SCRUB_MOISTURE
+        grid[scrub] = int(Terrain.SCRUB)
 
-    def _carve_track(self, rng: random.Random, extent: int) -> None:
-        """A meandering path from the deploy point outward, two metres wide."""
+        # Trees take the wettest ground that is not steep, which puts them
+        # in the hollows rather than anywhere in particular.
+        trees = (moisture + 0.30 * detail > TREE_MOISTURE) & (slope < TREE_MAX_SLOPE)
+        grid[trees] = int(Terrain.TREE)
+
+        rock = (slope > ROCK_SLOPE) | (
+            (slope > ROCK_EXPOSED_SLOPE)
+            & (elevation > np.percentile(elevation, ROCK_ELEVATION_PERCENTILE))
+        )
+        grid[rock] = int(Terrain.ROCK)
+
+        self._elevation = elevation
+        self._grid = grid
+
+        self._carve_track(slope, moisture)
+        self._clear_deploy_point()
+
+    def _carve_track(self, slope: np.ndarray, moisture: np.ndarray) -> None:
+        """A worn path follows the easiest line, so it is routed by cost.
+
+        At each step the track takes whichever forward heading crosses the
+        least difficult ground. That is why a real path bends around a bank
+        instead of going straight over it.
+        """
         x, y = 0.0, 0.0
-        heading = rng.uniform(-0.4, 0.4)  # roughly north out of the deploy point
-        half_width = int(1.0 / self.cell_size_m)
+        heading = 0.35
+        half_width = max(1, int(1.1 / self.cell_size_m))
 
-        for _ in range(900):
-            heading += rng.uniform(-0.09, 0.09)
+        for _ in range(1200):
+            best, best_cost = heading, float("inf")
+            for turn in (-0.22, -0.11, 0.0, 0.11, 0.22):
+                candidate = heading + turn
+                index = self._index(
+                    self.to_cell(x + math.sin(candidate) * 3.0, y + math.cos(candidate) * 3.0)
+                )
+                if index is None:
+                    continue
+                cost = slope[index] * 10.0 + max(0.0, moisture[index]) * 2.0 + abs(turn) * 0.6
+                if cost < best_cost:
+                    best, best_cost = candidate, cost
+            heading = best
+
             x += math.sin(heading) * self.cell_size_m
             y += math.cos(heading) * self.cell_size_m
-            if abs(x) > self.half_extent_m or abs(y) > self.half_extent_m:
+            if abs(x) > self.half_extent_m - 2 or abs(y) > self.half_extent_m - 2:
                 break
+
             centre = self.to_cell(x, y)
             for dx in range(-half_width, half_width + 1):
                 for dy in range(-half_width, half_width + 1):
-                    cell = (centre[0] + dx, centre[1] + dy)
-                    if abs(cell[0]) <= extent and abs(cell[1]) <= extent:
-                        self._cells[cell] = Terrain.TRACK
+                    self.set_cell((centre[0] + dx, centre[1] + dy), Terrain.TRACK)
+
+    def _clear_deploy_point(self) -> None:
+        """A rover does not start inside a tree."""
+        clear = int(6.0 / self.cell_size_m)
+        for dx in range(-clear, clear + 1):
+            for dy in range(-clear, clear + 1):
+                if math.hypot(dx, dy) * self.cell_size_m <= 6.0 and self.at((dx, dy)) in IMPASSABLE:
+                    self.set_cell((dx, dy), Terrain.GROUND)
 
 
 @dataclass
@@ -157,14 +282,26 @@ class PerceptionMap:
 
     cell_size_m: float = CELL_SIZE_M
     _observed: dict[tuple[int, int], Terrain] = field(default_factory=dict)
-    _pending: list[tuple[tuple[int, int], Terrain]] = field(default_factory=list)
+
+    #: Append-only record of every classification change, in the order it
+    #: happened. Several things consume the map as a stream rather than
+    #: re-reading all of it: the renderer blits new points into its cached
+    #: cloud, and the costmap folds new obstacles into its inflation layer.
+    #: Each keeps its own cursor into this journal, so neither consumes the
+    #: other's updates.
+    _journal: list[tuple[tuple[int, int], Terrain]] = field(default_factory=list)
+    _render_cursor: int = 0
+
+    #: Bumped on clear(). A consumer holding a cursor from a previous
+    #: mission has to notice that the map underneath it was replaced rather
+    #: than silently carrying stale obstacles into the new one.
+    epoch: int = 0
 
     def observe(self, cell: tuple[int, int], kind: Terrain) -> bool:
-        """Record one cell. Returns True if this is new information."""
         if self._observed.get(cell) == kind:
             return False
         self._observed[cell] = kind
-        self._pending.append((cell, kind))
+        self._journal.append((cell, kind))
         return True
 
     def at(self, cell: tuple[int, int]) -> Terrain:
@@ -180,18 +317,19 @@ class PerceptionMap:
         return len(self._observed) * self.cell_size_m**2
 
     def drain_new(self) -> list[tuple[tuple[int, int], Terrain]]:
-        """Cells observed since the last drain.
+        """Changes since this was last called. For the renderer's cursor."""
+        new, self._render_cursor = self._journal[self._render_cursor :], len(self._journal)
+        return new
 
-        The renderer keeps a cached image of the discovered map and only
-        needs to paint what changed; repainting a hundred thousand cells
-        every frame to show a few new ones would be absurd.
-        """
-        pending, self._pending = self._pending, []
-        return pending
+    def changes_since(self, cursor: int) -> tuple[list[tuple[tuple[int, int], Terrain]], int]:
+        """Changes after `cursor`, and the cursor to pass in next time."""
+        return self._journal[cursor:], len(self._journal)
 
     def clear(self) -> None:
         self._observed.clear()
-        self._pending.clear()
+        self._journal.clear()
+        self._render_cursor = 0
+        self.epoch += 1
 
     def __len__(self) -> int:
         return len(self._observed)

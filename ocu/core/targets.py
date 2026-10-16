@@ -25,6 +25,9 @@ from __future__ import annotations
 
 import math
 import random
+
+from ocu.core.sweep import LaneSweep, plan_lane_sweep
+from ocu.core.terrain import TerrainWorld
 from dataclasses import dataclass, field
 
 
@@ -61,7 +64,7 @@ class TargetField:
         return len(self.targets)
 
 
-def default_field(seed: int = 20261016) -> TargetField:
+def default_field(seed: int = 20261016, sweep: LaneSweep | None = None) -> TargetField:
     """Objects laid along the lane the rover sweeps, plus others dispersed.
 
     The suite's widest swath is the pulse induction array at 40 cm, so a
@@ -80,23 +83,36 @@ def default_field(seed: int = 20261016) -> TargetField:
       - an object just outside the swath, which is missed, because a
         demonstration where everything is found teaches nothing about lane
         width
+
+    They are positioned relative to the sweep rather than in absolute
+    coordinates, because the sweep's axis is chosen from the terrain. An
+    object buried at a fixed coordinate would end up wherever the lanes
+    did not go the moment the ground changed, and the demonstration would
+    silently become one where the vehicle sweeps empty dirt.
     """
     rng = random.Random(seed)
-    targets = [
+    sweep = sweep if sweep is not None else plan_lane_sweep(TerrainWorld(seed=seed))
+
+    # (lane, metres along it, metres across it, then the object itself)
+    placements = [
         # On the lane, dead centre, shallow and ferrous: all four respond.
-        BuriedTarget(9.0, 0.04, 0.07, 165.0, True, 0.58, "high_metal_shallow"),
+        (0, 9.0, 0.04, 0.07, 165.0, True, 0.58, "high_metal_shallow"),
         # On the lane but deep and barely metallic, and non-ferrous, so the
         # gradiometer is blind to it and induction is marginal.
-        BuriedTarget(13.2, -0.09, 0.27, 11.0, False, 0.34, "low_metal_deep"),
+        (0, 13.2, -0.09, 0.27, 11.0, False, 0.34, "low_metal_deep"),
         # Scrap: strong metal return, no vapour at all.
-        BuriedTarget(16.1, 0.11, 0.13, 255.0, True, 0.0, "inert_scrap"),
-        # On the curve out, ferrous and deep: the gradiometer leads here
+        (0, 16.1, 0.11, 0.13, 255.0, True, 0.0, "inert_scrap"),
+        # On the second lane, ferrous and deep: the gradiometer leads here
         # because it reaches past the induction array.
-        BuriedTarget(20.4, 4.02, 0.36, 95.0, True, 0.12, "ferrous_deep"),
-        # Clear of every swath, including the 2 m the vapour sensor reaches,
-        # so the sweep genuinely misses it.
-        BuriedTarget(6.5, 2.8, 0.06, 140.0, True, 0.5, "outside_swath"),
+        (1, 18.6, 0.05, 0.36, 95.0, True, 0.12, "ferrous_deep"),
+        # Between the lanes, clear of every swath including the 2 m the
+        # vapour sensor reaches, so the sweep genuinely misses it.
+        (0, 6.5, 2.0, 0.06, 140.0, True, 0.5, "outside_swath"),
     ]
+    targets = []
+    for lane, along, offset, depth, mass, ferrous, voc, truth in placements:
+        x, y = sweep.at(lane, along, offset)
+        targets.append(BuriedTarget(x, y, depth, mass, ferrous, voc, truth))
     for _ in range(6):
         targets.append(
             BuriedTarget(
