@@ -6,7 +6,11 @@ dropped on a plane, it is correlated. Rock is exposed where the slope is
 steep enough to shed soil. Vegetation grows where there is moisture and
 the ground is not too steep. Dense tree cover sits in the wetter hollows,
 scrub takes the margins, and a worn track follows the easiest line
-through all of it.
+through all of it. Rock is not a class painted over a region but a
+population of individual boulders, each a rounded, partly buried dome of its
+own size and height: sparse on flat ground, thick on slopes, and heaped into
+outcrops where it is steepest. The cells it occupies, and how tall it
+stands, both come from those domes.
 
 So the landscape is generated the way terrain generators actually work:
 fractal Brownian motion over simplex noise gives an elevation field, a
@@ -73,9 +77,28 @@ WORLD_HALF_EXTENT_M = 110.0
 SCRUB_MOISTURE = 0.06
 TREE_MOISTURE = 0.34
 TREE_MAX_SLOPE = 0.22
-ROCK_SLOPE = 0.46
-ROCK_EXPOSED_SLOPE = 0.34
-ROCK_ELEVATION_PERCENTILE = 93.0
+ROCK_SLOPE = 0.46  # slope at which scree is as thick as it gets
+
+# Boulders. A rock is an object with a size, not a patch of ground, so the
+# population is drawn the way a real one is distributed: many small, few
+# large (lognormal in radius), rarely round, partly buried, and far thicker
+# where the ground is steep enough to shed them.
+BOULDER_MEDIAN_RADIUS_M = 0.5
+BOULDER_RADIUS_SIGMA = 0.55
+BOULDER_RADIUS_RANGE_M = (0.16, 2.4)
+BOULDER_FLAT_DENSITY = 0.0042  # per square metre on level ground
+BOULDER_SCREE_DENSITY = 0.040  # extra per square metre where it is steepest
+SCREE_ONSET_SLOPE = 0.16
+OUTCROP_SLOPE = 0.38
+OUTCROP_CHANCE_PER_CELL = 0.0035
+BOULDER_CLEAR_RADIUS_M = 8.0  # around the deploy point
+
+#: How tall a boulder has to stand before a wheeled vehicle treats it as an
+#: obstacle. Lower than this is stone, which is rendered but driven over.
+ROCK_IMPASSABLE_HEIGHT_M = 0.30
+
+#: Height given to a cell painted ROCK by hand, as tests and scenarios do.
+PAINTED_ROCK_HEIGHT_M = 0.9
 
 
 def _fbm(seed: int, coords: np.ndarray, scale_m: float, octaves: int) -> np.ndarray:
@@ -137,12 +160,19 @@ class TerrainWorld:
     seed: int = 20261016
     _grid: np.ndarray = field(default=None, repr=False)
     _elevation: np.ndarray = field(default=None, repr=False)
+    #: Height of rock standing above the ground, per cell, in metres. The
+    #: source of truth for rock: the ROCK class is where this exceeds
+    #: ROCK_IMPASSABLE_HEIGHT_M, and the cameras draw the domes themselves.
+    _rock_height: np.ndarray = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._extent = int(self.half_extent_m / self.cell_size_m)
         self._span = self._extent * 2 + 1
         if self._grid is None:
             self._generate()
+        if self._rock_height is None:
+            self._rock_height = np.zeros((self._span, self._span), dtype=np.float32)
+            self._rock_height[self._grid == int(Terrain.ROCK)] = PAINTED_ROCK_HEIGHT_M
 
     @classmethod
     def blank(cls, half_extent_m: float = WORLD_HALF_EXTENT_M, cell_size_m: float = CELL_SIZE_M):
@@ -154,6 +184,7 @@ class TerrainWorld:
             half_extent_m=half_extent_m,
             _grid=np.full((span, span), int(Terrain.GROUND), dtype=np.uint8),
             _elevation=np.zeros((span, span), dtype=np.float64),
+            _rock_height=np.zeros((span, span), dtype=np.float32),
         )
 
     # --- frame conversion -------------------------------------------------
@@ -178,6 +209,16 @@ class TerrainWorld:
         index = self._index(cell)
         if index:
             self._grid[index] = int(kind)
+            # Whatever is painted over a boulder removes it, and a cell
+            # painted rock stands up, so the two views of rock never disagree.
+            if kind == Terrain.ROCK:
+                self._rock_height[index] = max(float(self._rock_height[index]), PAINTED_ROCK_HEIGHT_M)
+            else:
+                self._rock_height[index] = 0.0
+
+    def rock_height_at(self, cell: tuple[int, int]) -> float:
+        index = self._index(cell)
+        return float(self._rock_height[index]) if index else 0.0
 
     def classify(self, x: float, y: float) -> Terrain:
         return self.at(self.to_cell(x, y))
@@ -220,17 +261,107 @@ class TerrainWorld:
         trees = (moisture + 0.30 * detail > TREE_MOISTURE) & (slope < TREE_MAX_SLOPE)
         grid[trees] = int(Terrain.TREE)
 
-        rock = (slope > ROCK_SLOPE) | (
-            (slope > ROCK_EXPOSED_SLOPE)
-            & (elevation > np.percentile(elevation, ROCK_ELEVATION_PERCENTILE))
-        )
-        grid[rock] = int(Terrain.ROCK)
+        # Boulders go where trees are not: a stand of trees and a scree
+        # slope are different ground, and a boulder inside a crown is not
+        # one anyone can see.
+        rock_height = self._scatter_boulders(slope, detail, trees)
+        grid[rock_height >= ROCK_IMPASSABLE_HEIGHT_M] = int(Terrain.ROCK)
 
         self._elevation = elevation
         self._grid = grid
+        self._rock_height = rock_height
 
         self._carve_track(slope, moisture)
         self._clear_deploy_point()
+
+    def _scatter_boulders(
+        self, slope: np.ndarray, detail: np.ndarray, trees: np.ndarray
+    ) -> np.ndarray:
+        """Draw the boulder population and raise it onto a height field.
+
+        Position comes from a density that rises with slope (scree is shed
+        downhill) and is modulated by a noise field so boulders gather in
+        patches instead of falling like rain. Size is lognormal. Where the
+        ground is steepest, heaps of large boulders form outcrops.
+        """
+        rng = np.random.default_rng(self.seed ^ 0xB011D3)
+        span, cell = self._span, self.cell_size_m
+
+        steep = np.clip((slope - SCREE_ONSET_SLOPE) / (ROCK_SLOPE - SCREE_ONSET_SLOPE), 0.0, 1.0)
+        steep = steep * steep * (3.0 - 2.0 * steep)  # smoothstep
+        clustering = np.clip(0.55 + 0.9 * detail, 0.05, 2.0)
+        density = (BOULDER_FLAT_DENSITY + BOULDER_SCREE_DENSITY * steep) * clustering
+        density = np.where(trees, 0.0, density)
+
+        counts = rng.poisson(density * cell * cell)
+        cell_ids = np.repeat(np.arange(counts.size), counts.ravel())
+        ix, iy = np.unravel_index(cell_ids, counts.shape)
+        centre_x = (ix + rng.uniform(0.0, 1.0, ix.size) - self._extent) * cell
+        centre_y = (iy + rng.uniform(0.0, 1.0, iy.size) - self._extent) * cell
+
+        radius = np.exp(rng.normal(math.log(BOULDER_MEDIAN_RADIUS_M), BOULDER_RADIUS_SIGMA, ix.size))
+        radius *= 1.0 + 0.6 * steep[ix, iy]  # scree runs larger
+        boulders = [
+            (x, y, r) for x, y, r in zip(centre_x, centre_y, radius)
+        ]
+
+        # Outcrops: a heap of overlapping large boulders where it is steepest.
+        steep_cells = np.argwhere((slope > OUTCROP_SLOPE) & ~trees)
+        chosen = steep_cells[rng.random(len(steep_cells)) < OUTCROP_CHANCE_PER_CELL]
+        for cx, cy in chosen:
+            ox, oy = (cx - self._extent) * cell, (cy - self._extent) * cell
+            for _ in range(int(rng.integers(4, 8))):
+                boulders.append(
+                    (
+                        ox + rng.normal(0.0, 1.8),
+                        oy + rng.normal(0.0, 1.8),
+                        rng.uniform(1.0, 2.6),
+                    )
+                )
+
+        height = np.zeros((span, span), dtype=np.float32)
+        low, high = BOULDER_RADIUS_RANGE_M
+        for x, y, r in boulders:
+            if math.hypot(x, y) < BOULDER_CLEAR_RADIUS_M:
+                continue
+            r = min(max(r, low), high)
+            aspect = rng.uniform(0.55, 1.0)
+            theta = rng.uniform(0.0, math.pi)
+            top = r * rng.uniform(0.5, 0.9)  # partly buried: lower than it is wide
+            self._raise_dome(height, x, y, r, r * aspect, theta, top)
+        return height
+
+    def _raise_dome(
+        self,
+        height: np.ndarray,
+        x: float,
+        y: float,
+        semi_major: float,
+        semi_minor: float,
+        theta: float,
+        top: float,
+    ) -> None:
+        """Raise one half-ellipsoid onto the height field, keeping the taller
+        of it and whatever is already there so overlapping boulders merge."""
+        cell = self.cell_size_m
+        reach = int(math.ceil(semi_major / cell)) + 1
+        cx = int(math.floor(x / cell)) + self._extent
+        cy = int(math.floor(y / cell)) + self._extent
+        x0, x1 = max(cx - reach, 0), min(cx + reach + 1, self._span)
+        y0, y1 = max(cy - reach, 0), min(cy + reach + 1, self._span)
+        if x0 >= x1 or y0 >= y1:
+            return
+
+        gx = (np.arange(x0, x1) - self._extent + 0.5) * cell - x
+        gy = (np.arange(y0, y1) - self._extent + 0.5) * cell - y
+        dx, dy = np.meshgrid(gx, gy, indexing="ij")
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+        u = (dx * cos_t + dy * sin_t) / semi_major
+        v = (-dx * sin_t + dy * cos_t) / semi_minor
+        inside = 1.0 - (u * u + v * v)
+        dome = top * np.sqrt(np.clip(inside, 0.0, None))
+        window = height[x0:x1, y0:y1]
+        np.maximum(window, dome.astype(np.float32), out=window)
 
     def _carve_track(self, slope: np.ndarray, moisture: np.ndarray) -> None:
         """A worn path follows the easiest line, so it is routed by cost.

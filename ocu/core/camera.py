@@ -8,20 +8,31 @@ nothing is drawn that does not exist in it. A rig is built from a world and
 reflects it as it was then; the terrain is fixed for a mission, so there is
 nothing to keep in step, but a changed world needs a new rig.
 
-Two views, because the vehicles look at the world differently:
+Three views, because the vehicles look at the world differently:
 
-  * The rover's forward camera: a pinhole view at wheel-mast height,
-    rendered by marching a ray down every pixel column and projecting the
-    ground and whatever stands on it. This is the standard heightfield
-    method. It resolves occlusion for free, because a column that has
-    already been filled by something nearer is not drawn over by something
-    farther, and that is exactly why a tree hides the ground behind it.
+  * The rover's forward camera: a pinhole view at mast height, rendered by
+    marching a ray down every azimuth and projecting the ground and whatever
+    stands on it. This is the standard heightfield method.
 
-  * The tricopters' nadir camera: a straight-down view whose footprint is
-    set by altitude, so climbing widens what is seen and costs resolution,
-    which is the real trade. Tall things cast shadows away from the sun,
-    because from above a tree is a green shape and its shadow is the only
-    thing that says it is tall.
+  * The tricopters' scout camera: the same renderer from the air, pitched
+    down. A nano-class scout carries a gimballed forward-looking camera, not
+    a straight-down one, because what it is for is seeing ahead of the
+    formation: ground, the far edge of a clearing, the thing behind the
+    rock. Pitch and field of view are parameters; the defaults look along
+    the direction the formation faces, tipped down enough to see the ground
+    it is crossing.
+
+  * A straight-down nadir view, for a camera that really does look down.
+    Its footprint is set by altitude, so climbing widens what is seen and
+    costs resolution. Tall things cast shadows away from the sun, because
+    from above a tree is a green shape and its shadow is what says it is tall.
+
+Both oblique views are resolved in angle space. Every pixel has a true ray,
+an azimuth and an elevation, and every sample along a ground azimuth has the
+elevation at which it appears. A pixel belongs to the nearest sample whose
+top has reached its elevation, which is occlusion, and the same rule is exact
+for a pitched camera where treating image columns as constant-azimuth rays
+(the usual shortcut) is only right with the camera level.
 
 Colour is natural, not the map's classification palette. The map is a
 product; the camera is a window.
@@ -43,7 +54,6 @@ from ocu.core.terrain import Terrain, TerrainWorld
 #: a stand of it. Trees are the only thing here meaningfully taller than the
 #: camera.
 TREE_HEIGHT_M = 6.5
-ROCK_HEIGHT_M = 1.1
 SCRUB_HEIGHT_M = 0.6
 
 #: How much of the surrounding ground has to be a class before it stands up
@@ -56,7 +66,6 @@ STAND_FULL = 0.80
 #: Blur radii, in cells, for turning the grid into smooth fields.
 GROUND_BLUR_CELLS = 2
 TREE_BLUR_CELLS = 3
-ROCK_BLUR_CELLS = 1
 SCRUB_BLUR_CELLS = 2
 
 #: Height variation across a stand, as a fraction. Smooth, so neighbouring
@@ -83,7 +92,7 @@ HAZE_RGB = (186, 200, 208)
 
 #: Atmospheric extinction length. Distant ground fades into haze, which is
 #: what gives a view its depth and hides the edge of the rendered range.
-HAZE_LENGTH_M = 95.0
+HAZE_LENGTH_M = 170.0
 
 #: Fraction of a tree's height that is trunk, measured from the ground.
 TRUNK_FRACTION = 0.28
@@ -113,6 +122,7 @@ TEXTURE_CELL_M = 0.13
 # --- the rover, as seen from above -------------------------------------------
 
 ROVER_LENGTH_M = 1.15
+ROVER_HEIGHT_M = 0.8
 ROVER_WIDTH_M = 0.85
 ROVER_BODY_RGB = (46, 52, 60)
 ROVER_NOSE_RGB = (120, 140, 156)
@@ -227,17 +237,20 @@ class CameraRig:
             return np.clip(1.0 + HEIGHT_VARIATION * noise, 0.5, 1.5).astype(np.float32)
 
         tree = _box_blur((grid == int(Terrain.TREE)).astype(np.float32), TREE_BLUR_CELLS)
-        rock = _box_blur((grid == int(Terrain.ROCK)).astype(np.float32), ROCK_BLUR_CELLS)
         scrub = _box_blur((grid == int(Terrain.SCRUB)).astype(np.float32), SCRUB_BLUR_CELLS)
         tree_h = TREE_HEIGHT_M * _stand(tree) * variation(3)
-        rock_h = ROCK_HEIGHT_M * _stand(rock) * variation(1)
         scrub_h = SCRUB_HEIGHT_M * _stand(scrub) * variation(2)
+        # Rock is not a blurred class. The world holds each boulder as a
+        # dome with a real height, so the camera draws that, round and of the
+        # size it actually is, instead of inferring a shape from a mask.
+        rock_h = world._rock_height.astype(np.float32)
 
         # Fused fields. A frame is dominated by the cost of calling into
         # numpy, not by arithmetic, so what is sampled together is stored
         # together and read with one bilinear lookup instead of four.
         #   relief  = elevation, tree, rock, scrub heights
         #   surface = lit ground colour (r, g, b), then the hillshade
+        self._ray_cache: dict = {}
         self._relief = np.stack([self._elevation, tree_h, rock_h, scrub_h], axis=-1)
         self._standing = np.maximum(np.maximum(tree_h, rock_h), scrub_h)
         self._surface = np.concatenate(
@@ -293,7 +306,7 @@ class CameraRig:
         texture = 0.80 + 0.16 * grit + 0.14 * patch + 0.12 * mottle
         return lit * texture[..., None]
 
-    # --- the rover's forward camera -----------------------------------------
+    # --- oblique cameras: the rover's forward camera, and the scouts' ---------
 
     def forward_view(
         self,
@@ -305,96 +318,211 @@ class CameraRig:
         fov_deg: float = 112.0,
         camera_height_m: float = 1.5,
         max_range_m: float = 65.0,
+        pitch_down_deg: float = 3.0,
         sensor_noise: float = 0.0,
     ) -> np.ndarray:
         """What the rover's forward camera sees. (height, width, 3) uint8."""
+        return self._render(
+            x, y, self.elevation_at(x, y) + camera_height_m, heading_deg, width, height,
+            fov_deg, pitch_down_deg, max_range_m, None, sensor_noise,
+        )
+
+    def scout_view(
+        self,
+        x: float,
+        y: float,
+        altitude_agl_m: float,
+        heading_deg: float,
+        width: int = 192,
+        height: int = 76,
+        fov_deg: float = 84.0,
+        pitch_down_deg: float = 18.0,
+        max_range_m: float = 140.0,
+        rover: tuple[float, float, float] | None = None,
+        sensor_noise: float = 0.0,
+    ) -> np.ndarray:
+        """What a scout's forward-looking, gimballed camera sees.
+
+        The camera faces `heading_deg`, tipped down by `pitch_down_deg`, at
+        `altitude_agl_m` above the ground beneath it (scouts hold height over
+        terrain rather than over a datum). `rover` is (x, y, heading_deg) of
+        the ground vehicle, drawn if it is in view: a vehicle is part of the
+        scene an aircraft looks at.
+        """
+        return self._render(
+            x, y, self.elevation_at(x, y) + altitude_agl_m, heading_deg, width, height,
+            fov_deg, pitch_down_deg, max_range_m, rover, sensor_noise,
+        )
+
+    def _pixel_rays(self, width: int, height: int, fov_deg: float, pitch_down_deg: float):
+        """Azimuth offset and elevation of every pixel's ray, and its bin.
+
+        Camera axes are (right, up, forward). Tipping the camera down by the
+        pitch turns the forward axis toward the ground, so a pixel's ray in
+        the level frame is the camera ray rotated about the lateral axis.
+        Depends only on the lens and the pitch, so it is computed once.
+        """
+        key = (width, height, round(fov_deg, 3), round(pitch_down_deg, 3))
+        cached = self._ray_cache.get(key)
+        if cached is not None:
+            return cached
+
         focal = (width / 2.0) / math.tan(math.radians(fov_deg / 2.0))
-        horizon = height * 0.43
+        pitch = math.radians(pitch_down_deg)
+        cols = np.arange(width, dtype=np.float64) + 0.5 - width / 2.0
+        rows = height / 2.0 - (np.arange(height, dtype=np.float64) + 0.5)
+        right, up = np.meshgrid(cols, rows)  # (H, W)
 
-        columns = np.arange(width, dtype=np.float32)
-        theta = np.arctan((columns + 0.5 - width / 2.0) / focal)
-        cos_theta = np.cos(theta)
-        bearing = math.radians(heading_deg) + theta  # clockwise-positive, so right of centre
-        dir_x, dir_y = np.sin(bearing), np.cos(bearing)
+        horizontal = focal * math.cos(pitch) + up * math.sin(pitch)  # along the heading
+        vertical = up * math.cos(pitch) - focal * math.sin(pitch)
+        azimuth = np.arctan2(right, horizontal)
+        elevation = np.arctan2(vertical, np.hypot(right, horizontal))
 
-        camera_z = self.elevation_at(x, y) + camera_height_m
-        rows = np.arange(height, dtype=np.float32)
+        # Azimuth is sampled finer than the pixel grid, so adjacent pixels
+        # that look along slightly different azimuths do not share a ray.
+        bins = max(int(width * 1.3), 8)
+        lo, hi = float(azimuth.min()), float(azimuth.max())
+        edges = np.linspace(lo, hi, bins)
+        spacing = (hi - lo) / max(bins - 1, 1)
+        bin_of = np.clip(np.rint((azimuth - lo) / max(spacing, 1e-9)).astype(np.int64), 0, bins - 1)
+        cached = (azimuth.astype(np.float32), elevation.astype(np.float32), edges.astype(np.float32), bin_of)
+        self._ray_cache[key] = cached
+        return cached
+
+    def _render(
+        self,
+        x: float,
+        y: float,
+        camera_z: float,
+        heading_deg: float,
+        width: int,
+        height: int,
+        fov_deg: float,
+        pitch_down_deg: float,
+        max_range_m: float,
+        rover: tuple[float, float, float] | None,
+        sensor_noise: float,
+    ) -> np.ndarray:
+        azimuth, elevation, bin_azimuth, bin_of = self._pixel_rays(width, height, fov_deg, pitch_down_deg)
         haze_rgb = np.array(HAZE_RGB, dtype=np.float32)
+        heading = math.radians(heading_deg)
 
-        # Sample depths: about a cell apart near the camera, spread
-        # geometrically further out, since a half-metre step at sixty metres
+        # Ground distances to sample: about a cell apart near the camera and
+        # spread geometrically beyond, since a half-metre step at sixty metres
         # is far finer than a pixel is wide.
         depths = []
-        depth = 0.8
-        while depth < max_range_m:
-            depth += max(self._cell * 0.8, depth * 0.018)
-            depths.append(depth)
+        distance = 0.6
+        while distance < max_range_m:
+            distance += max(self._cell * 0.8, distance * 0.018)
+            depths.append(distance)
         depth = np.array(depths, dtype=np.float32)[:, None]  # (S, 1)
         step = np.diff(depth[:, 0], prepend=depth[0, 0] - self._cell)[:, None]
 
-        # Every sample along every column's ray, in one lookup.
-        sx = x + dir_x[None, :] * depth  # (S, W)
-        sy = y + dir_y[None, :] * depth
-        sample = self._bilerp(self._relief, sx, sy)  # (S, W, 4)
+        ray_bearing = heading + bin_azimuth  # (B,)
+        sx = x + np.sin(ray_bearing)[None, :] * depth  # (S, B)
+        sy = y + np.cos(ray_bearing)[None, :] * depth
+        sample = self._bilerp(self._relief, sx, sy)  # (S, B, 4)
         ground_z = sample[..., 0]
         heights = sample[..., 1:]  # tree, rock, scrub
         standing = heights.max(axis=-1)
-        zd = depth * cos_theta[None, :]  # perpendicular depth is what projects
 
-        y_top = horizon - focal * (ground_z + standing - camera_z) / zd
-        y_base = horizon - focal * (ground_z - camera_z) / zd
+        # Elevation at which the top and the foot of each sample appear.
+        angle_top = np.arctan2(ground_z + standing - camera_z, depth)
+        angle_base = np.arctan2(ground_z - camera_z, depth)
 
         # Occlusion. A pixel belongs to the nearest sample whose top has
-        # reached it, because anything farther is behind that. The running
-        # minimum of the tops is how far up each column the nearer samples
-        # have already covered, so the first sample whose running minimum
-        # reaches a row is the one that row shows.
-        first = np.clip(np.ceil(y_top), 0, height)
-        covered_to = np.minimum.accumulate(first, axis=0)  # (S, W)
-        reached = covered_to[:, None, :] <= rows[None, :, None]  # (S, H, W)
-        painted = reached.any(axis=0)  # (H, W)
-        owner = reached.argmax(axis=0)  # (H, W), which sample owns each pixel
+        # reached its elevation, because anything farther is behind it. The
+        # running maximum of the tops is how high nearer samples already
+        # reach along this azimuth.
+        reach = np.maximum.accumulate(angle_top, axis=0)  # (S, B)
+        flat_bins = bin_of.ravel()
+        flat_elev = elevation.ravel()
+        reached = reach[:, flat_bins] >= flat_elev[None, :]  # (S, H*W)
+        painted = reached.any(axis=0)
+        owner = reached.argmax(axis=0)
 
-        r, c = np.nonzero(painted)
-        k = owner[r, c]
-        rf = rows[r] + 0.5
+        pix = np.nonzero(painted)[0]
+        k = owner[pix]
+        j = flat_bins[pix]
+        e = flat_elev[pix]
+        pix_az = azimuth.ravel()[pix]
         d = depth[k, 0]
-        on_object = rf < y_base[k, c]
-        colour = np.empty((len(r), 3), dtype=np.float32)
+        on_object = e > angle_base[k, j]
+        colour = np.empty((len(pix), 3), dtype=np.float32)
 
-        # Ground. Its colour is looked up at the world point each pixel row
-        # actually looks at, not at the one sample the strip was marched
-        # from, so near ground has texture instead of one flat colour per step.
+        # Ground. Where this pixel's own ray meets the ground plane at that
+        # sample's elevation, clipped to the neighbourhood of the sample so
+        # slopes cannot send it somewhere unrelated. Texture is looked up
+        # there, so near ground is textured rather than one colour per step.
         ground = ~on_object
-        gk, gc = k[ground], c[ground]
-        below = np.maximum(rf[ground] - horizon, 0.5)
-        row_depth = np.clip(
-            focal * (camera_z - ground_z[gk, gc]) / below, d[ground] - step[gk, 0], d[ground] + step[gk, 0]
+        if ground.any():
+            gk, gj, ge = k[ground], j[ground], e[ground]
+            tan_e = np.tan(ge)
+            tan_e = np.where(np.abs(tan_e) < 1e-4, -1e-4, tan_e)
+            ray_d = (ground_z[gk, gj] - camera_z) / tan_e
+            ray_d = np.clip(ray_d, d[ground] - step[gk, 0], d[ground] + step[gk, 0])
+            bearing = heading + pix_az[ground]
+            colour[ground] = self._ground_colour(x + np.sin(bearing) * ray_d, y + np.cos(bearing) * ray_d)
+
+        if on_object.any():
+            ok, oj, oe = k[on_object], j[on_object], e[on_object]
+            span = np.maximum(angle_top[ok, oj] - angle_base[ok, oj], 1e-6)
+            t = np.clip((angle_top[ok, oj] - oe) / span, 0.0, 1.0)  # 0 top .. 1 foot
+            kind = np.argmax(heights[ok, oj], axis=-1)  # 0 tree, 1 rock, 2 scrub
+            lit = self._bilerp(self._surface[..., 3], sx[ok, oj], sy[ok, oj])
+            colour[on_object] = self._object_colour(kind, t, lit, sx[ok, oj], sy[ok, oj])
+
+        fog = (1.0 - np.exp(-d / HAZE_LENGTH_M))[:, None]
+        image = np.zeros((height * width, 3), dtype=np.float32)
+        image[pix] = colour * (1.0 - fog) + haze_rgb * fog
+
+        # Whatever nothing reached is sky, or haze below the horizon where
+        # the range ran out before the ground did.
+        sky_t = np.clip(flat_elev / math.radians(42.0), 0.0, 1.0)[:, None] ** 0.7
+        sky = np.array(SKY_ZENITH_RGB, dtype=np.float32) * sky_t + haze_rgb * (1.0 - sky_t)
+        image = np.where(painted[:, None], image, sky)
+
+        if rover is not None:
+            nearest = np.full(height * width, np.inf, dtype=np.float32)
+            nearest[pix] = d
+            image = self._paint_rover_oblique(
+                image, x, y, camera_z, heading, azimuth.ravel(), flat_elev, nearest, rover
+            )
+        return self._finish(image.reshape(height, width, 3), sensor_noise)
+
+    def _paint_rover_oblique(
+        self, image, x, y, camera_z, heading, azimuth, elevation, nearest, rover
+    ) -> np.ndarray:
+        """Draw the ground vehicle in an oblique view, if it is in front of
+        what each pixel would otherwise show."""
+        rx, ry, rheading = rover
+        dx, dy = rx - x, ry - y
+        distance = math.hypot(dx, dy)
+        if distance < 1.0:
+            return image
+        bearing = math.atan2(dx, dy)
+        offset = (bearing - heading + math.pi) % math.tau - math.pi
+        ground = self.elevation_at(rx, ry)
+
+        # Seen from the side or end, the vehicle presents a different width.
+        yaw = math.radians(rheading) - bearing
+        presented = abs(math.sin(yaw)) * ROVER_LENGTH_M + abs(math.cos(yaw)) * ROVER_WIDTH_M
+        half_width = math.atan2(presented / 2.0, distance)
+        top = math.atan2(ground + ROVER_HEIGHT_M - camera_z, distance)
+        base = math.atan2(ground - camera_z, distance)
+
+        in_view = (
+            (np.abs(azimuth - offset) <= half_width)
+            & (elevation <= top)
+            & (elevation >= base)
+            & (distance < nearest)
         )
-        row_dist = row_depth / cos_theta[gc]
-        colour[ground] = self._ground_colour(x + dir_x[gc] * row_dist, y + dir_y[gc] * row_dist)
-
-        # Standing things.
-        ok, oc = k[on_object], c[on_object]
-        if len(ok):
-            span = np.maximum(y_base[ok, oc] - y_top[ok, oc], 1e-3)
-            t = np.clip((rf[on_object] - y_top[ok, oc]) / span, 0.0, 1.0)  # 0 top .. 1 foot
-            kind = np.argmax(heights[ok, oc], axis=-1)  # 0 tree, 1 rock, 2 scrub
-            lit = self._bilerp(self._surface[..., 3], sx[ok, oc], sy[ok, oc])
-            colour[on_object] = self._object_colour(kind, t, lit, sx[ok, oc], sy[ok, oc])
-
-        haze = (1.0 - np.exp(-d / HAZE_LENGTH_M))[:, None]
-        image = np.zeros((height, width, 3), dtype=np.float32)
-        image[r, c] = colour * (1.0 - haze) + haze_rgb * haze
-
-        # Whatever nothing reached is sky.
-        sky_t = np.clip(rows / max(horizon, 1.0), 0.0, 1.0)[:, None, None]  # 0 zenith .. 1 horizon
-        sky = (
-            np.array(SKY_ZENITH_RGB, dtype=np.float32) * (1.0 - sky_t**1.6)
-            + haze_rgb * sky_t**1.6
-        )
-        image = np.where(painted[..., None], image, sky)
-        return self._finish(image, sensor_noise)
+        if not in_view.any():
+            return image
+        # Dark body, lighter roof line, so it reads as a vehicle not a smudge.
+        roof = in_view & (elevation > top - (top - base) * 0.28)
+        image = np.where(in_view[:, None], np.array(ROVER_BODY_RGB, dtype=np.float32), image)
+        return np.where(roof[:, None], np.array(ROVER_NOSE_RGB, dtype=np.float32), image)
 
     @staticmethod
     def _object_colour(kind, t, lit, sx, sy) -> np.ndarray:

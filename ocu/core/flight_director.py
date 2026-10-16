@@ -35,6 +35,7 @@ from ocu.core.constants import (
     DESCENT_RATE_MECHANICAL_MS,
     DESCENT_RATE_TOUCHDOWN_MS,
     HOLD_ALTITUDE_M,
+    MIN_AIRCRAFT_SEPARATION_M,
     RECALL_RING_RADIUS_M,
     RECOVERY_STAGE_2_PRECISION_CM,
     RECOVERY_STAGE_3_PRECISION_CM,
@@ -80,6 +81,27 @@ MAX_PLAN_FAILURES = 3
 
 TOUCHDOWN_ALTITUDE_M = 0.06
 
+#: An aircraft counts as on its slot when it is this close to it, this close
+#: to its altitude, and moving this slowly relative to the rover. Looser than
+#: the dock tolerance because a slot is a place to hold, not a place to land.
+SLOT_TOLERANCE_M = 0.8
+SLOT_ALTITUDE_TOLERANCE_M = 0.6
+SLOT_SETTLED_SPEED_MS = 0.7
+
+#: Above this speed relative to the rover an aircraft faces where it is
+#: going; at or below it, the formation bearing. Pointing the nose along a
+#: velocity that is only wobble gives a heading that jitters.
+COURSE_FACING_SPEED_MS = 1.5
+
+#: An aircraft climbing out of the bay holds its altitude rather than climb
+#: into one still above it and close by. The minimum separation (6.2) is a
+#: hard limit, and the launch is where it is most at risk: three aircraft
+#: leave one spot within seconds of each other. The guard is only against
+#: aircraft that are themselves still launching, so it can never deadlock
+#: on one that is simply holding its slot.
+CLIMB_GUARD_VERTICAL_M = MIN_AIRCRAFT_SEPARATION_M + 1.0
+CLIMB_GUARD_HORIZONTAL_M = MIN_AIRCRAFT_SEPARATION_M * 1.6
+
 
 def tricopter_limits() -> MotionLimits:
     return MotionLimits(
@@ -106,6 +128,11 @@ def rover_limits() -> MotionLimits:
 
 
 class AircraftMode(str, Enum):
+    # The launch, flown rather than animated: waiting in the bay for its turn,
+    # straight up to altitude, then across to its slot, then holding it.
+    PREFLIGHT = "PREFLIGHT"
+    CLIMBING = "CLIMBING"
+    TRANSITING = "TRANSITING"
     STATION = "STATION"
     MANUAL = "MANUAL"
     RETURNING = "RETURNING"
@@ -143,6 +170,12 @@ class AircraftState:
     slot_dx: float = 0.0
     slot_dy: float = 0.0
     commanded_altitude_m: float = 20.0
+    #: Compass heading the aircraft faces while holding its slot. Every
+    #: aircraft in a formation faces the same way, so the group presents one
+    #: sensor direction rather than three.
+    bearing_deg: float = 0.0
+    #: Seconds until lift-off, while waiting in the bay.
+    liftoff_in_s: float = 0.0
     manual: ManualInput = field(default_factory=ManualInput)
     recovery_stage: RecoveryStage = RecoveryStage.APPROACHING
 
@@ -202,7 +235,76 @@ class FlightDirector:
             slot_dx=slot_x - rover_x,
             slot_dy=slot_y - rover_y,
             commanded_altitude_m=max(z, 1.0),
+            bearing_deg=heading % 360.0,
         )
+
+    def launch(
+        self,
+        unit_id: str,
+        slot_dx: float,
+        slot_dy: float,
+        altitude_m: float,
+        bearing_deg: float,
+        rover_x: float,
+        rover_y: float,
+        rover_heading: float,
+        liftoff_in_s: float = 0.0,
+    ) -> None:
+        """Start an aircraft's launch from the rover's bay.
+
+        The slot is an offset *from the rover*, not a place in the world. A
+        formation is a shape held on a vehicle that is moving, so the
+        target has to move with it; a world position worked out at launch
+        is wrong the moment the rover has driven on.
+
+        Until its turn the aircraft rides in the bay with the rover. Then it
+        climbs straight up to its own altitude over the rover, which is also
+        what deconflicts the three of them, then flies across to its slot.
+        All of it through the same acceleration limits as everything else
+        that flies here.
+        """
+        slot_x, slot_y = clamp_to_tether(rover_x + slot_dx, rover_y + slot_dy, rover_x, rover_y)
+        self.aircraft[unit_id] = AircraftState(
+            unit_id=unit_id,
+            body=KinematicBody(x=rover_x, y=rover_y, z=0.0, heading=rover_heading, limits=tricopter_limits()),
+            mode=AircraftMode.PREFLIGHT,
+            slot_dx=slot_x - rover_x,
+            slot_dy=slot_y - rover_y,
+            commanded_altitude_m=max(altitude_m, 1.0),
+            bearing_deg=bearing_deg % 360.0,
+            liftoff_in_s=max(liftoff_in_s, 0.0),
+        )
+
+    def launch_stage(self, unit_ids: list[str]) -> str:
+        """Where a launch of these aircraft has got to, read from the aircraft.
+
+        The stage is what the aircraft are doing, not a timer running beside
+        them. A launch is only FORMED when every one of them is actually
+        holding its slot, which is also why it can take as long as the
+        physics takes rather than as long as an animation was set to.
+        """
+        # An aircraft that has been recalled, taken on the sticks or docked is
+        # no longer part of the launch, whatever it is doing now.
+        in_launch = (
+            AircraftMode.PREFLIGHT,
+            AircraftMode.CLIMBING,
+            AircraftMode.TRANSITING,
+            AircraftMode.STATION,
+        )
+        modes = [
+            self.aircraft[u].mode
+            for u in unit_ids
+            if u in self.aircraft and self.aircraft[u].mode in in_launch
+        ]
+        if not modes:
+            return "IDLE"
+        if all(m == AircraftMode.STATION for m in modes):
+            return "FORMED"
+        if any(m == AircraftMode.TRANSITING for m in modes):
+            return "TRANSLATING"
+        if any(m == AircraftMode.CLIMBING for m in modes):
+            return "CLIMBING"
+        return "LAUNCHING"
 
     def release(self, unit_id: str) -> None:
         self.aircraft.pop(unit_id, None)
@@ -230,7 +332,11 @@ class FlightDirector:
 
     @property
     def airborne_ids(self) -> list[str]:
-        return [a.unit_id for a in self.aircraft.values() if a.mode != AircraftMode.DOCKED]
+        return [
+            a.unit_id
+            for a in self.aircraft.values()
+            if a.mode not in (AircraftMode.DOCKED, AircraftMode.PREFLIGHT)
+        ]
 
     def owns_rover(self) -> bool:
         return self.rover_mode in (
@@ -303,6 +409,10 @@ class FlightDirector:
                 AircraftMode.RETURNING,
                 AircraftMode.HOLDING,
             ):
+                continue
+            if state.mode == AircraftMode.PREFLIGHT:
+                # Never left the bay. Standing down is not a recall.
+                self.aircraft.pop(unit_id, None)
                 continue
             state.mode = AircraftMode.RETURNING
             state.manual = ManualInput()
@@ -477,6 +587,8 @@ class FlightDirector:
             if state.mode == AircraftMode.DOCKED:
                 continue
             self._tick_aircraft(state, dt_s, effective_x, effective_y, events)
+            if state.mode == AircraftMode.PREFLIGHT:
+                continue  # still in the bay: the roster shows it docked
             poses[state.unit_id] = (state.x, state.y, state.z, state.heading)
 
         self._service_dock_queue(events)
@@ -597,13 +709,55 @@ class FlightDirector:
             state.commanded_altitude_m = max(body.z, 1.0)
             return
 
-        if state.mode == AircraftMode.STATION:
+        if state.mode == AircraftMode.PREFLIGHT:
+            # Riding in the bay: wherever the rover is, on the ground.
+            body.x, body.y, body.z = rover_x, rover_y, 0.0
+            body.vx, body.vy = self._rover_velocity
+            body.vz = 0.0
+            state.liftoff_in_s -= dt_s
+            if state.liftoff_in_s <= 0.0:
+                state.mode = AircraftMode.CLIMBING
+                events.append((state.unit_id, "LIFTOFF"))
+            return
+
+        if state.mode == AircraftMode.CLIMBING:
+            # Straight up over the rover. Held on it, because it may be
+            # driving, and an aircraft that stays where it took off from is
+            # left behind the moment the vehicle moves.
+            body.step_toward(rover_x, rover_y, dt_s, feedforward=self._rover_velocity)
+            if self._climb_blocked(state):
+                body.step_altitude(body.z, dt_s)  # hold, do not climb into it
+            else:
+                body.step_altitude(state.commanded_altitude_m, dt_s)
+            if state.commanded_altitude_m - body.z <= SLOT_ALTITUDE_TOLERANCE_M * 2.0:
+                state.mode = AircraftMode.TRANSITING
+            return
+
+        if state.mode in (AircraftMode.TRANSITING, AircraftMode.STATION):
             target_x, target_y = clamp_to_tether(
                 rover_x + state.slot_dx, rover_y + state.slot_dy, rover_x, rover_y
             )
             body.step_toward(target_x, target_y, dt_s, feedforward=self._rover_velocity)
             body.step_altitude(state.commanded_altitude_m, dt_s)
-            body.face_travel_direction(dt_s)
+
+            # Facing. Moving to the slot it faces where it is going; holding
+            # it, the formation bearing, which is what its camera is for.
+            rel_vx = body.vx - self._rover_velocity[0]
+            rel_vy = body.vy - self._rover_velocity[1]
+            if math.hypot(rel_vx, rel_vy) > COURSE_FACING_SPEED_MS:
+                body.step_heading(math.degrees(math.atan2(rel_vx, rel_vy)) % 360.0, dt_s)
+            else:
+                body.step_heading(state.bearing_deg, dt_s)
+
+            if state.mode == AircraftMode.TRANSITING:
+                on_slot = (
+                    math.hypot(body.x - target_x, body.y - target_y) <= SLOT_TOLERANCE_M
+                    and abs(body.z - state.commanded_altitude_m) <= SLOT_ALTITUDE_TOLERANCE_M
+                    and math.hypot(rel_vx, rel_vy) <= SLOT_SETTLED_SPEED_MS
+                )
+                if on_slot:
+                    state.mode = AircraftMode.STATION
+                    events.append((state.unit_id, "STATION"))
             return
 
         if state.mode == AircraftMode.RETURNING:
@@ -628,6 +782,18 @@ class FlightDirector:
 
         if state.mode == AircraftMode.DOCKING:
             self._tick_docking(state, dt_s, rover_x, rover_y, events)
+
+    def _climb_blocked(self, state: AircraftState) -> bool:
+        """Whether climbing now would take this aircraft into one above it."""
+        for other in self.aircraft.values():
+            if other is state or other.mode not in (AircraftMode.CLIMBING, AircraftMode.TRANSITING):
+                continue
+            above = other.z - state.z
+            if 0.0 < above < CLIMB_GUARD_VERTICAL_M and (
+                math.hypot(other.x - state.x, other.y - state.y) < CLIMB_GUARD_HORIZONTAL_M
+            ):
+                return True
+        return False
 
     def _tick_docking(
         self, state: AircraftState, dt_s: float, rover_x: float, rover_y: float, events: list

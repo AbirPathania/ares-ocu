@@ -118,7 +118,7 @@ TERRAIN_COLORS = {
     "TRACK": QColor("#4A4639"),   # the easiest going, so the brightest
     "SCRUB": QColor("#1E2E1C"),   # low vegetation, passable
     "TREE": QColor("#2C4A2E"),    # canopy: impassable, and it blocks the beam
-    "ROCK": QColor("#473E33"),    # impassable, and it blocks the beam
+    "ROCK": QColor("#66727E"),    # impassable, and it blocks the beam
 }
 
 TERRAIN_LABELS = {
@@ -139,5 +139,5 @@ RETURN_COLORS = {
     "TRACK": QColor("#A79A74"),
     "SCRUB": QColor("#6E9B5A"),
     "TREE": QColor("#7FD08C"),
-    "ROCK": QColor("#D8B48A"),
+    "ROCK": QColor("#D5DEE6"),   # cold pale grey: nothing else on the map is
 }

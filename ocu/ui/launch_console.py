@@ -15,7 +15,7 @@ hold, not a dialog.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -65,9 +65,12 @@ class LaunchConsole(QWidget):
     previewCleared = Signal()
     bearingChanged = Signal(float)  # keeps the map's compass rose in step with the dial
     stageChanged = Signal(str)  # LaunchStage value
-    aircraftPositionChanged = Signal(str, float, float, float, float)  # id, x, y, z, heading
-    aircraftUndocked = Signal(list)  # tricopter_ids leaving the rover's bay
-    launchComplete = Signal(list)  # tricopter_ids now flying their slots
+    #: A launch has been commanded. The payload is plain data: the bearing the
+    #: formation faces, and per aircraft its slot as an offset *from the
+    #: rover* (not a world position, which goes stale as the rover drives),
+    #: its altitude, and how long to wait in the bay before lifting off.
+    launchRequested = Signal(dict)
+    launchComplete = Signal(list)  # tricopter_ids now holding their slots
     eventLogged = Signal(str)
 
     def __init__(self, parent=None) -> None:
@@ -75,10 +78,6 @@ class LaunchConsole(QWidget):
         self._sequencer = LaunchSequencer()
         self._origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._available_ids: list[str] = []
-
-        self._timer = QTimer(self)
-        self._timer.setInterval(TICK_MS)
-        self._timer.timeout.connect(self._on_tick)
 
         self._build_ui()
         self._update_button_states()
@@ -317,26 +316,44 @@ class LaunchConsole(QWidget):
         self.stageChanged.emit(self._sequencer.stage.value)
         launched = [plan.tricopter_id for plan in self._sequencer.plans]
         self.eventLogged.emit(f"Launch commanded: {', '.join(short_label(i) for i in launched)}")
-        self.aircraftUndocked.emit(launched)
-        self._timer.start()
+        self.launchRequested.emit(
+            {
+                "bearing": self.bearing_spin.value(),
+                "aircraft": [
+                    {
+                        "id": plan.tricopter_id,
+                        "dx": plan.slot_offset[0],
+                        "dy": plan.slot_offset[1],
+                        "altitude": plan.target.z,
+                        "delay": plan.liftoff_offset_s,
+                    }
+                    for plan in self._sequencer.plans
+                ],
+            }
+        )
         self._update_button_states()
 
-    def _on_tick(self) -> None:
-        previous_stage = self._sequencer.stage
-        self._sequencer.tick(TICK_MS / 1000.0)
+    def abort_launch(self) -> None:
+        """Every aircraft in the launch stood down or was recalled before it
+        finished. Back to a console that can launch again, rather than stuck
+        showing a launch that is no longer happening."""
+        self._sequencer.reset()
+        self.stage_label.setText(LaunchStage.IDLE.value)
+        self._update_button_states()
 
-        for plan in self._sequencer.plans:
-            pos = self._sequencer.position_for(plan.tricopter_id)
-            heading = self._sequencer.heading_for(plan.tricopter_id)
-            self.aircraftPositionChanged.emit(plan.tricopter_id, pos.x, pos.y, pos.z, heading)
+    def report_stage(self, stage: str) -> None:
+        """Take the stage the aircraft report, and show it.
 
-        if self._sequencer.stage != previous_stage:
-            self.stage_label.setText(self._sequencer.stage.value)
-            self.stageChanged.emit(self._sequencer.stage.value)
-            self.eventLogged.emit(f"Launch sequence: {self._sequencer.stage.value}")
+        Nothing here moves anything; the console only displays how far the
+        launch has actually got.
+        """
+        if not self._sequencer.report(stage):
+            return
+        self.stage_label.setText(self._sequencer.stage.value)
+        self.stageChanged.emit(self._sequencer.stage.value)
+        self.eventLogged.emit(f"Launch sequence: {self._sequencer.stage.value}")
 
         if self._sequencer.stage == LaunchStage.FORMED:
-            self._timer.stop()
             formed = [plan.tricopter_id for plan in self._sequencer.plans]
             self.launchComplete.emit(formed)
             self._sequencer.reset()
@@ -350,7 +367,6 @@ class LaunchConsole(QWidget):
         self.launch_btn.setEnabled(stage == LaunchStage.STAGED)
 
     def reset(self) -> None:
-        self._timer.stop()
         self._sequencer.reset()
         self.stage_label.setText(LaunchStage.IDLE.value)
         self.previewCleared.emit()

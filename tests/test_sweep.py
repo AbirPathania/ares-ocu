@@ -125,3 +125,64 @@ def test_the_sweep_moves_with_its_axis():
     b = plan_lane_sweep(world_with_rock_except_towards(180.0))
     assert a.bearing_deg != b.bearing_deg
     assert a.at(0, 10.0) != b.at(0, 10.0)
+
+
+# --- the rover decides from what it has seen -------------------------------------
+
+
+def test_the_rover_plans_from_its_own_map_and_not_from_the_world():
+    """Given only a perception map, the planner uses only what is in it."""
+    from ocu.core.terrain import PerceptionMap
+
+    seen = PerceptionMap()
+    # Everything it has seen is clear except a rock field to the east.
+    for cx in range(-120, 121):
+        for cy in range(-120, 121):
+            x, y = cx * CELL_SIZE_M, cy * CELL_SIZE_M
+            bearing = math.degrees(math.atan2(x, y)) % 360.0
+            blocked = 45.0 < bearing < 135.0 and math.hypot(x, y) > 2.0
+            seen.observe((cx, cy), Terrain.ROCK if blocked else Terrain.GROUND)
+    sweep = plan_lane_sweep(seen)
+    assert sweep.clear_fraction == 1.0, "it found ground with nothing in the way"
+    assert clear_fraction(seen, (0.0, 0.0), 75.0) < 0.2, "and the axis into the rocks is a bad one"
+    assert sweep.bearing_deg not in (45.0, 60.0, 75.0, 90.0, 105.0)
+
+
+def test_ground_the_rover_cannot_see_scores_as_half_clear():
+    """Neither assumed drivable nor assumed blocked. A LiDAR cannot see
+    through a rock, so it has no right to say what is behind one."""
+    from ocu.core.terrain import PerceptionMap
+
+    nothing_known = PerceptionMap()
+    assert abs(clear_fraction(nothing_known, (0.0, 0.0), 0.0) - 0.5) < 1e-9
+
+
+def test_unseen_ground_ranks_below_ground_seen_to_be_clear():
+    from ocu.core.terrain import PerceptionMap
+
+    seen = PerceptionMap()
+    for cx in range(-80, 81):
+        for cy in range(-80, 81):
+            x, y = cx * CELL_SIZE_M, cy * CELL_SIZE_M
+            if y > -1.0:  # the northern half has been scanned; the south has not
+                seen.observe((cx, cy), Terrain.GROUND)
+    assert clear_fraction(seen, (0.0, 0.0), 0.0) > clear_fraction(seen, (0.0, 0.0), 180.0)
+
+
+def test_the_choice_the_rover_makes_after_its_first_scan_is_the_one_the_scenario_assumed():
+    """The scenario places buried objects relative to the sweep, ahead of
+    time. For that to be fair the rover has to arrive at the same sweep from
+    its own scan, with no knowledge of the world beyond what the scan gave
+    it."""
+    from ocu.core.lidar import cast_scan
+    from ocu.core.sweep import sweep_from_first_scan
+    from ocu.core.terrain import PerceptionMap
+
+    for seed in (20261016, 7, 913):
+        world = TerrainWorld(seed=seed)
+        planned = sweep_from_first_scan(world)
+
+        on_the_vehicle = PerceptionMap()
+        cast_scan(world, on_the_vehicle, 0.0, 0.0)
+        chosen = plan_lane_sweep(on_the_vehicle, (0.0, 0.0))
+        assert chosen.points == planned.points, seed

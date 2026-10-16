@@ -280,3 +280,138 @@ def test_a_nadir_frame_is_ground_truth_not_the_map():
     paint(world, Terrain.ROCK, 4.0, 7.0, 4.0, 7.0)
     rig = CameraRig(world)
     assert rock_centroid(rig.nadir_view(5.5, 5.5, 8.0, 0.0, WIDTH, HEIGHT)) is not None
+
+
+# --- the scouts' forward-looking camera ---------------------------------------
+
+
+def scout(world, heading, x=0.0, y=0.0, agl=17.0, pitch=18.0, rover=None):
+    return CameraRig(world).scout_view(
+        x, y, agl, heading, WIDTH, HEIGHT, pitch_down_deg=pitch, rover=rover
+    )
+
+
+def sky_boundary_row(image: np.ndarray) -> float | None:
+    """First row, from the top, that is ground rather than sky, down the
+    middle of the frame; None if the frame is all one or the other."""
+    column = image[:, WIDTH // 2 - 6 : WIDTH // 2 + 6].astype(int).mean(axis=1)
+    skyish = column[:, 2] - column[:, 0] > 5  # bluer than it is red
+    if skyish.all() or not skyish.any():
+        return None
+    return float(np.argmax(~skyish))
+
+
+def test_a_scout_sees_where_it_is_facing_not_straight_down():
+    world = open_world()
+    paint(world, Terrain.TREE, -30.0, 30.0, 40.0, 46.0)
+    rig = CameraRig(world)
+    ahead = rig.scout_view(0.0, 0.0, 17.0, 0.0, WIDTH, HEIGHT)
+    away = rig.scout_view(0.0, 0.0, 17.0, 180.0, WIDTH, HEIGHT)
+    assert count_green(centre(ahead)) > 100, "a wall of trees 40 m ahead is in the picture"
+    assert count_green(centre(away)) == 0
+
+
+def test_the_horizon_sits_where_the_pitch_says_it_must():
+    """The camera is tipped down by p, so the horizon is f*tan(p) above the
+    centre of the frame. This is geometry, so it can be checked exactly."""
+    world = open_world()
+    focal = (WIDTH / 2.0) / math.tan(math.radians(84.0 / 2.0))
+    for pitch in (0.0, 8.0, 15.0):
+        row = sky_boundary_row(scout(world, 0.0, pitch=pitch, agl=3.0))
+        expected = HEIGHT / 2.0 - focal * math.tan(math.radians(pitch))
+        assert row is not None, pitch
+        assert abs(row - expected) < 4.0, (pitch, row, expected)
+
+
+def test_tipping_the_camera_down_moves_the_horizon_up_and_out_of_frame():
+    world = open_world()
+    levels = [sky_boundary_row(scout(world, 0.0, pitch=p, agl=3.0)) for p in (0.0, 10.0, 20.0)]
+    assert levels[0] > levels[1], "more pitch, horizon higher in the frame"
+    steep = scout(world, 0.0, pitch=40.0)
+    assert sky_boundary_row(steep) is None and steep[2, WIDTH // 2, 0] >= steep[2, WIDTH // 2, 2] - 40, (
+        "tipped far enough down there is no sky at all"
+    )
+
+
+def test_the_forward_view_of_a_feature_matches_its_bearing_and_distance():
+    """A tall marker 30 m out, 10 m to the right of the line of sight, appears
+    right of centre by atan(10/30) and not elsewhere."""
+    world = open_world()
+    paint(world, Terrain.TREE, 9.0, 11.0, 29.0, 31.0)
+    image = scout(world, 0.0, agl=17.0, pitch=18.0)
+    pixels = image.astype(int)
+    green = (pixels[..., 1] > pixels[..., 0] + 6) & (pixels[..., 1] > pixels[..., 2] + 6)
+    assert green.any()
+    cols = np.nonzero(green)[1]
+    focal = (WIDTH / 2.0) / math.tan(math.radians(84.0 / 2.0))
+    expected = WIDTH / 2.0 + focal * (10.0 / 30.0)
+    assert abs(cols.mean() - expected) < 6.0, (cols.mean(), expected)
+
+
+def test_a_scout_sees_the_rover_when_it_is_in_front_of_it():
+    world = open_world()
+    heading = 0.0
+    with_rover = scout(world, heading, rover=(0.0, 14.0, 0.0), agl=6.0, pitch=10.0)
+    without = scout(world, heading, agl=6.0, pitch=10.0)
+    assert not np.array_equal(with_rover, without)
+    assert dark_pixels(with_rover) > dark_pixels(without) + 4
+
+
+def test_a_scout_does_not_draw_the_rover_behind_it_or_out_of_the_frame():
+    world = open_world()
+    base = scout(world, 0.0, agl=6.0, pitch=10.0)
+    behind = scout(world, 0.0, rover=(0.0, -14.0, 0.0), agl=6.0, pitch=10.0)
+    wide = scout(world, 0.0, rover=(60.0, 5.0, 0.0), agl=6.0, pitch=10.0)
+    assert np.array_equal(base, behind)
+    assert np.array_equal(base, wide)
+
+
+def test_something_between_the_scout_and_the_rover_hides_it():
+    """The rover is only drawn where it is nearer than whatever else the pixel
+    would show. A tree wall in front of it hides it."""
+    open_ground = open_world()
+    screened = open_world()
+    paint(screened, Terrain.TREE, -10.0, 10.0, 8.0, 10.0)
+
+    def visible(world):
+        a = scout(world, 0.0, rover=(0.0, 20.0, 0.0), agl=8.0, pitch=8.0)
+        b = scout(world, 0.0, agl=8.0, pitch=8.0)
+        return int((a.astype(int) != b.astype(int)).any(axis=2).sum())
+
+    assert visible(open_ground) > 3
+    assert visible(screened) == 0
+
+
+def test_a_scout_holds_height_over_the_ground_beneath_it_not_over_a_datum():
+    """Terrain following. Raise the whole world by nine metres and nothing a
+    scout sees may change, because what it holds is height *above the
+    ground*, and the ground came up with it."""
+    flat = open_world()
+    raised = open_world()
+    raised._elevation[:] = 9.0
+    for world in (flat, raised):
+        paint(world, Terrain.TREE, -4.0, 4.0, 30.0, 36.0)
+        paint(world, Terrain.ROCK, 6.0, 8.0, 18.0, 20.0)
+
+    on_flat = CameraRig(flat).scout_view(0.0, 0.0, 12.0, 0.0, WIDTH, HEIGHT, pitch_down_deg=14.0)
+    on_raised = CameraRig(raised).scout_view(0.0, 0.0, 12.0, 0.0, WIDTH, HEIGHT, pitch_down_deg=14.0)
+    assert np.array_equal(on_flat, on_raised)
+
+
+def test_the_same_height_over_a_hill_sees_less_than_over_flat_ground():
+    """The converse: a hill in front rises into the view, so a scout 12 m
+    over the ground does not see what it would over a plain."""
+    plain = open_world()
+    hilly = open_world()
+    paint(plain, Terrain.TREE, -20.0, 20.0, 50.0, 56.0)
+    paint(hilly, Terrain.TREE, -20.0, 20.0, 50.0, 56.0)
+    for cx in range(-120, 121):
+        for cy in range(int(25.0 / CELL_SIZE_M), int(30.0 / CELL_SIZE_M)):
+            index = hilly._index((cx, cy))
+            if index:
+                hilly._elevation[index] = 25.0
+
+    seen_plain = count_green(centre(CameraRig(plain).scout_view(0.0, 0.0, 12.0, 0.0, WIDTH, HEIGHT, pitch_down_deg=6.0)))
+    seen_hilly = count_green(centre(CameraRig(hilly).scout_view(0.0, 0.0, 12.0, 0.0, WIDTH, HEIGHT, pitch_down_deg=6.0)))
+    assert seen_plain > 30
+    assert seen_hilly == 0

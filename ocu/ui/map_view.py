@@ -102,7 +102,6 @@ class MapView(QWidget):
         # so a gap -- the suite off, the link down -- stays a gap instead of
         # being bridged by a line across ground nobody swept.
         self._swept: list[list[tuple[float, float]]] = []
-        self._lane_plan: list[tuple[float, float, str]] = []
         self._detections: list[dict] = []
         self._detection_by_key: dict[tuple, dict] = {}
         self._holdings: dict[tuple, set[str]] = {}
@@ -309,11 +308,6 @@ class MapView(QWidget):
         self._mesh_diverged = diverged
         self.update()
 
-    def set_lane_plan(self, points: list[tuple[float, float, str]]) -> None:
-        """The lanes the vehicle has been tasked to sweep."""
-        self._lane_plan = list(points)
-        self.update()
-
     def add_swept(self, x: float, y: float, continuing: bool) -> None:
         """Record a point of ground the detection array has covered."""
         if not continuing or not self._swept:
@@ -480,7 +474,6 @@ class MapView(QWidget):
         self._draw_grid(painter)
         self._draw_geofence(painter)
         self._draw_tether_ring(painter)
-        self._draw_lane_plan(painter)
         self._draw_swept(painter)
         self._draw_planned_path(painter)
         self._draw_trails(painter)
@@ -531,28 +524,6 @@ class MapView(QWidget):
             color.setAlpha(int(200 * fade * (0.4 + 0.6 * ret.intensity)))
             painter.setPen(QPen(color))
             painter.drawPoint(self._to_screen(ret.x, ret.y))
-
-    def _draw_lane_plan(self, painter: QPainter) -> None:
-        """The lanes the vehicle was tasked with, so the ground it has
-        covered can be read against the ground it was asked to cover."""
-        if not self._lane_plan:
-            return
-        pen = QPen(QColor(124, 135, 148, 58))
-        pen.setWidth(1)
-        pen.setStyle(Qt.DashLine)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-
-        run: list[tuple[float, float, str]] = []
-        for point in list(self._lane_plan) + [None]:
-            if point is not None and (not run or point[2] == run[0][2]):
-                run.append(point)
-                continue
-            if len(run) > 1:
-                painter.drawPolyline([self._to_screen(x, y) for x, y, _ in run])
-                painter.setFont(QFont("Menlo", 7))
-                painter.drawText(self._to_screen(run[0][0], run[0][1]) + QPointF(5, -4), run[0][2])
-            run = [point] if point is not None else []
 
     def _draw_swept(self, painter: QPainter) -> None:
         """Ground the detection array has covered, at the width it covers.

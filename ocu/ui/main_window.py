@@ -30,7 +30,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD
+from ocu.core.constants import (
+    ALERT_CONFIDENCE_THRESHOLD,
+    LAUNCH_STAGGER_S,
+    MIN_AIRCRAFT_SEPARATION_M,
+)
 from ocu.core.comms import GHOST, LCA, STANDARD, profile_for
 from ocu.core.control_authority import ControlAuthority
 from ocu.core.flight_director import AircraftMode, FlightDirector
@@ -49,13 +53,15 @@ from ocu.core.power import (
     tricopter_drain_pct_per_s,
     tricopter_endurance_s,
 )
-from ocu.core.sweep import plan_lane_sweep
+from ocu.core.sweep import plan_lane_sweep, sweep_from_first_scan
 from ocu.core.targets import default_field
 from ocu.core.terrain import CELL_SIZE_M, PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
-from ocu.sim.playback_engine import PlaybackEngine
+from ocu.sim.playback_engine import REACTIVE_RALLY_ALTITUDE_M, PlaybackEngine
 from ocu.ui.alert_banner import AlertBanner
 from ocu.core.camera import CameraRig
+from ocu.core.formation import compute_formation_targets
+from ocu.core.occlusion import occlusion_bearing
 from ocu.ui.camera_feed import SimulatedCameraFeed
 from ocu.ui.context_panel import ContextPanel
 from ocu.ui.event_log import EventLog
@@ -102,15 +108,20 @@ class MainWindow(QMainWindow):
         self.selected_unit_id = "rover"
         self._last_clock_s = 0.0
         self._docked_state: dict[str, bool] = {uid: True for uid in TRICOPTER_IDS}
+        #: Launches in progress: which aircraft, whether the rover itself
+        #: decided on it, and the last stage reported, so a change is noticed.
+        self._launches: list[dict] = []
         self._position_owner: dict[str, str] = {uid: "scripted" for uid in ALL_UNIT_IDS}
         self._keys_down: set[int] = set()
         self._comms = profile_for(STANDARD)
         # Ground truth, and separately what the rover has actually seen of it.
         self.terrain = TerrainWorld()
         # The clearance task: a serpentine lane sweep away from the deploy
-        # point, laid out on the clearest axis the terrain offers. See
-        # core/sweep.py for why the axis is chosen rather than fixed.
-        self.sweep = plan_lane_sweep(self.terrain)
+        # point, laid out on the clearest axis available. The rover chooses
+        # it after its first scan (see _plan_sweep_from_first_scan); this is
+        # that same choice made ahead of time so the scenario can be set up
+        # consistently with it. See core/sweep.py.
+        self.sweep = sweep_from_first_scan(self.terrain)
         # What is actually buried out there, placed relative to the lanes,
         # and what the suite has accumulated about each object swept over.
         self.target_field = default_field(sweep=self.sweep)
@@ -185,7 +196,6 @@ class MainWindow(QMainWindow):
         self.alert_banner = AlertBanner()
         map_layout.addWidget(self.alert_banner)
         self.map_view = MapView()
-        self.map_view.set_lane_plan(self.sweep.points)
         map_layout.addWidget(self.map_view, stretch=1)
         splitter.addWidget(map_container)
 
@@ -324,8 +334,7 @@ class MainWindow(QMainWindow):
         console.previewChanged.connect(self.map_view.set_formation_preview)
         console.previewCleared.connect(lambda: self.map_view.set_formation_preview(None))
         console.bearingChanged.connect(self.map_view.set_bearing)
-        console.aircraftPositionChanged.connect(self._on_guided_aircraft_position)
-        console.aircraftUndocked.connect(self._on_aircraft_undocked)
+        console.launchRequested.connect(self._on_guided_launch_requested)
         console.launchComplete.connect(self._on_launch_complete)
         console.stageChanged.connect(self._on_guided_stage_changed)
         console.eventLogged.connect(lambda msg: self.event_log.log(self.playback.clock_s, msg))
@@ -339,7 +348,7 @@ class MainWindow(QMainWindow):
         self.playback.phaseChanged.connect(self._on_phase_changed)
         self.playback.detectionOccurred.connect(self._on_detection)
         self.playback.linkEvent.connect(self._on_scripted_link_event)
-        self.playback.reactiveLaunchStageChanged.connect(self._on_reactive_stage_changed)
+        self.playback.reactiveLaunchRequested.connect(self._on_reactive_launch_requested)
         self.playback.unitDockedChanged.connect(self._on_unit_docked_changed)
         self.playback.clockTick.connect(self._on_clock_tick)
         self.playback.missionFinished.connect(self._on_mission_finished)
@@ -374,14 +383,13 @@ class MainWindow(QMainWindow):
         rover = self.units["rover"]
         origin = (rover.pose.x, rover.pose.y, rover.pose.z)
         available = [uid for uid in TRICOPTER_IDS if self._docked_state.get(uid, True)]
+        # The formation faces the way the rover is heading unless the
+        # operator turns the dial: scouting along the line of travel is what
+        # nearly every launch is for, and a default of north is arbitrary.
+        self.context_panel.launch_console.bearing_from_map(rover.pose.heading)
         self.context_panel.launch_console.set_available_tricopters(available, origin)
         self.context_panel.show_formation()
         self.map_view.set_compass_active(True, (origin[0], origin[1]))
-
-    def _on_aircraft_undocked(self, tricopter_ids: list[str]) -> None:
-        for tricopter_id in tricopter_ids:
-            self._position_owner[tricopter_id] = "operator"
-            self._set_docked(tricopter_id, False)
 
     def _on_unit_docked_changed(self, unit_id: str, docked: bool) -> None:
         self._set_docked(unit_id, docked)
@@ -518,6 +526,12 @@ class MainWindow(QMainWindow):
             rover.pose.x, rover.pose.y, rover.pose.heading = rover_pose
             self.map_view.set_unit_pose("rover", rover.pose.x, rover.pose.y, 0.0, rover.pose.heading)
 
+        # Aircraft in the bay are on the rover, wherever it has driven.
+        for unit_id in TRICOPTER_IDS:
+            if self._docked_state.get(unit_id, True):
+                bay = self.units[unit_id].pose
+                bay.x, bay.y, bay.z, bay.heading = rover.pose.x, rover.pose.y, 0.0, rover.pose.heading
+
         downlink = self._downlink_open()
         for unit_id, (x, y, z, heading) in poses.items():
             unit = self.units.get(unit_id)
@@ -539,6 +553,7 @@ class MainWindow(QMainWindow):
 
         for unit_id, event in events:
             self._handle_director_event(unit_id, event)
+        self._tick_launches()
 
         if self.selected_unit_id in TRICOPTER_IDS:
             self._refresh_aircraft_flight_state(self.selected_unit_id)
@@ -570,12 +585,32 @@ class MainWindow(QMainWindow):
                 pose.x, pose.y, pose.heading, width, height, sensor_noise=2.2
             )
         else:
+            # A scout looks where the formation faces, tipped down to see the
+            # ground it is crossing: a forward-looking gimballed camera, not
+            # a straight-down one.
             rover = self.units["rover"].pose
-            frame = self.camera_rig.nadir_view(
+            frame = self.camera_rig.scout_view(
                 pose.x, pose.y, pose.z, pose.heading, width, height,
                 rover=(rover.x, rover.y, rover.heading), sensor_noise=2.2,
             )
         feed.set_frame(frame)
+
+    def _plan_sweep_from_first_scan(self) -> None:
+        """Deployed. Scan, then decide which way to sweep from what it shows.
+
+        Nothing is drawn ahead of the vehicle: the lane layout is the rover's
+        working plan, and what appears on the map is the ground it covers.
+        """
+        rover = self.units["rover"].pose
+        self._last_scan_s = -1e9
+        self._tick_lidar()
+        self.sweep = plan_lane_sweep(self.perception, (rover.x, rover.y))
+        self._mission_waypoints = self.sweep.points
+        self.event_log.log(
+            self.playback.clock_s,
+            f"First scan complete: sweeping on {self.sweep.bearing_deg:.0f}\u00b0, "
+            f"{self.sweep.clear_fraction:.0%} of the footprint clear",
+        )
 
     def _begin_autonomous_sweep(self) -> None:
         """Hand the rover its next lane point and let it drive itself."""
@@ -826,7 +861,11 @@ class MainWindow(QMainWindow):
         return format_endurance(tricopter_endurance_s(unit.battery_pct, speed, vertical))
 
     def _handle_director_event(self, unit_id: str, event: str) -> None:
-        if event == "DOCKED":
+        if event == "LIFTOFF":
+            self._position_owner[unit_id] = "operator"
+            self._set_docked(unit_id, False)
+            self.event_log.log(self.playback.clock_s, f"{short_label(unit_id)} lifted off")
+        elif event == "DOCKED":
             self._position_owner[unit_id] = "scripted"
             self.flight_director.release(unit_id)
             self._set_docked(unit_id, True)
@@ -873,18 +912,90 @@ class MainWindow(QMainWindow):
         if commanded is not None:
             panel.set_commanded_altitude(commanded)
 
-    def _on_launch_complete(self, tricopter_ids: list[str]) -> None:
-        """Hand the formation from the launch sequencer to the flight director,
-        which holds each slot relative to the rover from here on."""
-        rover = self.units["rover"]
-        for unit_id in tricopter_ids:
-            unit = self.units.get(unit_id)
-            if unit is None:
-                continue
-            self.flight_director.adopt(
-                unit_id, unit.pose.x, unit.pose.y, unit.pose.z, unit.pose.heading,
-                rover.pose.x, rover.pose.y,
+    def _start_launch(self, aircraft: list[dict], bearing: float, reactive: bool) -> None:
+        """Hand a launch to the flight director.
+
+        Each aircraft's slot is an offset from the rover, so the formation
+        is held on the vehicle as it drives instead of aimed at a point on
+        the map that the vehicle has already left.
+        """
+        rover = self.units["rover"].pose
+        for craft in aircraft:
+            self.flight_director.launch(
+                craft["id"], craft["dx"], craft["dy"], craft["altitude"], bearing,
+                rover.x, rover.y, rover.heading, liftoff_in_s=craft["delay"],
             )
+            self._position_owner[craft["id"]] = "operator"
+        self._launches.append(
+            {"ids": [c["id"] for c in aircraft], "reactive": reactive, "stage": "LAUNCHING"}
+        )
+
+    def _on_guided_launch_requested(self, request: dict) -> None:
+        self._start_launch(request["aircraft"], request["bearing"], reactive=False)
+
+    def _on_reactive_launch_requested(self, count: int) -> None:
+        """The rover decides to commit scouts, and which way they look.
+
+        The direction comes from the rover's own map: the sector ahead with
+        the most ground it cannot see. Section 6.1's planner reaching the end
+        of what its sensors can resolve, and sending something to look.
+        """
+        available = [
+            uid for uid in TRICOPTER_IDS
+            if self._docked_state.get(uid, True) and uid not in self.flight_director.aircraft
+        ]
+        chosen = available[:count]
+        if not chosen:
+            return
+        rover = self.units["rover"].pose
+        bearing, hidden = occlusion_bearing(self.perception, rover.x, rover.y, rover.heading)
+        targets = compute_formation_targets(
+            rover.x, rover.y, bearing, "vee", MIN_AIRCRAFT_SEPARATION_M * 2, REACTIVE_RALLY_ALTITUDE_M
+        )[: len(chosen)]
+        held = [short_label(u) for u in available[len(chosen):]]
+        self.event_log.log(
+            self.playback.clock_s,
+            f"Reactive launch: {hidden:.0%} of the ground ahead is hidden, committing "
+            f"{len(chosen)} scouts on {bearing:.0f}\u00b0"
+            + (f"; {', '.join(held)} held in bay for operator tasking" if held else ""),
+        )
+        self._start_launch(
+            [
+                {"id": uid, "dx": t.x - rover.x, "dy": t.y - rover.y, "altitude": t.z,
+                 "delay": i * LAUNCH_STAGGER_S}
+                for i, (uid, t) in enumerate(zip(chosen, targets))
+            ],
+            bearing,
+            reactive=True,
+        )
+
+    def _tick_launches(self) -> None:
+        """Report each launch's stage from what its aircraft are doing."""
+        for launch in list(self._launches):
+            stage = self.flight_director.launch_stage(launch["ids"])
+            if stage == launch["stage"]:
+                continue
+            launch["stage"] = stage
+
+            if stage == "IDLE":  # every aircraft stood down or was recalled
+                self._launches.remove(launch)
+                if not launch["reactive"]:
+                    self.context_panel.launch_console.abort_launch()
+                continue
+
+            if launch["reactive"]:
+                self.event_log.log(self.playback.clock_s, f"Reactive launch: {stage}")
+                if self.selected_unit_id in launch["ids"]:
+                    self.context_panel.aircraft_panel.update_stage(stage)
+                if stage == "FORMED":
+                    self._launches.remove(launch)
+                    self._on_launch_complete(launch["ids"])
+            else:
+                self.context_panel.launch_console.report_stage(stage)
+                if stage == "FORMED":
+                    self._launches.remove(launch)
+
+    def _on_launch_complete(self, tricopter_ids: list[str]) -> None:
         self.event_log.log(
             self.playback.clock_s,
             f"Formation on station: {', '.join(short_label(i) for i in tricopter_ids)}",
@@ -942,32 +1053,8 @@ class MainWindow(QMainWindow):
         else:
             self.event_log.log(self.playback.clock_s, "RETURN TO BASE: rover returning to start point")
 
-    def _on_guided_aircraft_position(
-        self, unit_id: str, x: float, y: float, z: float, heading: float
-    ) -> None:
-        unit = self.units.get(unit_id)
-        if unit is None:
-            return
-        unit.pose.x, unit.pose.y, unit.pose.z, unit.pose.heading = x, y, z, heading
-        self.map_view.set_unit_pose(unit_id, x, y, z, heading)
-        if self.selected_unit_id == unit_id:
-            self.context_panel.aircraft_panel.update_pose(z, heading)
-
     def _on_guided_stage_changed(self, stage: str) -> None:
         if self.selected_unit_id in TRICOPTER_IDS:
-            self.context_panel.aircraft_panel.update_stage(stage)
-
-    def _on_reactive_stage_changed(self, stage: str) -> None:
-        if stage == "LAUNCHING":
-            still_docked = [u for u in TRICOPTER_IDS if self._docked_state.get(u, True)]
-            held = ", ".join(short_label(u) for u in still_docked)
-            self.event_log.log(
-                self.playback.clock_s,
-                "Reactive launch: rover planner committed 2 of 3 scouts"
-                + (f"; {held} held in bay for operator tasking" if held else ""),
-            )
-        self.event_log.log(self.playback.clock_s, f"Reactive launch: {stage}")
-        if self.selected_unit_id in ("tricopter-1", "tricopter-2"):
             self.context_panel.aircraft_panel.update_stage(stage)
 
     # --- link cut / restore, section 8.5 ---
@@ -1122,6 +1209,10 @@ class MainWindow(QMainWindow):
         unit = self.units.get(unit_id)
         if unit is None or self._position_owner.get(unit_id) != "scripted":
             return
+        if unit.kind == "tricopter":
+            # Aircraft are never placed from the script. In the bay they ride
+            # on the rover; once launched the flight director flies them.
+            return
         unit.pose.x, unit.pose.y, unit.pose.z, unit.pose.heading = x, y, z, heading
         if self._downlink_open():
             self.map_view.set_unit_pose(unit_id, x, y, z, heading)
@@ -1160,6 +1251,7 @@ class MainWindow(QMainWindow):
             self.playback.play()
             self.play_btn.setText("⏸ HOLD")
             if self.flight_director.goal is None and self._waypoint_index == 0:
+                self._plan_sweep_from_first_scan()
                 self._begin_autonomous_sweep()
 
     def _on_reset_clicked(self) -> None:
@@ -1169,6 +1261,7 @@ class MainWindow(QMainWindow):
         self.map_view.clear_perception()
         self._last_scan_s = -1e9
         self._obstacle_returns = 0
+        self._launches.clear()
         self._waypoint_index = 0
         self._current_lane = None
         self._last_replan_s = -1e9

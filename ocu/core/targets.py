@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 import random
 
-from ocu.core.sweep import LaneSweep, plan_lane_sweep
+from ocu.core.sweep import LaneSweep, sweep_from_first_scan
 from ocu.core.terrain import TerrainWorld
 from dataclasses import dataclass, field
 
@@ -91,7 +91,7 @@ def default_field(seed: int = 20261016, sweep: LaneSweep | None = None) -> Targe
     silently become one where the vehicle sweeps empty dirt.
     """
     rng = random.Random(seed)
-    sweep = sweep if sweep is not None else plan_lane_sweep(TerrainWorld(seed=seed))
+    sweep = sweep if sweep is not None else sweep_from_first_scan(TerrainWorld(seed=seed))
 
     # (lane, metres along it, metres across it, then the object itself)
     placements = [

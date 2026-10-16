@@ -6,13 +6,16 @@ a sweep the vehicle spends its whole mission detouring around, and ground
 that gets detoured around never gets looked at. So the axis of the sweep is
 chosen for the ground it covers.
 
-The choice is made against the terrain rather than against what the rover
-has seen, because this is mission planning, not navigation: a clearance
-task is planned on prior imagery of the area before anything drives into
-it. What the vehicle does once it is driving -- discovering obstacles the
-imagery did not show, routing around them, and reporting the lane points it
-cannot reach -- is navigation, and that happens in navigation.py against
-the map the rover builds for itself.
+The choice is made from what the rover can see. Both the world and the
+rover's own map answer "what is at this cell", so the planner takes either;
+the rover plans from its map, after its first scan at the deploy point, and
+nothing about ground it has not seen influences the decision. Ground it
+cannot see counts as half clear: neither assumed drivable nor assumed
+blocked, which is what a sensor that cannot see through a rock has the
+right to say about the ground behind it. What the vehicle does once it is
+driving, discovering obstacles the first scan did not show, routing round
+them, and reporting the lane points it cannot reach, is navigation, and that
+happens in navigation.py against the map the rover keeps building.
 
 Lanes carry points along their length rather than only at their ends. The
 planner holds the leg it is given (navigation.Corridor), so short legs are
@@ -26,7 +29,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from ocu.core.terrain import IMPASSABLE, CELL_SIZE_M, Terrain, TerrainWorld
+from ocu.core.lidar import cast_scan
+from ocu.core.terrain import CELL_SIZE_M, IMPASSABLE, PerceptionMap, Terrain, TerrainWorld
 
 #: Four lanes is enough to show lane discipline and a serpentine turn
 #: without the sweep outrunning the mission.
@@ -89,15 +93,20 @@ class LaneSweep:
 
 
 def clear_fraction(
-    world: TerrainWorld,
+    terrain,
     origin: tuple[float, float],
     bearing_deg: float,
     cell_size_m: float = CELL_SIZE_M,
 ) -> float:
-    """What proportion of the sweep footprint on this axis is drivable."""
+    """What proportion of the sweep footprint on this axis is drivable.
+
+    `terrain` is anything with `.at(cell)`: the world, or the rover's own
+    map. Unknown ground scores half: the rover cannot say it is clear and it
+    cannot say it is blocked.
+    """
     forward, right = _frame(bearing_deg)
-    total = 0
-    clear = 0
+    total = 0.0
+    clear = 0.0
     along = LANE_START_M
     while along <= LANE_LENGTH_M:
         across = 0.0
@@ -105,16 +114,19 @@ def clear_fraction(
             x = origin[0] + forward[0] * along + right[0] * across
             y = origin[1] + forward[1] * along + right[1] * across
             cell = (int(math.floor(x / cell_size_m)), int(math.floor(y / cell_size_m)))
-            total += 1
-            if world.at(cell) not in IMPASSABLE:
-                clear += 1
+            kind = terrain.at(cell)
+            total += 1.0
+            if kind == Terrain.UNKNOWN:
+                clear += 0.5
+            elif kind not in IMPASSABLE:
+                clear += 1.0
             across += SCORE_STEP_M
         along += SCORE_STEP_M
     return clear / total if total else 0.0
 
 
 def plan_lane_sweep(
-    world: TerrainWorld,
+    terrain,
     origin: tuple[float, float] = (0.0, 0.0),
     cell_size_m: float = CELL_SIZE_M,
 ) -> LaneSweep:
@@ -122,12 +134,12 @@ def plan_lane_sweep(
 
     Every bearing is scored on how much of its footprint is drivable and
     the best is taken. The vehicle still has to find its own way along each
-    lane, and will still meet obstacles the planning imagery did not show;
-    what this avoids is committing the whole mission to an axis that was
-    never sweepable in the first place.
+    lane, and will still meet obstacles the first scan did not show; what
+    this avoids is committing the whole mission to an axis that was never
+    sweepable in the first place.
     """
     candidates = [i * BEARING_STEP_DEG for i in range(int(360.0 / BEARING_STEP_DEG))]
-    scored = [(clear_fraction(world, origin, b, cell_size_m), -b, b) for b in candidates]
+    scored = [(clear_fraction(terrain, origin, b, cell_size_m), -b, b) for b in candidates]
     best_fraction, _, bearing = max(scored)
 
     forward, right = _frame(bearing)
@@ -162,3 +174,20 @@ def _lane_stations(outbound: bool) -> list[float]:
         along += LANE_POINT_SPACING_M
     stations.append(LANE_LENGTH_M)
     return stations if outbound else list(reversed(stations))
+
+
+def sweep_from_first_scan(
+    world: TerrainWorld, origin: tuple[float, float] = (0.0, 0.0)
+) -> LaneSweep:
+    """The sweep the rover will choose once it is deployed at `origin`.
+
+    This is what the rover does at the deploy point -- one scan, then plan
+    from what that scan produced -- run ahead of time so that a scenario can
+    be set up consistently with it. It consults the world only through the
+    scanner, exactly as the rover does, and a scan from the same place marks
+    the same cells, so the decision made here and the one made on the
+    vehicle cannot differ.
+    """
+    seen = PerceptionMap()
+    cast_scan(world, seen, origin[0], origin[1])
+    return plan_lane_sweep(seen, origin)

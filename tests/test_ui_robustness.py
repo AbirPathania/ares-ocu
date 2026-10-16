@@ -444,3 +444,139 @@ def test_a_tile_is_rendered_at_a_sensible_size_for_its_shape(app):
     width, height = window.camera_feeds["rover"].render_size()
     assert 96 <= width <= 240 and 40 <= height <= 96
     assert width / height > 1.8, "tiles are wide, and frames should match"
+
+
+# --- launches, in the real window, with the rover driving ---------------------------
+
+
+def _drive(window, seconds):
+    for _ in range(int(seconds / 0.1)):
+        window.playback._tick()
+        window._on_director_tick()
+
+
+def _deploy_and_drive(window, seconds):
+    window._on_play_clicked()
+    _drive(window, seconds)
+
+
+def test_a_guided_launch_from_a_driving_rover_forms_on_the_pattern_the_operator_chose(app):
+    """The regression that started this: the rover drives on during a launch
+    and the formation must still end up where the dial and the pattern say,
+    relative to where the rover is *now*."""
+    import math
+
+    from ocu.core.formation import compute_formation_targets
+
+    window = MainWindow()
+    _deploy_and_drive(window, 12.0)
+    console = window.context_panel.launch_console
+    window._on_bay_launch_requested()
+    bearing, pattern = console.bearing_spin.value(), console.current_pattern()
+    spacing, standoff, rally = (
+        console.spacing_spin.value(), console.standoff_spin.value(), console.rally_altitude_spin.value()
+    )
+    console._on_stage_clicked()
+    console._on_launch_confirmed()
+
+    start = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+    _drive(window, 45.0)
+    rover = window.units["rover"].pose
+    assert math.hypot(rover.x - start[0], rover.y - start[1]) > 8.0, "the rover must have driven on"
+    assert window.flight_director.launch_stage(TRICOPTERS) == "FORMED"
+
+    want = compute_formation_targets(
+        rover.x, rover.y, bearing, pattern, spacing, rally, standoff_m=standoff
+    )
+    for uid, target in zip(TRICOPTERS, want):
+        pose = window.units[uid].pose
+        assert math.hypot(pose.x - target.x, pose.y - target.y) < 0.6, uid
+        assert abs(pose.z - target.z) < 0.7, uid
+
+
+def test_the_launch_dial_starts_on_the_direction_of_travel(app):
+    window = MainWindow()
+    _deploy_and_drive(window, 10.0)
+    window._on_bay_launch_requested()
+    dial = window.context_panel.launch_console.bearing_spin.value()
+    heading = window.units["rover"].pose.heading
+    assert abs((dial - heading + 180.0) % 360.0 - 180.0) < 1.0
+
+
+def test_aircraft_ride_in_the_bay_with_the_rover_until_they_lift_off(app):
+    import math
+
+    window = MainWindow()
+    _deploy_and_drive(window, 10.0)
+    rover = window.units["rover"].pose
+    for uid in TRICOPTERS:
+        pose = window.units[uid].pose
+        assert math.hypot(pose.x - rover.x, pose.y - rover.y) < 1e-6
+        assert pose.z == 0.0
+
+
+def _capture_log(window):
+    messages = []
+    original = window.event_log.log
+
+    def recording(clock_s, message):
+        messages.append(message)
+        original(clock_s, message)
+
+    window.event_log.log = recording
+    return messages
+
+
+def test_the_script_never_places_an_aircraft(app):
+    """Positions in the mission file were written for a rover that followed a
+    fixed route. The rover now drives itself, so an aircraft placed from the
+    file would be flying somewhere unrelated to the vehicle it belongs to."""
+    window = MainWindow()
+    for uid in TRICOPTERS:
+        assert window._position_owner[uid] == "scripted"  # the state in which the script could place it
+        before = (window.units[uid].pose.x, window.units[uid].pose.y, window.units[uid].pose.z)
+        window._on_unit_pose_changed(uid, 400.0, 400.0, 90.0, 123.0)
+        after = (window.units[uid].pose.x, window.units[uid].pose.y, window.units[uid].pose.z)
+        assert after == before, f"the script moved {uid}"
+    assert window.units["rover"].kind == "rover"
+
+
+def test_the_reactive_launch_is_the_rovers_own_decision_and_is_flown(app):
+    import math
+
+    window = MainWindow()
+    messages = _capture_log(window)
+    _deploy_and_drive(window, 75.0)
+
+    decided = [m for m in messages if m.startswith("Reactive launch:") and "hidden" in m]
+    assert len(decided) == 1, "the rover announces what it saw and where it is sending scouts"
+    assert "committing 2 scouts" in decided[0]
+    assert "TRI-3 held in bay" in decided[0]
+
+    airborne = [u for u in TRICOPTERS if u in window.flight_director.aircraft]
+    assert sorted(airborne) == ["tricopter-1", "tricopter-2"]
+    assert window._docked_state["tricopter-3"], "the third is held in the bay"
+
+    rover = window.units["rover"].pose
+    for uid in airborne:
+        state = window.flight_director.aircraft[uid]
+        assert state.mode.value == "STATION", f"{uid} should be on station by now"
+        assert math.hypot(state.x - rover.x, state.y - rover.y) <= 50.0 + 1e-6, "inside the tether"
+    assert any(m.startswith("Reactive launch: FORMED") for m in messages)
+
+
+def test_an_aircraft_stood_down_in_the_bay_leaves_the_console_usable(app):
+    window = MainWindow()
+    console = window.context_panel.launch_console
+    window._on_bay_launch_requested()
+    console._on_stage_clicked()
+    console._on_launch_confirmed()
+    _drive(window, 0.3)  # the first is airborne, the other two have not left the bay
+    for uid in TRICOPTERS:
+        window._on_recall_requested(uid)
+    _drive(window, 0.5)
+    assert window._launches == [], "a launch with no aircraft left in it is over"
+    assert window._docked_state["tricopter-2"] and window._docked_state["tricopter-3"]
+
+    window._on_bay_launch_requested()
+    assert console.stage_btn.isEnabled(), "the operator can stage another launch"

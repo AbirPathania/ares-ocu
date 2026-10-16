@@ -438,3 +438,103 @@ dust on the lens. The aircraft's own shadow and the other aircraft are not
 drawn into its frame. The rover is drawn into an aircraft's frame when it is
 inside the footprint, because a vehicle is part of the scene an aircraft
 looks down on.
+
+## Launch is flown, and the formation is held on the rover
+
+**What was wrong.** A launch was an animation: each aircraft was interpolated
+along a fixed line over a fixed number of seconds, aimed at a world position
+worked out when the launch was staged. Measured on the real window with the
+rover driving, that took an aircraft from rest to 7.5 m/s in one tick (peak
+acceleration about 75 m/s², roughly 7 g), and when it finished every aircraft
+was 5.1 m off the pattern the operator had chosen, because the rover had
+driven on during the launch and `adopt()` then recorded whatever offset each
+aircraft happened to be at as its slot.
+
+**What it is now.** The flight director flies the launch (`FlightDirector.launch`):
+each aircraft waits in the bay riding the rover, lifts off on the staggered
+schedule, climbs straight up over the rover to its own altitude, crosses to its
+slot and holds it. Slots are offsets *from the rover*, so the formation is a
+shape held on a moving vehicle. Everything goes through the same acceleration
+limits as the rest of the fleet, and the rover's velocity is fed forward so a
+slot is held rather than trailed (0.28 m at 2 m/s, against 0.80 m without it).
+`LaunchSequencer` no longer moves anything; it records the plan and takes its
+stage from the aircraft, so FORMED means every aircraft is on its slot, and
+the launch takes as long as the physics takes (about 19 s, not 7).
+
+**Separation.** Three aircraft leave one spot within seconds of each other.
+Measured, the airborne minimum was 1.9 m against the 3.0 m hard limit. A
+climbing aircraft now holds its altitude rather than climb into one above it
+that is still launching. Aircraft parked on the pad are not counted as flying.
+The guard only looks at aircraft that are themselves still launching, so it
+cannot deadlock on one that is simply holding its slot.
+
+**A defect in the shared motion code, found by measuring it.** The terminal
+settle ramped the velocity down and then zeroed it in the same tick, so the
+last step could be twice the acceleration limit. Invisible on screen, but it
+broke the limit that is claimed. Settling is now judged on the velocity going
+into the tick, in both the vertical and horizontal paths.
+
+**Facing.** Moving to its slot an aircraft faces where it is going; holding it,
+the formation bearing. Every aircraft in a formation faces the same way, so the
+group presents one sensor direction. The launch dial now starts on the rover's
+heading rather than north.
+
+## Reactive launch is the rover's own decision
+
+Section 6.1's reactive launch used to start from a marker in the mission file
+and move the aircraft along scripted keyframes written for a rover that no
+longer follows that route. The aircraft were therefore flying somewhere
+unrelated to the vehicle they belong to. The script no longer places any
+aircraft (`_on_unit_pose_changed` ignores tricopters; in the bay they ride the
+rover, afterwards the director flies them).
+
+The marker is kept as the mission plan's schedule, since "the aerial-recon phase
+begins now" is a fact about the plan. What the rover does at that point is its own:
+`core/occlusion.py` reads its map, counts unknown cells inside sensor range in
+each sector ahead (unknown *inside* range is hidden ground, because a LiDAR
+cannot see through a rock), and sends two scouts toward the most hidden sector.
+The event log says what it saw ("36% of the ground ahead is hidden, committing 2
+scouts on 280°").
+
+## The sweep axis is chosen from the first scan, and nothing is drawn ahead of the rover
+
+The four dashed lane lines used to be drawn on the map before the rover had
+moved, which made the path look scripted. They are gone. The map shows the
+planned route as the planner makes it and the ground actually swept.
+
+The axis was also chosen by scoring the ground truth. It is now chosen by the
+rover from its own first scan, with ground it cannot see scoring half clear:
+neither assumed drivable nor assumed blocked. The scenario's buried objects are
+placed relative to that sweep, so the same choice is made ahead of time by
+scanning from the same pose (`sweep_from_first_scan`); a scan from the same
+place marks the same cells, so the two cannot differ, and a test holds that for
+several seeds. That placement is scenario authoring and is a demonstration
+arrangement: objects are planted where the rover will sweep.
+
+## Rocks are boulders
+
+Rock used to be every cell above a slope threshold, which made whole hillsides
+solid bands. It is now a population of individual boulders (`Terrain._scatter_boulders`):
+lognormal in radius, rarely round, partly buried, sparse on flat ground, thick
+on slopes, heaped into outcrops where it is steepest. Each is a half-ellipsoid
+dome, so the world holds a height field; the ROCK class is where a boulder
+stands over 30 cm, and the cameras draw the domes themselves rather than
+inferring a shape from a mask. On the map, rock is a cold pale grey that nothing
+else is (it used to share the track's tan). A LiDAR returns the face it hits and
+nothing behind it, so a boulder is drawn as that face with its shadow behind.
+
+## Scout cameras look forward
+
+A nano-class scout carries a gimballed forward-looking camera, not a straight-down
+one, because what it is for is seeing ahead of the formation. The tricopter tiles
+now use `CameraRig.scout_view`: the same renderer as the rover's, from the
+aircraft, tipped down. **Pitch (18°) and field of view (84°) are this build's
+choices, not published figures of any airframe.** Scouts hold height over the
+ground beneath them, not over a datum. The nadir view is kept for a camera that
+really does look down.
+
+The oblique views are resolved in angle space: every pixel has a true ray, and a
+pixel belongs to the nearest sample whose top has reached its elevation. That is
+exact for a pitched camera, where the usual shortcut of treating image columns as
+constant-azimuth rays is only right with the camera level. A test checks the
+horizon against f·tan(pitch) rather than trusting that it looks right.

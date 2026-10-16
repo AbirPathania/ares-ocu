@@ -138,6 +138,7 @@ class KinematicBody:
             desired_vx *= scale
             desired_vy *= scale
 
+        speed_before = self.speed_ms
         self._ramp_horizontal(desired_vx, desired_vy, dt_s)
 
         # Terminal condition. Within a few centimetres, moving slowly enough to
@@ -148,7 +149,7 @@ class KinematicBody:
         if (
             not tracking_moving_target
             and distance < ARRIVAL_TOLERANCE_M
-            and self.speed_ms <= self.limits.max_decel_ms2 * dt_s
+            and speed_before <= self.limits.max_decel_ms2 * dt_s
         ):
             self.x, self.y = tx, ty
             self.vx = self.vy = 0.0
@@ -203,8 +204,12 @@ class KinematicBody:
         target_rate = math.copysign(
             approach_speed(remaining, rate_cap, self.limits.max_vertical_accel_ms2), delta
         )
+        # Settling is judged on the rate going *into* this tick. Judged after
+        # the ramp, a body could ramp down by one step and then be zeroed by
+        # another, which is twice the acceleration limit in a single tick.
+        rate_before = self.vz
         self._ramp_vertical(target_rate, dt_s)
-        if abs(delta) < ARRIVAL_TOLERANCE_M and abs(self.vz) <= self.limits.max_vertical_accel_ms2 * dt_s:
+        if abs(delta) < ARRIVAL_TOLERANCE_M and abs(rate_before) <= self.limits.max_vertical_accel_ms2 * dt_s:
             self.z = max(0.0, target_z)
             self.vz = 0.0
             return True
