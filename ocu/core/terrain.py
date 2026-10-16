@@ -90,8 +90,8 @@ class TerrainWorld:
         extent = int(self.half_extent_m / self.cell_size_m)
 
         self._scatter_clusters(rng, extent, Terrain.SCRUB, patches=90, radius_m=(2.0, 6.0))
-        self._scatter_clusters(rng, extent, Terrain.TREE, patches=34, radius_m=(1.5, 4.5))
-        self._scatter_clusters(rng, extent, Terrain.ROCK, patches=26, radius_m=(1.0, 3.0))
+        self._scatter_clusters(rng, extent, Terrain.TREE, patches=55, radius_m=(1.5, 5.0))
+        self._scatter_clusters(rng, extent, Terrain.ROCK, patches=70, radius_m=(1.2, 4.0))
 
         # A track is carved last so it cuts through whatever it crosses: a
         # path exists because something has already driven the scrub down.

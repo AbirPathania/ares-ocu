@@ -156,3 +156,57 @@ def test_coverage_is_reported_in_square_metres():
     perception = PerceptionMap()
     perception.observe((0, 0), Terrain.GROUND)
     assert math.isclose(perception.coverage_m2(), CELL_SIZE_M**2)
+
+
+# --- returns behave like measurements, not fill ---------------------------
+
+
+def test_a_scan_produces_discrete_returns():
+    world, perception = blank_world(), PerceptionMap()
+    result = cast_scan(world, perception, 0.0, 0.0, seed=1)
+    assert result.point_count > 100
+    assert all(0.0 <= r.intensity <= 1.0 for r in result.returns)
+    assert all(r.range_m <= LIDAR_RANGE_M + 1.0 for r in result.returns)
+
+
+def test_obstacles_return_harder_than_open_ground():
+    """A rock face is near normal to the beam; ground is grazed."""
+    world, perception = blank_world(), PerceptionMap()
+    for dx in range(-3, 4):
+        world._cells[(dx, 8)] = Terrain.ROCK
+    result = cast_scan(world, perception, 0.0, 0.0, seed=2)
+
+    rock = [r.intensity for r in result.returns if r.kind is Terrain.ROCK]
+    ground = [r.intensity for r in result.returns if r.kind is Terrain.GROUND and r.range_m < 6.0]
+    assert rock and ground
+    assert sum(rock) / len(rock) > sum(ground) / len(ground)
+
+
+def test_intensity_falls_off_with_range():
+    world, perception = blank_world(), PerceptionMap()
+    result = cast_scan(world, perception, 0.0, 0.0, seed=3)
+    near = [r.intensity for r in result.returns if r.range_m < 6.0]
+    far = [r.intensity for r in result.returns if r.range_m > 24.0]
+    assert near and far
+    assert sum(near) / len(near) > sum(far) / len(far)
+
+
+def test_no_returns_come_from_behind_an_obstacle():
+    world, perception = blank_world(), PerceptionMap()
+    for dx in range(-10, 11):
+        world._cells[(dx, 10)] = Terrain.ROCK
+    result = cast_scan(world, perception, 0.0, 0.0, seed=4)
+    # Nothing measured beyond the wall on the bearings it covers.
+    behind = [r for r in result.returns if r.y > 6.0 and abs(r.x) < 4.0 and r.kind is not Terrain.ROCK]
+    assert not behind
+
+
+def test_every_ray_that_hits_reports_a_hit():
+    world, perception = blank_world(), PerceptionMap()
+    for dx in range(-40, 41):
+        for dy in range(6, 9):
+            world._cells[(dx, dy)] = Terrain.TREE
+    result = cast_scan(world, perception, 0.0, 0.0, seed=5)
+    assert result.hits > 0
+    tree_returns = [r for r in result.returns if r.kind is Terrain.TREE]
+    assert len(tree_returns) == result.hits

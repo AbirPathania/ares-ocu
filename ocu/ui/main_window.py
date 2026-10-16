@@ -33,7 +33,7 @@ from ocu.core.comms import GHOST, LCA, STANDARD, profile_for
 from ocu.core.control_authority import ControlAuthority
 from ocu.core.flight_director import AircraftMode, FlightDirector
 from ocu.core.geofence import Geofence
-from ocu.core.lidar import LIDAR_SCAN_HZ, cast_scan
+from ocu.core.lidar import LIDAR_RANGE_M, LIDAR_SCAN_HZ, cast_scan
 from ocu.core.mesh_state import MeshLink, VoxelObservation, voxel_key
 from ocu.core.power import (
     charge_pct_per_s,
@@ -98,6 +98,7 @@ class MainWindow(QMainWindow):
         self.terrain = TerrainWorld()
         self.perception = PerceptionMap()
         self._last_scan_s = -1e9
+        self._obstacle_returns = 0
         self._last_downlink_s = 0.0
         self._silence_began_s: float | None = None
         self.setFocusPolicy(Qt.StrongFocus)
@@ -507,10 +508,28 @@ class MainWindow(QMainWindow):
         self._last_scan_s = now
 
         rover = self.units["rover"]
-        cast_scan(self.terrain, self.perception, rover.pose.x, rover.pose.y)
-        new_cells = self.perception.drain_new()
-        if new_cells and self._comms.telemetry:
-            self.map_view.add_perception(new_cells, self.perception.coverage_m2())
+        scan = cast_scan(self.terrain, self.perception, rover.pose.x, rover.pose.y)
+        self.perception.drain_new()
+        self._obstacle_returns += scan.hits
+
+        if not self._comms.telemetry:
+            # The rover is still scanning and still building its map. The
+            # operator simply is not being sent it.
+            return
+
+        self.map_view.add_returns(
+            scan.returns,
+            self.perception.coverage_m2(),
+            {
+                "returns_per_s": scan.point_count * LIDAR_SCAN_HZ,
+                "obstacles": self._obstacle_returns,
+                "range_m": LIDAR_RANGE_M,
+                "scan_hz": LIDAR_SCAN_HZ,
+            },
+        )
+        self.map_view.set_live_scan(
+            (rover.pose.x, rover.pose.y), [(r.x, r.y) for r in scan.returns[::7]]
+        )
 
     def _tick_power(self, dt_s: float) -> None:
         """Integrate every battery from what that unit is actually doing.
@@ -899,6 +918,7 @@ class MainWindow(QMainWindow):
         self.perception.clear()
         self.map_view.clear_perception()
         self._last_scan_s = -1e9
+        self._obstacle_returns = 0
         self.event_log.clear()
         self.threat_panel.clear()
         self.phase_label.setText("STANDBY")

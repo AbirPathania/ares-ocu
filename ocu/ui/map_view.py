@@ -33,7 +33,14 @@ from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD, TETHER_LIMIT_M
 from ocu.core.terrain import CELL_SIZE_M, WORLD_HALF_EXTENT_M, Terrain
-from ocu.ui.theme import GRID, GRID_MAJOR, TERRAIN_COLORS, TERRAIN_LABELS, UNIT_TINTS
+from ocu.ui.theme import (
+    GRID,
+    GRID_MAJOR,
+    RETURN_COLORS,
+    TERRAIN_COLORS,
+    TERRAIN_LABELS,
+    UNIT_TINTS,
+)
 from ocu.core.mesh_state import voxel_key
 from ocu.ui.icons import (
     draw_friendly_air,
@@ -90,14 +97,20 @@ class MapView(QWidget):
         self._stale = False
         self._stale_caption = ""
 
-        # The discovered map is cached as an image at one pixel per terrain
-        # cell. Only newly observed cells are painted into it; the whole
-        # thing is then blitted once per frame.
-        self._map_extent_cells = int(WORLD_HALF_EXTENT_M / CELL_SIZE_M)
-        span = self._map_extent_cells * 2 + 1
+        # The point cloud is accumulated into a cached image at 12.5 cm per
+        # pixel, which is fine enough that individual returns read as points
+        # rather than as filled cells. Only new returns are painted into it.
+        self._cloud_px_per_m = 8.0
+        self._cloud_half_px = int(WORLD_HALF_EXTENT_M * self._cloud_px_per_m)
+        span = self._cloud_half_px * 2
         self._perception_image = QImage(span, span, QImage.Format_ARGB32_Premultiplied)
         self._perception_image.fill(QColor(0, 0, 0, 0))
         self._mapped_m2 = 0.0
+        self._cloud_points = 0
+        self._last_scan: list[tuple[float, float]] = []
+        self._scan_origin: tuple[float, float] | None = None
+        self._scan_age = 0.0
+        self._lidar_stats: dict[str, float] = {}
         self._geofence_vertices: list[tuple[float, float]] = []
         self._formation_preview: list[tuple[float, float, float]] | None = None
         self._formation_origin: tuple[float, float] | None = None
@@ -182,6 +195,7 @@ class MapView(QWidget):
             self.cutLinkRequested.emit()
 
     def _on_radar_tick(self) -> None:
+        self._scan_age += RADAR_TICK_MS / 1000.0
         if self._reconciled_flash > 0:
             self._reconciled_flash = max(0.0, self._reconciled_flash - RADAR_TICK_MS / 1000.0)
         self._radar_angle = (self._radar_angle + 2.4) % 360.0
@@ -277,21 +291,68 @@ class MapView(QWidget):
         self._mesh_diverged = diverged
         self.update()
 
-    def add_perception(self, cells, mapped_m2: float) -> None:
-        """Paint newly observed terrain into the cached map image."""
-        for (cx, cy), kind in cells:
-            px = cx + self._map_extent_cells
-            py = self._map_extent_cells - cy
-            if 0 <= px < self._perception_image.width() and 0 <= py < self._perception_image.height():
-                color = TERRAIN_COLORS.get(Terrain(kind).name)
-                if color is not None:
-                    self._perception_image.setPixelColor(px, py, color)
+    def add_returns(self, returns, mapped_m2: float, stats: dict) -> None:
+        """Accumulate one scan's returns into the cached point cloud.
+
+        Each return is a measurement, painted at its own position with a
+        brightness taken from its intensity, so hard surfaces build bright
+        dense clusters and grazed ground stays sparse and dim. That texture
+        is the difference between a point cloud and a filled shape.
+        """
+        width = self._perception_image.width()
+        height = self._perception_image.height()
+        painter = QPainter(self._perception_image)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+
+        for ret in returns:
+            px = int(ret.x * self._cloud_px_per_m) + self._cloud_half_px
+            py = self._cloud_half_px - int(ret.y * self._cloud_px_per_m)
+            if not (0 <= px < width and 0 <= py < height):
+                continue
+
+            name = Terrain(ret.kind).name
+            dim = TERRAIN_COLORS.get(name)
+            bright = RETURN_COLORS.get(name)
+            if dim is None or bright is None:
+                continue
+
+            weight = ret.intensity
+            color = QColor(
+                int(dim.red() + (bright.red() - dim.red()) * weight),
+                int(dim.green() + (bright.green() - dim.green()) * weight),
+                int(dim.blue() + (bright.blue() - dim.blue()) * weight),
+                int(110 + 145 * weight),
+            )
+            painter.setPen(QPen(color))
+            painter.drawPoint(px, py)
+            if ret.kind in (Terrain.ROCK, Terrain.TREE):
+                # A hard surface fills more of the beam, so it returns a
+                # tighter cluster rather than one lonely sample.
+                painter.drawPoint(px + 1, py)
+                painter.drawPoint(px, py + 1)
+                painter.drawPoint(px + 1, py + 1)
+        painter.end()
+
+        self._cloud_points += len(returns)
         self._mapped_m2 = mapped_m2
+        self._lidar_stats = stats
         self.update()
+
+    def set_live_scan(self, origin, endpoints) -> None:
+        """The beam itself: the most recent sweep, drawn as it was measured."""
+        self._scan_origin = origin
+        self._last_scan = endpoints
+        self._scan_age = 0.0
+        self.update()
+
 
     def clear_perception(self) -> None:
         self._perception_image.fill(QColor(0, 0, 0, 0))
         self._mapped_m2 = 0.0
+        self._cloud_points = 0
+        self._last_scan = []
+        self._scan_origin = None
+        self._lidar_stats = {}
         self.update()
 
     def set_telemetry_stale(self, stale: bool, caption: str) -> None:
@@ -366,6 +427,7 @@ class MapView(QWidget):
         self._draw_geofence(painter)
         self._draw_tether_ring(painter)
         self._draw_radar_sweep(painter)
+        self._draw_beam_fan(painter)
         self._draw_trails(painter)
         self._draw_formation_preview(painter)
         self._draw_detections(painter)
@@ -397,6 +459,27 @@ class MapView(QWidget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
         painter.drawImage(target, self._perception_image)
 
+    def _draw_beam_fan(self, painter: QPainter) -> None:
+        """The most recent sweep, as rays out to where each one ended.
+
+        A map showing only accumulated returns never shows the thing doing
+        the measuring. Drawing the live sweep, decaying between scans, is
+        what makes it read as an active sensor rather than a picture that
+        happens to be filling in.
+        """
+        if not self._last_scan or self._scan_origin is None:
+            return
+        fade = max(0.0, 1.0 - self._scan_age * 4.0)
+        if fade <= 0.0:
+            return
+
+        origin = self._to_screen(*self._scan_origin)
+        pen = QPen(QColor(122, 196, 236, max(8, int(30 * fade))))
+        pen.setWidth(1)
+        painter.setPen(pen)
+        for ex, ey in self._last_scan:
+            painter.drawLine(origin, self._to_screen(ex, ey))
+
     def _draw_deploy_point(self, painter: QPainter) -> None:
         """Point A. Everything on this map is referenced to it, and the rover
         holds that frame on its own compass and inertial solution."""
@@ -412,24 +495,39 @@ class MapView(QWidget):
         painter.drawText(centre + QPointF(14, 4), "DEPLOY")
 
     def _draw_legend(self, painter: QPainter) -> None:
-        x, y = 16.0, self.height() - 118.0
-        painter.setFont(QFont("DIN Condensed", 12, QFont.Bold))
-        painter.setPen(QPen(QColor("#7B8794")))
-        painter.drawText(QRectF(x, y - 15, 220, 13), Qt.AlignLeft, "LIDAR TERRAIN")
+        """Classification key and the scanner's own numbers.
+
+        An operator judging a map needs to know how much of it is measured
+        and how recently, not only what colour means what.
+        """
+        x = 16.0
+        y = self.height() - 164.0
+
+        painter.setFont(QFont("DIN Condensed", 13, QFont.Bold))
+        painter.setPen(QPen(QColor("#8FC9E8")))
+        painter.drawText(QRectF(x, y - 16, 240, 14), Qt.AlignLeft, "LIDAR \u00b7 SLAM")
 
         painter.setFont(QFont("Menlo", 8))
         for i, key in enumerate(("TRACK", "GROUND", "SCRUB", "TREE", "ROCK")):
             row = y + i * 13
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(TERRAIN_COLORS[key]))
-            painter.drawRect(QRectF(x, row, 10, 9))
-            painter.setPen(QPen(QColor(124, 135, 148, 190)))
-            painter.drawText(QRectF(x + 15, row - 2, 110, 13), Qt.AlignLeft, TERRAIN_LABELS[key])
+            painter.setBrush(QBrush(RETURN_COLORS[key]))
+            painter.drawRect(QRectF(x, row, 9, 9))
+            painter.setPen(QPen(QColor(150, 164, 178, 210)))
+            painter.drawText(QRectF(x + 14, row - 2, 92, 13), Qt.AlignLeft, TERRAIN_LABELS[key])
 
-        painter.setPen(QPen(QColor("#7B8794")))
-        painter.drawText(
-            QRectF(x, y + 66, 220, 13), Qt.AlignLeft, f"mapped {self._mapped_m2:,.0f} m\u00b2"
-        )
+        stats = self._lidar_stats
+        lines = [
+            f"points    {self._cloud_points:,}",
+            f"mapped    {self._mapped_m2:,.0f} m\u00b2",
+            f"returns/s {stats.get('returns_per_s', 0):,.0f}",
+            f"obstacles {stats.get('obstacles', 0):,.0f}",
+            f"range     {stats.get('range_m', 0):.0f} m @ {stats.get('scan_hz', 0):.0f} Hz",
+        ]
+        painter.setPen(QPen(QColor(150, 164, 178, 210)))
+        painter.setFont(QFont("Menlo", 8))
+        for i, line in enumerate(lines):
+            painter.drawText(QRectF(x, y + 68 + i * 12, 240, 13), Qt.AlignLeft, line)
 
     def _draw_grid(self, painter: QPainter) -> None:
         """A 10 m grid with coordinates on the majors, so distances on this

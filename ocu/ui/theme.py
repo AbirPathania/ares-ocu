@@ -128,3 +128,16 @@ TERRAIN_LABELS = {
     "TREE": "tree",
     "ROCK": "rock",
 }
+
+
+#: The colour of a strong return off each surface. A painted point is a
+#: blend from the dim TERRAIN_COLORS tone toward this, weighted by the
+#: measured intensity, so a hard rock face reads bright and grazed ground
+#: stays dim without either changing hue.
+RETURN_COLORS = {
+    "GROUND": QColor("#5E7489"),
+    "TRACK": QColor("#A79A74"),
+    "SCRUB": QColor("#6E9B5A"),
+    "TREE": QColor("#7FD08C"),
+    "ROCK": QColor("#D8B48A"),
+}
