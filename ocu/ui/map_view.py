@@ -32,6 +32,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD, TETHER_LIMIT_M
+from ocu.core.lidar import LIDAR_RANGE_M
 from ocu.core.terrain import CELL_SIZE_M, WORLD_HALF_EXTENT_M, Terrain
 from ocu.ui.theme import (
     GRID,
@@ -107,9 +108,8 @@ class MapView(QWidget):
         self._perception_image.fill(QColor(0, 0, 0, 0))
         self._mapped_m2 = 0.0
         self._cloud_points = 0
-        self._last_scan: list[tuple[float, float]] = []
-        self._scan_origin: tuple[float, float] | None = None
-        self._scan_age = 0.0
+        self._fresh_returns = []
+        self._fresh_age = 0.0
         self._lidar_stats: dict[str, float] = {}
         self._geofence_vertices: list[tuple[float, float]] = []
         self._formation_preview: list[tuple[float, float, float]] | None = None
@@ -195,7 +195,7 @@ class MapView(QWidget):
             self.cutLinkRequested.emit()
 
     def _on_radar_tick(self) -> None:
-        self._scan_age += RADAR_TICK_MS / 1000.0
+        self._fresh_age += RADAR_TICK_MS / 1000.0
         if self._reconciled_flash > 0:
             self._reconciled_flash = max(0.0, self._reconciled_flash - RADAR_TICK_MS / 1000.0)
         self._radar_angle = (self._radar_angle + 2.4) % 360.0
@@ -338,11 +338,17 @@ class MapView(QWidget):
         self._lidar_stats = stats
         self.update()
 
-    def set_live_scan(self, origin, endpoints) -> None:
-        """The beam itself: the most recent sweep, drawn as it was measured."""
-        self._scan_origin = origin
-        self._last_scan = endpoints
-        self._scan_age = 0.0
+    def set_fresh_returns(self, returns) -> None:
+        """Hold the newest scan brighter for a moment before it settles.
+
+        Real ground control displays do not draw the beam, because a laser
+        is not visible and a drawn one is a cartoon. What they show is the
+        returns, with the most recent ones held brighter and decayed into
+        the accumulated cloud, which is how RViz-style displays convey that
+        a sensor is live. Same data, no fiction.
+        """
+        self._fresh_returns = returns
+        self._fresh_age = 0.0
         self.update()
 
 
@@ -350,8 +356,6 @@ class MapView(QWidget):
         self._perception_image.fill(QColor(0, 0, 0, 0))
         self._mapped_m2 = 0.0
         self._cloud_points = 0
-        self._last_scan = []
-        self._scan_origin = None
         self._lidar_stats = {}
         self.update()
 
@@ -423,11 +427,11 @@ class MapView(QWidget):
         painter.fillRect(self.rect(), QColor("#0A0E12"))
 
         self._draw_perception(painter)
+        self._draw_fresh_returns(painter)
+        self._draw_sensor_range(painter)
         self._draw_grid(painter)
         self._draw_geofence(painter)
         self._draw_tether_ring(painter)
-        self._draw_radar_sweep(painter)
-        self._draw_beam_fan(painter)
         self._draw_trails(painter)
         self._draw_formation_preview(painter)
         self._draw_detections(painter)
@@ -459,26 +463,36 @@ class MapView(QWidget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
         painter.drawImage(target, self._perception_image)
 
-    def _draw_beam_fan(self, painter: QPainter) -> None:
-        """The most recent sweep, as rays out to where each one ended.
-
-        A map showing only accumulated returns never shows the thing doing
-        the measuring. Drawing the live sweep, decaying between scans, is
-        what makes it read as an active sensor rather than a picture that
-        happens to be filling in.
-        """
-        if not self._last_scan or self._scan_origin is None:
+    def _draw_fresh_returns(self, painter: QPainter) -> None:
+        """The most recent returns, bright and decaying."""
+        if not self._fresh_returns:
             return
-        fade = max(0.0, 1.0 - self._scan_age * 4.0)
+        fade = max(0.0, 1.0 - self._fresh_age * 2.2)
         if fade <= 0.0:
             return
 
-        origin = self._to_screen(*self._scan_origin)
-        pen = QPen(QColor(122, 196, 236, max(8, int(30 * fade))))
+        for ret in self._fresh_returns:
+            name = Terrain(ret.kind).name
+            base = RETURN_COLORS.get(name)
+            if base is None:
+                continue
+            color = QColor(base)
+            color.setAlpha(int(200 * fade * (0.4 + 0.6 * ret.intensity)))
+            painter.setPen(QPen(color))
+            painter.drawPoint(self._to_screen(ret.x, ret.y))
+
+    def _draw_sensor_range(self, painter: QPainter) -> None:
+        """Where the scanner stops. A range ring is standard on any sensor
+        display and it is the honest version of showing the beam: it marks
+        the limit without pretending the beam can be seen."""
+        rover = self._rover_pose()
+        centre = self._to_screen(rover["x"], rover["y"])
+        radius_px = LIDAR_RANGE_M * SCALE_PX_PER_M
+        pen = QPen(QColor(122, 196, 236, 34))
         pen.setWidth(1)
         painter.setPen(pen)
-        for ex, ey in self._last_scan:
-            painter.drawLine(origin, self._to_screen(ex, ey))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(centre, radius_px, radius_px)
 
     def _draw_deploy_point(self, painter: QPainter) -> None:
         """Point A. Everything on this map is referenced to it, and the rover
@@ -600,25 +614,6 @@ class MapView(QWidget):
             Qt.AlignHCenter,
             f"UWB TETHER {TETHER_LIMIT_M:.0f} m",
         )
-
-    def _draw_radar_sweep(self, painter: QPainter) -> None:
-        rover = self._rover_pose()
-        center = self._to_screen(rover["x"], rover["y"])
-        sweep_radius = 200.0
-        path = QPainterPath()
-        path.moveTo(center)
-        start_angle = -self._radar_angle
-        path.arcTo(
-            QRectF(center.x() - sweep_radius, center.y() - sweep_radius, sweep_radius * 2, sweep_radius * 2),
-            start_angle,
-            -18,
-        )
-        path.closeSubpath()
-        gradient_color = QColor("#4A9FD4")
-        gradient_color.setAlpha(14)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(gradient_color))
-        painter.drawPath(path)
 
     def _draw_geofence(self, painter: QPainter) -> None:
         if len(self._geofence_vertices) < 3:

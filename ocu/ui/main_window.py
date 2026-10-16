@@ -539,9 +539,7 @@ class MainWindow(QMainWindow):
                 "scan_hz": LIDAR_SCAN_HZ,
             },
         )
-        self.map_view.set_live_scan(
-            (rover.pose.x, rover.pose.y), [(r.x, r.y) for r in scan.returns[::7]]
-        )
+        self.map_view.set_fresh_returns(scan.returns)
 
     def _tick_detection_suite(self) -> None:
         """Sweep the detection suite over whatever the rover is standing on.
