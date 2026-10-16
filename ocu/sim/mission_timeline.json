@@ -1,5 +1,5 @@
 {
-  "_comment": "The eight-phase scripted mission, section 5 and 12.3. Roughly 90 seconds of playback, one pass through deploy -> recharge_and_return. Mission theme stays a generic hazard sweep per section 3; nothing here says minefield. The phase_markers, the t=30 tricopter-1 keyframe, and the t=50/58 link_events are the literal example values given in section 12.3 of the build spec; everything else extends that example to a complete run.",
+  "_comment": "The eight-phase mission. Detections are no longer listed here: the suite now finds what is actually buried in core/targets.py, so what appears depends on where the rover drives. The eight-phase mission, section 5 and 12.3. Roughly 90 seconds of playback, one pass through deploy -> recharge_and_return. Mission theme stays a generic hazard sweep per section 3; nothing here says minefield. The phase_markers, the t=30 tricopter-1 keyframe, and the t=50/58 link_events are the literal example values given in section 12.3 of the build spec; everything else extends that example to a complete run.",
 
   "phase_markers": [
     { "t": 0,  "phase": "deploy" },
@@ -51,16 +51,6 @@
   },
 
 
-  "detections": [
-    { "t": 40, "sensor": "gpr",                  "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.62, "type": "unknown" },
-    { "t": 44, "sensor": "pulse_induction",       "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.71, "type": "unknown" },
-    { "t": 50, "sensor": "magnetic_gradiometer",  "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.79, "type": "unknown" },
-    { "t": 52, "sensor": "thermal",               "source": "aircraft", "source_id": "tricopter-1", "x": 14, "y": 6, "confidence": 0.68, "type": "unknown",
-      "_comment": "aircraft-side hit on the SAME voxel while the link is cut: the two replicas end up holding different observations of one place, which the merge resolves by confidence" },
-    { "t": 53, "sensor": "thermal",               "source": "aircraft", "source_id": "tricopter-2", "x": 23, "y": 11, "confidence": 0.58, "type": "unknown",
-      "_comment": "aircraft-side hit on ground the rover has not reached, found while the link is down. The rover's map cannot contain it until the link is restored, which is what makes the divergence visible on the map rather than only in a counter, section 8.5" },
-    { "t": 55, "sensor": "fused",                 "source": "rover",    "source_id": "rover",   "x": 14, "y": 6, "confidence": 0.91, "type": "TBD" }
-  ],
 
   "link_events": [
     { "t": 50, "event": "cut",     "units": ["tricopter-1", "tricopter-2"] },

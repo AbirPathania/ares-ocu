@@ -137,7 +137,6 @@ class PlaybackEngine(QObject):
     def _apply_at(self, t: float) -> None:
         self._advance_phase(t)
         self._emit_unit_poses(t)
-        self._emit_new_detections(t)
         self._emit_new_link_events(t)
         self._tick_reactive_sequencer()
 
@@ -167,12 +166,6 @@ class PlaybackEngine(QObject):
                     float(pose.get("z", 0.0)),
                     float(pose.get("heading", 0.0)),
                 )
-
-    def _emit_new_detections(self, t: float) -> None:
-        for i, detection in enumerate(self._timeline.get("detections", [])):
-            if i not in self._emitted_detection_idx and detection["t"] <= t:
-                self._emitted_detection_idx.add(i)
-                self.detectionOccurred.emit(detection)
 
     def _emit_new_link_events(self, t: float) -> None:
         for i, event in enumerate(self._timeline.get("link_events", [])):

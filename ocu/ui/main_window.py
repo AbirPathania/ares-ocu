@@ -17,6 +17,8 @@ the map draws the fight as a zigzag fan.
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -33,6 +35,7 @@ from ocu.core.comms import GHOST, LCA, STANDARD, profile_for
 from ocu.core.control_authority import ControlAuthority
 from ocu.core.flight_director import AircraftMode, FlightDirector
 from ocu.core.geofence import Geofence
+from ocu.core.detection import REPORT_FLOOR, classify, fuse, sweep
 from ocu.core.lidar import LIDAR_RANGE_M, LIDAR_SCAN_HZ, cast_scan
 from ocu.core.mesh_state import MeshLink, VoxelObservation, voxel_key
 from ocu.core.power import (
@@ -45,6 +48,7 @@ from ocu.core.power import (
     tricopter_drain_pct_per_s,
     tricopter_endurance_s,
 )
+from ocu.core.targets import default_field
 from ocu.core.terrain import PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
 from ocu.sim.playback_engine import PlaybackEngine
@@ -96,6 +100,13 @@ class MainWindow(QMainWindow):
         self._comms = profile_for(STANDARD)
         # Ground truth, and separately what the rover has actually seen of it.
         self.terrain = TerrainWorld()
+        # What is actually buried out there, and what the suite has
+        # accumulated about each object it has swept over.
+        self.target_field = default_field()
+        self._target_evidence: dict[int, dict[str, float]] = {}
+        self._escalated: set = set()
+        self.wind_bearing_deg = 215.0
+        self._last_sweep_xy: tuple[float, float] | None = None
         self.perception = PerceptionMap()
         self._last_scan_s = -1e9
         self._obstacle_returns = 0
@@ -486,6 +497,7 @@ class MainWindow(QMainWindow):
 
         self._tick_power(dt)
         self._tick_lidar()
+        self._tick_detection_suite()
 
         for unit_id, event in events:
             self._handle_director_event(unit_id, event)
@@ -529,6 +541,84 @@ class MainWindow(QMainWindow):
         )
         self.map_view.set_live_scan(
             (rover.pose.x, rover.pose.y), [(r.x, r.y) for r in scan.returns[::7]]
+        )
+
+    def _tick_detection_suite(self) -> None:
+        """Sweep the detection suite over whatever the rover is standing on.
+
+        The suite runs continuously while driving, per section 2: the rover
+        does not stop to scan. Each sensor responds to the physical
+        properties of a buried object rather than to a timestamp, so what
+        appears on screen is the output of the geometry. Drive a different
+        route and the suite finds different things, or nothing.
+
+        Evidence accumulates per object: the best reading each sensor has
+        ever taken of it. A single pass at the edge of a swath is weak, and
+        driving closer strengthens it, which is what the operator is
+        watching when a confidence climbs.
+        """
+        rover = self.units["rover"]
+        scanning = self._comms.mesh_traffic  # the suite is on the vehicle
+
+        # The sensors sweep continuously along the ground the rover covers,
+        # so the suite is sampled along the segment driven since the last
+        # tick rather than at a single point. The pulse induction array is
+        # only 40 cm wide: point-sampling a moving vehicle steps straight
+        # over objects it should have driven across, and the faster the
+        # playback the more it misses.
+        previous = self._last_sweep_xy or (rover.pose.x, rover.pose.y)
+        self._last_sweep_xy = (rover.pose.x, rover.pose.y)
+        travelled = math.hypot(rover.pose.x - previous[0], rover.pose.y - previous[1])
+        samples = max(1, int(travelled / 0.10) + 1)
+        path = [
+            (
+                previous[0] + (rover.pose.x - previous[0]) * i / samples,
+                previous[1] + (rover.pose.y - previous[1]) * i / samples,
+            )
+            for i in range(samples + 1)
+        ]
+
+        for buried in self.target_field.near(rover.pose.x, rover.pose.y, 4.0):
+            readings = []
+            for sx, sy in path:
+                readings.extend(sweep(buried, sx, sy, self.wind_bearing_deg))
+            if not readings:
+                continue
+
+            evidence = self._target_evidence.setdefault(id(buried), {})
+            improved = False
+            for reading in readings:
+                if reading.confidence > evidence.get(reading.sensor, 0.0):
+                    evidence[reading.sensor] = reading.confidence
+                    improved = True
+            if not improved or not scanning:
+                continue
+
+            fused = fuse(evidence)
+            if fused < REPORT_FLOOR:
+                continue
+
+            self._report_detection(
+                buried,
+                sensors=sorted(evidence),
+                confidence=fused,
+                threat_type=classify(evidence),
+            )
+
+    def _report_detection(self, buried, sensors: list, confidence: float, threat_type: str) -> None:
+        # Every sensor that has contributed, because which ones agree is the
+        # evidence: metal with no vapour is scrap, metal with vapour is not.
+        self._on_detection(
+            {
+                "x": buried.x,
+                "y": buried.y,
+                "confidence": confidence,
+                "sensor": sensors[0] if sensors else "",
+                "sensors": sensors,
+                "source": "rover",
+                "source_id": "rover",
+                "type": threat_type,
+            }
         )
 
     def _tick_power(self, dt_s: float) -> None:
@@ -813,7 +903,9 @@ class MainWindow(QMainWindow):
             self.playback.clock_s,
             f"Detection: {detection.get('sensor')} at ({x:.0f}, {y:.0f}), confidence {confidence:.2f}",
         )
-        if confidence >= ALERT_CONFIDENCE_THRESHOLD:
+        key = (round(x, 2), round(y, 2))
+        if confidence >= ALERT_CONFIDENCE_THRESHOLD and key not in self._escalated:
+            self._escalated.add(key)
             self.alert_banner.show_alert(detection)
             self.event_log.log(
                 self.playback.clock_s, f"ALERT escalated: confidence {confidence:.2f} at ({x:.0f}, {y:.0f})"

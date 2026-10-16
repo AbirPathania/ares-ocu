@@ -217,9 +217,12 @@ class ThreatPanel(QWidget):
             self._cards[key] = card
             self._list_layout.insertWidget(self._list_layout.count() - 1, card)
 
-        sensor = detection.get("sensor")
-        if sensor and sensor not in threat["sensors"]:
-            threat["sensors"].append(sensor)
+        reported = detection.get("sensors") or (
+            [detection["sensor"]] if detection.get("sensor") else []
+        )
+        for sensor in reported:
+            if sensor not in threat["sensors"]:
+                threat["sensors"].append(sensor)
 
         # Highest confidence wins, matching the merge rule in core/mesh_state.py.
         if detection.get("confidence", 0.0) > threat["confidence"]:

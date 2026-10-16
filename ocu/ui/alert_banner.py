@@ -118,6 +118,13 @@ class AlertBanner(QWidget):
         x, y = detection.get("x"), detection.get("y")
         confidence = detection.get("confidence", 0.0)
 
+        # An escalation whose own classification is "inert" is still an
+        # escalation, section 8.3, but calling it a threat alert argues with
+        # the evidence underneath it and trains the operator to stop reading.
+        inert = threat_type == "safe_object"
+        self.title_label.setText("CONTACT \u00b7 READS INERT" if inert else "THREAT ALERT")
+        self.confirm_btn.setText("CONFIRM THREAT")
+        self.reject_btn.setText("CLEAR AS INERT" if inert else "REJECT")
         self.badge.set_detection(threat_type, confidence)
         source = detection.get("source_id", detection.get("source", "unknown"))
         self.message_label.setText(

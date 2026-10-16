@@ -251,6 +251,37 @@ in the second category was cut.
   rover's belief, so sensor shadows appear and close exactly where
   occlusion says they should.
 
+- **Detections are now simulated, not scripted**, which changes their
+  section 13 classification along with battery. The mission file used to
+  list detection events that fired at a timestamp; nothing was buried
+  anywhere and every confidence on screen was a number somebody typed.
+  `core/targets.py` now holds physical objects with a depth, a metal mass,
+  whether that metal is ferrous, and a vapour emission, and
+  `core/detection.py` holds a response model per sensor. What appears on
+  screen is the output of a geometry calculation over what the rover
+  actually drove across.
+
+  Every reach figure comes from the baseline: GPR 0-40 cm depth and 30 cm
+  scan width, pulse induction 40 cm sweep and 5 g of metal at 15 cm,
+  gradiometer fluxgates 50 cm apart and ferrous only, SAW VOC to 2 m
+  downwind and confirming only. What is this build's model is the *shape*
+  of each response between those limits, since the baseline states ranges
+  and not falloff curves. The curves used are the physically expected
+  ones: an induced dipole falling as the cube of range for pulse
+  induction, a gradient falling as the fourth power for the gradiometer,
+  sharp dispersal downwind for vapour.
+
+  Fusion is deliberately not a weighted average, which cannot express the
+  thing that matters: two sensors working on *different physics* agreeing
+  about one point is far stronger evidence than either being individually
+  confident. Section 8.1 singles out co-located GPR and pulse induction as
+  the biggest lever on false alarm rate, and that pairing earns the largest
+  cross-confirmation bonus.
+
+- **No fused confidence is ever reported above 0.97.** A classifier that
+  outputs certainty is either overfitting or lying, and an operator who
+  sees 1.00 stops reading the number.
+
 ## Bugs found by running the thing
 
 - **Docked tricopter-1/tricopter-2 rendered as separate floating icons before

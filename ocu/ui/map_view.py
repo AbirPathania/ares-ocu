@@ -658,7 +658,7 @@ class MapView(QWidget):
 
     def _draw_detections(self, painter: QPainter) -> None:
         pulse = (math.sin(math.radians(self._radar_angle * 4)) + 1.0) / 2.0  # 0..1
-        for d in self._detections:
+        for index, d in enumerate(self._detections):
             center = self._to_screen(d["x"], d["y"])
             confidence = d.get("confidence", 0.0)
             threat_type = d.get("type", "unknown")
@@ -713,8 +713,11 @@ class MapView(QWidget):
             painter.setPen(QPen(QColor("#C6D0DA")))
             painter.setFont(QFont("Menlo", 8))
             label = f"{threat_type.upper()} {confidence:.2f}"
+            # Contacts on a swept lane cluster along it, so labels are
+            # stepped to stop them stacking on one another.
+            offset = radius + 3 + (index % 3) * 12
             painter.drawText(
-                QRectF(center.x() - 60, center.y() + radius + 3, 120, 13), Qt.AlignHCenter, label
+                QRectF(center.x() - 60, center.y() + offset, 120, 13), Qt.AlignHCenter, label
             )
 
     def _draw_formation_preview(self, painter: QPainter) -> None:
