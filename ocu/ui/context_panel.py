@@ -201,15 +201,20 @@ class RoverPanel(QWidget):
         layout.addWidget(self.manual_hint)
 
         layout.addStretch(1)
-        self._last_pos = (0.0, 0.0)
 
-    def update_pose(self, x: float, y: float, heading: float, dt_s: float) -> None:
-        dx, dy = x - self._last_pos[0], y - self._last_pos[1]
-        distance_m = (dx * dx + dy * dy) ** 0.5
-        speed_kmh = (distance_m / dt_s) * 3.6 if dt_s > 0 else 0.0
-        self.speed.set_value(f"{min(speed_kmh, ROVER_TOP_SPEED_KMH):.1f}")
-        self.heading.set_value(f"{heading:.0f}°")
-        self._last_pos = (x, y)
+    def update_pose(self, heading: float, speed_ms: float) -> None:
+        """Show heading and how fast the rover is actually going.
+
+        The speed is the vehicle's own, taken from its motion model. It used
+        to be worked out by dividing how far the position had moved by how
+        much mission clock had elapsed, but the position moves on the flight
+        director's timer and the clock on the playback timer. Two timers that
+        are not locked together put two moves in one interval some of the
+        time and none in the next, so the readout swung between double and
+        zero, and a clamp at the top speed then hid the doubling.
+        """
+        self.speed.set_value(f"{speed_ms * 3.6:.1f}")
+        self.heading.set_value(f"{heading:.0f}\u00b0")
 
     def update_power(self, watts: float, endurance: str) -> None:
         """Total draw, not just the compute slice.

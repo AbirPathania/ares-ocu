@@ -538,3 +538,59 @@ pixel belongs to the nearest sample whose top has reached its elevation. That is
 exact for a pitched camera, where the usual shortcut of treating image columns as
 constant-azimuth rays is only right with the camera level. A test checks the
 horizon against f·tan(pitch) rather than trusting that it looks right.
+
+## Nothing flies, cuts or announces itself
+
+**Aircraft launch only when the operator launches them.** The reactive launch
+from section 6.1, where the rover's planner commits scouts itself, is not
+implemented, on the operator's instruction: aircraft must not come out unless
+asked. This departs from the baseline, which describes the rover committing
+them. The rover keeps the part that is a judgement about its own map: when a
+third of the ground ahead is hidden (`SCOUT_RECOMMEND_HIDDEN_FRACTION`) it says
+so once in the log, with the bearing it would choose, and the launch dial opens
+on that bearing. Launching is still the operator's press.
+
+**The mission timeline is gone.** `mission_timeline.json` and the playback
+engine that played it back are deleted. They carried phase markers ("alert",
+"fusion", "recharge and return") that fired at fixed times whether or not they
+were true, a link cut and restore nobody had asked for, and keyframes for a
+rover route that no longer exists. What remains is a mission clock
+(`sim/mission_clock.py`). The top bar and the roster are derived from the
+vehicles' own state (`_refresh_status`): the rover's mode and where it is in its
+sweep, each aircraft's flight mode.
+
+**The speed readout was wrong, not the rover.** Measured, the rover's top speed
+over a full sweep is 2.17 m/s (7.8 km/h), well inside the 15 km/h limit. The
+readout divided how far the position had moved by how much mission clock had
+elapsed, but the position moves on the flight director's timer and the clock on
+another, so two moves landed in one interval some of the time and none in the
+next, and a clamp at the top speed hid the doubling (six samples sat on the clamp).
+It now shows the vehicle's own speed.
+
+**Hold holds.** Pressing Hold used to pause the clock while the rover kept
+driving. It now stops the rover where it is; aircraft keep station on it.
+
+**Scouts see things.** With the timeline gone the aircraft had nothing to find,
+so a cut link diverged on nothing: a demo run reported "0 observation(s) crossed
+to reconcile". Scouts now detect what their cameras can see (`core/aerial.py`):
+objects on or within 10 cm of the surface, inside the field of view and pitch the
+picture is rendered with, in range, with a clear line of sight over the same
+heights the picture uses. Optical evidence tops out at 0.62, below the 0.85
+escalation threshold, because a camera can say something is out of place and not
+what it is; it adds to the rover's evidence under the same fusion rule if both
+see it. Scout evidence is held separately from the rover's, since they are
+different replicas and cannot share it over a cut link. Two surface-laid objects
+sit on the lanes the sweep has not reached, for scouts looking along the sweep.
+
+**Reports are throttled to news.** A reading that creeps up by a thousandth as
+the vehicle moves was logged each time (seven identical lines in two seconds).
+A reading is now reported when it rises by 0.05, and always when it crosses the
+escalation threshold.
+
+**Reset forgets.** The per-object evidence and the set of already-escalated
+objects were never cleared on reset, so after one the rover would stay silent
+about everything it had found and no alert could fire again.
+
+**The geofence is checked on real positions.** It was only ever checked against
+scripted poses, so real motion was never tested against it. It is unconfigured by
+default, so nothing changes visibly, but the check is on the right data.

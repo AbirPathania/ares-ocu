@@ -215,6 +215,9 @@ class FlightDirector:
         # it had just mapped.
         self._path_cells: list[tuple[int, int]] = []
         self.goal: tuple[float, float] | None = None
+        #: Set while the operator has the mission on hold: the rover stops
+        #: where it is, and the aircraft keep station on it.
+        self.hold_navigation = False
         self.lane_from: tuple[float, float] | None = None
         self._costmap = None
         self._plan_failures = 0
@@ -323,6 +326,7 @@ class FlightDirector:
         self.path = []
         self._path_cells = []
         self.goal = None
+        self.hold_navigation = False
         self.lane_from = None
         self._replans = 0
         self._costmap = None
@@ -612,6 +616,13 @@ class FlightDirector:
             return (body.x, body.y, body.heading)
 
         if self.rover_mode == RoverMode.NAVIGATING:
+            if self.hold_navigation:
+                body.halt(dt_s)
+                self._rover_speed_ms = body.speed_ms
+                self._rover_velocity = (body.vx, body.vy)
+                self._last_rover_xy = (body.x, body.y)
+                return (body.x, body.y, body.heading)
+
             if self.plan_failed:
                 # Nowhere to go and nowhere clear nearby. Holding here
                 # silently would leave the operator watching a stopped

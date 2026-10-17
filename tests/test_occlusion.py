@@ -1,7 +1,7 @@
 """Which way to send scouts: toward the ground the rover cannot see.
 
-Reactive launch is the rover's own planner reaching the end of what its
-sensors can resolve. The direction has to come from its map, and the
+When the rover reaches the end of what its sensors can resolve it recommends
+sending scouts to look. The direction has to come from its map, and the
 property that makes it meaningful is that unknown ground *inside* sensor
 range is hidden ground (a LiDAR cannot see through a rock), while unknown
 ground beyond range is merely far.

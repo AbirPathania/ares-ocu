@@ -92,13 +92,6 @@ def test_nonsense_reports_are_ignored():
     assert seq.stage == LaunchStage.LAUNCHING
 
 
-def test_reactive_flag_recorded():
-    seq = LaunchSequencer()
-    seq.arm()
-    seq.stage_formation(["tricopter-1"], [Target(1, 1, 1)], Target(0, 0, 0), is_reactive=True)
-    assert seq.is_reactive is True
-
-
 def test_reset_returns_to_idle():
     seq, _ = make_staged_sequencer()
     seq.launch()

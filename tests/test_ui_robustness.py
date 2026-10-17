@@ -123,7 +123,6 @@ def test_reset_midflight_restores_a_clean_bay(app):
     pump(app, 10)
     assert all(window._docked_state.values())
     assert window.flight_director.aircraft == {}
-    assert all(owner == "scripted" for owner in window._position_owner.values())
 
 
 def _select_mode(window, mode):
@@ -224,10 +223,10 @@ def test_battery_burns_on_mission_time_not_wall_clock(app):
     faster. Integrating battery against the wall clock left a fast-forwarded
     run showing a pack that had barely moved."""
     slow, fast = MainWindow(), MainWindow()
-    slow.playback.set_speed(1.0)
-    fast.playback.set_speed(10.0)
-    slow.playback.play()
-    fast.playback.play()
+    slow.mission_clock.set_speed(1.0)
+    fast.mission_clock.set_speed(10.0)
+    slow.mission_clock.play()
+    fast.mission_clock.play()
 
     for _ in range(50):
         slow._on_director_tick()
@@ -451,7 +450,7 @@ def test_a_tile_is_rendered_at_a_sensible_size_for_its_shape(app):
 
 def _drive(window, seconds):
     for _ in range(int(seconds / 0.1)):
-        window.playback._tick()
+        window.mission_clock._tick()
         window._on_director_tick()
 
 
@@ -494,15 +493,6 @@ def test_a_guided_launch_from_a_driving_rover_forms_on_the_pattern_the_operator_
         assert abs(pose.z - target.z) < 0.7, uid
 
 
-def test_the_launch_dial_starts_on_the_direction_of_travel(app):
-    window = MainWindow()
-    _deploy_and_drive(window, 10.0)
-    window._on_bay_launch_requested()
-    dial = window.context_panel.launch_console.bearing_spin.value()
-    heading = window.units["rover"].pose.heading
-    assert abs((dial - heading + 180.0) % 360.0 - 180.0) < 1.0
-
-
 def test_aircraft_ride_in_the_bay_with_the_rover_until_they_lift_off(app):
     import math
 
@@ -527,56 +517,377 @@ def _capture_log(window):
     return messages
 
 
-def test_the_script_never_places_an_aircraft(app):
-    """Positions in the mission file were written for a rover that followed a
-    fixed route. The rover now drives itself, so an aircraft placed from the
-    file would be flying somewhere unrelated to the vehicle it belongs to."""
+def test_nothing_flies_unless_the_operator_launches_it(app):
+    """Aircraft are launched by a person. The plan reaching aerial recon, the
+    rover seeing hidden ground, a long run with no one touching anything:
+    none of it puts an aircraft in the air."""
     window = MainWindow()
-    for uid in TRICOPTERS:
-        assert window._position_owner[uid] == "scripted"  # the state in which the script could place it
-        before = (window.units[uid].pose.x, window.units[uid].pose.y, window.units[uid].pose.z)
-        window._on_unit_pose_changed(uid, 400.0, 400.0, 90.0, 123.0)
-        after = (window.units[uid].pose.x, window.units[uid].pose.y, window.units[uid].pose.z)
-        assert after == before, f"the script moved {uid}"
-    assert window.units["rover"].kind == "rover"
+    _deploy_and_drive(window, 45.0)  # long enough to scan, sweep, find things and recommend
+    assert window.flight_director.aircraft == {}
+    assert all(window._docked_state.values())
+    assert all(window.units[uid].pose.z == 0.0 for uid in TRICOPTERS)
 
 
-def test_the_reactive_launch_is_the_rovers_own_decision_and_is_flown(app):
+def _drive_until_recommended(window, limit_s=100.0):
+    for _ in range(int(limit_s / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        if window._recommended_bearing is not None:
+            return True
+    return False
+
+
+def test_the_rover_recommends_scouts_from_its_own_map_but_does_not_launch_them(app):
+    window = MainWindow()
+    messages = _capture_log(window)
+    window._on_play_clicked()
+    assert _drive_until_recommended(window), "a third of the ground ahead is hidden at some point on this ground"
+
+    advice = [m for m in messages if m.startswith("Rover recommends scouts:")]
+    assert len(advice) == 1
+    assert "hidden" in advice[0] and "best bearing" in advice[0]
+    _drive(window, 20.0)
+    assert len([m for m in messages if m.startswith("Rover recommends scouts:")]) == 1, "said once"
+    assert window.flight_director.aircraft == {}
+
+
+def test_the_rover_does_not_advise_before_it_is_going_anywhere(app):
+    """At a standstill 'ahead' is whatever the vehicle happens to be parked
+    facing. It says nothing until it is moving."""
+    window = MainWindow()
+    window._on_play_clicked()
+    assert window.flight_director.rover_body.speed_ms < 0.5
+    assert window._recommended_bearing is None
+
+
+def test_the_recommendation_is_a_reading_of_the_rovers_own_map(app):
+    """Everything known ahead: silence. Take a sector of it away: it speaks,
+    and points at the sector."""
+    from ocu.core.occlusion import FAR_M, NEAR_M
+    from ocu.core.terrain import Terrain
     import math
 
     window = MainWindow()
-    messages = _capture_log(window)
-    _deploy_and_drive(window, 75.0)
-
-    decided = [m for m in messages if m.startswith("Reactive launch:") and "hidden" in m]
-    assert len(decided) == 1, "the rover announces what it saw and where it is sending scouts"
-    assert "committing 2 scouts" in decided[0]
-    assert "TRI-3 held in bay" in decided[0]
-
-    airborne = [u for u in TRICOPTERS if u in window.flight_director.aircraft]
-    assert sorted(airborne) == ["tricopter-1", "tricopter-2"]
-    assert window._docked_state["tricopter-3"], "the third is held in the bay"
+    window._on_play_clicked()
+    _drive(window, 8.0)  # moving now
+    window._recommended_bearing = None
+    window.flight_director.aircraft.clear()
 
     rover = window.units["rover"].pose
-    for uid in airborne:
-        state = window.flight_director.aircraft[uid]
-        assert state.mode.value == "STATION", f"{uid} should be on station by now"
-        assert math.hypot(state.x - rover.x, state.y - rover.y) <= 50.0 + 1e-6, "inside the tether"
-    assert any(m.startswith("Reactive launch: FORMED") for m in messages)
+    reach = int(80 / window.perception.cell_size_m)
+    for cx in range(-reach + int(rover.x / 0.5), reach + int(rover.x / 0.5) + 1):
+        for cy in range(-reach + int(rover.y / 0.5), reach + int(rover.y / 0.5) + 1):
+            window.perception.observe((cx, cy), Terrain.GROUND)
+    window._check_scout_recommendation()
+    assert window._recommended_bearing is None, "nothing is hidden, so nothing to say"
+
+    # Hide the ground 40 degrees off the direction of travel.
+    target = (rover.heading + 40.0) % 360.0
+    for cx in range(-reach + int(rover.x / 0.5), reach + int(rover.x / 0.5) + 1):
+        for cy in range(-reach + int(rover.y / 0.5), reach + int(rover.y / 0.5) + 1):
+            x, y = cx * 0.5 - rover.x, cy * 0.5 - rover.y
+            if NEAR_M <= math.hypot(x, y) <= FAR_M + 2:
+                to_cell = math.degrees(math.atan2(x, y)) % 360.0
+                if abs((to_cell - target + 180.0) % 360.0 - 180.0) <= 20.0:
+                    window.perception._observed.pop((cx, cy), None)
+    window._check_scout_recommendation()
+    assert window._recommended_bearing is not None
+    assert abs((window._recommended_bearing - target + 180.0) % 360.0 - 180.0) <= 20.0
 
 
-def test_an_aircraft_stood_down_in_the_bay_leaves_the_console_usable(app):
+def test_the_launch_dial_opens_on_the_rovers_recommendation(app):
     window = MainWindow()
+    window._on_play_clicked()
+    assert _drive_until_recommended(window)
+    recommended = window._recommended_bearing
+
+    window._on_bay_launch_requested()
+    dial = window.context_panel.launch_console.bearing_spin.value()
+    assert abs((dial - recommended + 180.0) % 360.0 - 180.0) < 1.0
+
+
+def test_with_nothing_recommended_the_dial_opens_on_the_direction_of_travel(app):
+    window = MainWindow()
+    _deploy_and_drive(window, 3.0)  # too soon for the rover to have said anything
+    assert window._recommended_bearing is None
+    window._on_bay_launch_requested()
+    dial = window.context_panel.launch_console.bearing_spin.value()
+    heading = window.units["rover"].pose.heading
+    assert abs((dial - heading + 180.0) % 360.0 - 180.0) < 1.0
+
+
+def test_a_launch_the_operator_commands_is_flown_to_the_end(app):
+    window = MainWindow()
+    _deploy_and_drive(window, 20.0)
     console = window.context_panel.launch_console
     window._on_bay_launch_requested()
     console._on_stage_clicked()
     console._on_launch_confirmed()
-    _drive(window, 0.3)  # the first is airborne, the other two have not left the bay
-    for uid in TRICOPTERS:
-        window._on_recall_requested(uid)
-    _drive(window, 0.5)
-    assert window._launches == [], "a launch with no aircraft left in it is over"
-    assert window._docked_state["tricopter-2"] and window._docked_state["tricopter-3"]
+    _drive(window, 40.0)
+    assert window.flight_director.launch_stage(TRICOPTERS) == "FORMED"
+    assert all(not docked for docked in window._docked_state.values())
 
+
+# --- the speed readout -----------------------------------------------------------------
+
+
+def test_the_speed_readout_is_the_vehicles_speed_even_when_the_timers_drift(app):
+    """The position moves on the director's timer and the mission clock on
+    another. The readout used to difference one against the other, so it
+    swung between double and zero and a clamp hid the doubling. It must show
+    what the vehicle is doing however the two timers happen to interleave."""
+    import random
+
+    window = MainWindow()
+    window._on_play_clicked()
+    rnd = random.Random(11)
+    worst = 0.0
+    for _ in range(400):
+        for _ in range(rnd.choice([1, 1, 1, 2, 0, 1])):
+            window._on_director_tick()
+        window.mission_clock._tick()
+        true_kmh = window.flight_director.rover_body.speed_ms * 3.6
+        shown = float(window.context_panel.rover_panel.speed._value)
+        worst = max(worst, abs(shown - true_kmh))
+    assert worst < 0.06, "the readout is rounded to one decimal and nothing else"
+
+
+def test_the_rover_never_exceeds_its_stated_top_speed(app):
+    from ocu.core.constants import ROVER_TOP_SPEED_MS
+
+    window = MainWindow()
+    window._on_play_clicked()
+    fastest = 0.0
+    for _ in range(600):
+        window._on_director_tick()
+        fastest = max(fastest, window.flight_director.rover_body.speed_ms)
+    assert fastest <= ROVER_TOP_SPEED_MS + 1e-6
+    assert fastest < 3.0, "a clearance sweep is not driven flat out"
+
+
+# --- the end of the mission -----------------------------------------------------------------
+
+
+def test_the_mission_clock_runs_until_the_operator_holds_it(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    for _ in range(3000):  # five minutes of mission time, far past any old script
+        window.mission_clock._tick()
+    assert window.mission_clock.playing
+    assert window.mission_clock.clock_s > 299.0
+
+
+# --- nothing happens on a schedule -----------------------------------------------------------
+
+
+def test_the_link_is_never_cut_unless_the_operator_cuts_it(app):
+    window = MainWindow()
+    messages = _capture_log(window)
+    _deploy_and_drive(window, 80.0)
+    assert not any("Link cut" in m or "link" in m.lower() and "cut" in m.lower() for m in messages)
+    assert all(unit.link_state == "CONNECTED" for unit in window.units.values())
+
+
+def test_the_log_never_announces_a_phase_it_is_not_in(app):
+    window = MainWindow()
+    messages = _capture_log(window)
+    _deploy_and_drive(window, 80.0)
+    assert not any(m.startswith("Phase:") for m in messages)
+
+
+# --- the status is read from the vehicles ---------------------------------------------------
+
+
+def test_the_top_bar_reads_what_the_rover_is_doing(app):
+    window = MainWindow()
+    assert window.phase_label.text() == "STANDBY"
+
+    window._on_play_clicked()
+    assert window.phase_label.text() in ("FIRST SCAN", "SWEEPING LANE 1")
+    _drive(window, 5.0)
+    assert window.phase_label.text().startswith("SWEEPING LANE")
+
+    window._on_play_clicked()
+    assert window.phase_label.text() == "HOLDING"
+    assert window.play_btn.text().endswith("RESUME")
+
+    window._on_play_clicked()
+    window._on_return_to_base()
+    _drive(window, 0.5)
+    assert window.phase_label.text() == "RETURNING TO BASE"
+
+
+def test_the_roster_reads_what_each_aircraft_is_doing(app):
+    window = MainWindow()
+    assert all(window.units[uid].current_task == "IN BAY" for uid in TRICOPTERS)
+
+    _deploy_and_drive(window, 5.0)
+    console = window.context_panel.launch_console
     window._on_bay_launch_requested()
-    assert console.stage_btn.isEnabled(), "the operator can stage another launch"
+    console._on_stage_clicked()
+    console._on_launch_confirmed()
+    _drive(window, 4.0)
+    assert window.units["tricopter-1"].current_task == "CLIMBING"
+    _drive(window, 40.0)
+    assert all(window.units[uid].current_task == "ON STATION" for uid in TRICOPTERS)
+
+
+def test_the_sweep_reports_when_it_is_complete(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    window.mission_clock._clock_s = 0.0
+    window._waypoint_index = len(window._mission_waypoints)
+    window.flight_director.goal = None
+    window._refresh_status()
+    assert window.phase_label.text() == "SWEEP COMPLETE"
+
+
+# --- hold ---------------------------------------------------------------------------------------
+
+
+def test_hold_stops_the_rover_where_it_is_and_resume_carries_on(app):
+    window = MainWindow()
+    _deploy_and_drive(window, 12.0)
+    window._on_play_clicked()  # hold
+    _drive(window, 4.0)  # let it brake
+    held = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+    _drive(window, 6.0)
+    after = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+    assert abs(after[0] - held[0]) < 1e-6 and abs(after[1] - held[1]) < 1e-6
+    assert window.flight_director.rover_body.speed_ms == 0.0
+
+    window._on_play_clicked()  # resume
+    _drive(window, 6.0)
+    moved = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+    assert abs(moved[0] - held[0]) + abs(moved[1] - held[1]) > 3.0
+
+
+def test_the_aircraft_keep_station_on_the_rover_while_the_mission_is_held(app):
+    import math
+
+    window = MainWindow()
+    _deploy_and_drive(window, 5.0)
+    console = window.context_panel.launch_console
+    window._on_bay_launch_requested()
+    console._on_stage_clicked()
+    console._on_launch_confirmed()
+    _drive(window, 45.0)
+    window._on_play_clicked()  # hold
+    _drive(window, 10.0)
+    rover = window.units["rover"].pose
+    for uid in TRICOPTERS:
+        state = window.flight_director.aircraft[uid]
+        assert state.mode.value == "STATION"
+        assert math.hypot(state.body.vx, state.body.vy) < 0.2, "hovering, not drifting"
+        assert math.hypot(state.x - rover.x, state.y - rover.y) <= 50.0
+
+
+# --- reporting, and what a cut link shows ----------------------------------------------------
+
+
+def test_a_reading_is_reported_only_when_it_is_news(app):
+    window = MainWindow()
+    key = (1, "rover")
+    assert window._worth_reporting(key, 0.30), "the first reading always is"
+    assert not window._worth_reporting(key, 0.31), "a creep of a hundredth is not"
+    assert not window._worth_reporting(key, 0.34)
+    assert window._worth_reporting(key, 0.36), "a real step up is"
+    assert not window._worth_reporting(key, 0.30), "and falling back is not"
+
+
+def test_crossing_the_escalation_threshold_is_always_reported(app):
+    from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD
+
+    window = MainWindow()
+    key = (2, "rover")
+    just_below = ALERT_CONFIDENCE_THRESHOLD - 0.01
+    assert window._worth_reporting(key, just_below)
+    assert window._worth_reporting(key, ALERT_CONFIDENCE_THRESHOLD + 0.005), (
+        "a step of half a hundredth is too small to report, except that it is the one that escalates"
+    )
+
+
+def _form_up(window, seconds_after_launch=45.0):
+    _deploy_and_drive(window, 5.0)
+    console = window.context_panel.launch_console
+    window._on_bay_launch_requested()
+    console._on_stage_clicked()
+    console._on_launch_confirmed()
+    _drive(window, seconds_after_launch)
+    assert window.flight_director.launch_stage(TRICOPTERS) == "FORMED"
+
+
+def _plant_surface_object_ahead_of(window, uid, distance_m=40.0):
+    import math
+
+    from ocu.core.targets import BuriedTarget
+
+    scout = window.flight_director.aircraft[uid]
+    heading = math.radians(scout.heading)
+    target = BuriedTarget(
+        scout.x + math.sin(heading) * distance_m,
+        scout.y + math.cos(heading) * distance_m,
+        0.02, 90.0, True, 0.1, "planted",
+    )
+    window.target_field.targets.append(target)
+    return target
+
+
+def test_a_scout_that_sees_something_reports_it_on_the_aircraft_map(app):
+    from ocu.core.mesh_state import voxel_key
+
+    window = MainWindow()
+    _form_up(window)
+    target = _plant_surface_object_ahead_of(window, "tricopter-2")
+    _drive(window, 1.0)
+
+    holdings = window.mesh_link.holdings()
+    voxel = voxel_key(target.x, target.y, 0.0)
+    assert voxel in holdings, "the scout saw it"
+    assert any(
+        threat["x"] == target.x and threat["y"] == target.y for threat in window.threat_panel._threats.values()
+    )
+
+
+def test_cutting_the_link_while_a_scout_sees_something_leaves_the_maps_diverged_until_restored(app):
+    """The signature interaction. What the scout finds while the link is down
+    stays on its side, visibly, and the restore reports what crossed."""
+    from ocu.core.mesh_state import voxel_key
+
+    window = MainWindow()
+    _form_up(window)
+    window._on_cut_link()
+    assert window.mesh_link.divergence() == 0
+
+    target = _plant_surface_object_ahead_of(window, "tricopter-2")
+    _drive(window, 1.0)
+
+    voxel = voxel_key(target.x, target.y, 0.0)
+    assert window.mesh_link.holdings()[voxel] == {"aircraft"}, "seen by the scout, not yet by the rover"
+    assert window.mesh_link.divergence() >= 1
+
+    window._on_restore_link()
+    assert window.mesh_link.holdings()[voxel] == {"aircraft", "rover"}
+    assert window.mesh_link.divergence() == 0
+    assert window.mesh_link.last_restore_delta >= 1
+
+
+def test_the_rover_side_diverges_too_when_it_finds_something_during_a_cut(app):
+    window = MainWindow()
+    _deploy_and_drive(window, 2.0)
+    window._on_cut_link()
+    _drive(window, 25.0)  # the rover is still finding things on its first lane
+    assert window.mesh_link.divergence() >= 1
+    window._on_restore_link()
+    assert window.mesh_link.divergence() == 0
+
+
+def test_a_reset_forgets_what_was_found_so_it_can_be_found_again(app):
+    window = MainWindow()
+    _deploy_and_drive(window, 15.0)
+    assert window.threat_panel._threats
+    window._on_reset_clicked()
+    assert not window._target_evidence and not window._aerial_evidence and not window._escalated
+
+    _deploy_and_drive(window, 15.0)
+    assert window.threat_panel._threats, "the rover can find the same objects again"

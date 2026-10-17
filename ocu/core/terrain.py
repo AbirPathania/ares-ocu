@@ -52,6 +52,8 @@ class Terrain(IntEnum):
     TREE = 5  # impassable, and it blocks the beam
 
 
+_TERRAIN_BY_VALUE = {int(t): t for t in Terrain}
+
 #: Classes that stop a LiDAR ray.
 OCCLUDING = frozenset({Terrain.ROCK, Terrain.TREE})
 
@@ -434,6 +436,36 @@ class PerceptionMap:
         self._observed[cell] = kind
         self._journal.append((cell, kind))
         return True
+
+    def observe_many(self, cx: np.ndarray, cy: np.ndarray, kinds: np.ndarray) -> int:
+        """Observe a batch of cells at once; returns how many changed.
+
+        A scan covers the same cell from several rays, so the batch is reduced
+        to unique cells first. A cell has one true class, so which ray saw it
+        does not matter.
+        """
+        if cx.size == 0:
+            return 0
+        # Two coordinates packed into one 64-bit key, because a one-dimensional
+        # unique is several times faster than a row-wise one. The offset keeps
+        # the shifted value below the sign bit; a billion cells either way is
+        # more ground than any mission covers.
+        offset = 1 << 30
+        keys = ((cx.astype(np.int64) + offset) << 32) | (cy.astype(np.int64) + offset)
+        unique, first = np.unique(keys, return_index=True)
+        xs = (unique >> 32) - offset
+        ys = (unique & 0xFFFFFFFF) - offset
+        observed, journal = self._observed, self._journal
+        changed = 0
+        for x, y, value in zip(xs.tolist(), ys.tolist(), kinds[first].tolist()):
+            kind = _TERRAIN_BY_VALUE[value]
+            cell = (x, y)
+            if observed.get(cell) is kind:
+                continue
+            observed[cell] = kind
+            journal.append((cell, kind))
+            changed += 1
+        return changed
 
     def at(self, cell: tuple[int, int]) -> Terrain:
         return self._observed.get(cell, Terrain.UNKNOWN)

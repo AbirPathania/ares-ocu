@@ -2,12 +2,12 @@
 
 IDLE -> ARMED -> STAGED -> LAUNCHING -> CLIMBING -> TRANSLATING -> FORMED
 
-The same record serves both launch paths described in section 6: guided
-formation launch (section 6.2), where an operator sets bearing, pattern,
-spacing and rally altitude, and reactive launch (section 6.1), where the
-rover's own planner decides. Section 6.1 is explicit that reactive launch
-"trigger[s] the same launch sequencer described in 6.3" rather than a
-separate code path, so there is only one implementation here.
+Guided formation launch (section 6.2): an operator sets bearing, pattern,
+spacing and rally altitude, and commands the launch. Section 6.1 describes a
+reactive launch in which the rover's planner commits scouts itself; this build
+does not do that, on the operator's instruction that aircraft only fly when
+they launch them. The rover recommends instead (see DECISIONS.md), and the
+operator launches through this same sequence.
 
 What this class does *not* do is move anything. It used to: it interpolated
 each aircraft along a fixed line over a fixed number of seconds, which put
@@ -65,7 +65,6 @@ class AircraftPlan:
 @dataclass
 class LaunchSequencer:
     stage: LaunchStage = LaunchStage.IDLE
-    is_reactive: bool = False
     plans: list[AircraftPlan] = field(default_factory=list)
 
     def arm(self) -> None:
@@ -78,7 +77,6 @@ class LaunchSequencer:
         tricopter_ids: list[str],
         targets: list[Target],
         origin: Target,
-        is_reactive: bool = False,
     ) -> None:
         """Verify step: bearing, pattern, spacing set; targets computed; nothing moved yet."""
         if self.stage != LaunchStage.ARMED:
@@ -95,7 +93,6 @@ class LaunchSequencer:
             )
             for i, (tricopter_id, target) in enumerate(zip(tricopter_ids, targets))
         ]
-        self.is_reactive = is_reactive
         self.stage = LaunchStage.STAGED
 
     def launch(self) -> None:
@@ -118,5 +115,4 @@ class LaunchSequencer:
 
     def reset(self) -> None:
         self.stage = LaunchStage.IDLE
-        self.is_reactive = False
         self.plans = []

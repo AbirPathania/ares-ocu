@@ -1,5 +1,5 @@
 {
-  "_comment": "Static per-unit specs, section 2 of the build spec. These describe the platform, not any single mission; the scripted mission lives in sim/mission_timeline.json.",
+  "_comment": "Static per-unit specs, section 2 of the build spec. These describe the platform, not any single mission.",
 
   "rover": {
     "id": "rover",

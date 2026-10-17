@@ -72,6 +72,14 @@ SCRUB_BLUR_CELLS = 2
 #: trees are similar and distant ones differ, not random per cell.
 HEIGHT_VARIATION = 0.32
 
+#: The scouts' camera: field of view, how far it is tipped down, and the
+#: shape of the frame it is rendered into (height over width). Chosen for this
+#: build, not published figures of any airframe. Detection uses the same numbers
+#: the picture is drawn with, so what a scout reports is what is in its view.
+SCOUT_HFOV_DEG = 84.0
+SCOUT_PITCH_DOWN_DEG = 18.0
+SCOUT_NOMINAL_ASPECT = 0.38
+
 #: Surface colours, 0-255 RGB. Dry scrubland: pale compacted track, tan
 #: ground, olive brush, grey rock, dark canopy over a dark trunk.
 GROUND_RGB = {
@@ -286,6 +294,19 @@ class CameraRig:
             + field[x1, y1] * tx * ty
         )
 
+    def line_of_sight(
+        self, x0: float, y0: float, z0: float, x1: float, y1: float, z1: float
+    ) -> bool:
+        """Whether the straight line between two points clears the ground and
+        everything standing on it. The same heights the picture is drawn from."""
+        length = math.hypot(x1 - x0, y1 - y0)
+        steps = max(int(length / self._cell), 2)
+        t = np.linspace(0.0, 1.0, steps + 1)[1:-1]
+        xs, ys = x0 + (x1 - x0) * t, y0 + (y1 - y0) * t
+        sample = self._bilerp(self._relief, xs, ys)
+        surface = sample[:, 0] + sample[:, 1:].max(axis=1)
+        return bool(np.all(z0 + (z1 - z0) * t > surface))
+
     def elevation_at(self, x: float, y: float) -> float:
         return float(self._bilerp(self._elevation, np.array([x]), np.array([y]))[0])
 
@@ -335,8 +356,8 @@ class CameraRig:
         heading_deg: float,
         width: int = 192,
         height: int = 76,
-        fov_deg: float = 84.0,
-        pitch_down_deg: float = 18.0,
+        fov_deg: float = SCOUT_HFOV_DEG,
+        pitch_down_deg: float = SCOUT_PITCH_DOWN_DEG,
         max_range_m: float = 140.0,
         rover: tuple[float, float, float] | None = None,
         sensor_noise: float = 0.0,

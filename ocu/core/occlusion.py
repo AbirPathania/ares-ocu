@@ -1,10 +1,10 @@
 """Where the rover cannot see, and which way to send scouts to look.
 
-Section 6.1's reactive launch is the rover's own planner deciding that its
-sensors have reached the end of what they can resolve and committing
-aircraft to look beyond it. The decision needs one input: which direction
-ahead is least known. That is read here from the map the rover has actually
-built, not from a script.
+When the rover's sensors have reached the end of what they can resolve it
+recommends sending scouts to look beyond. The recommendation needs one
+input: which direction ahead is least known. That is read here from the map
+the rover has actually built, not from a script. It is a recommendation; the
+operator launches.
 
 A LiDAR cannot see through a rock or a stand of trees, so ground behind one
 is unknown however close it is. Counting unknown cells in an arc ahead of

@@ -108,6 +108,12 @@ def default_field(seed: int = 20261016, sweep: LaneSweep | None = None) -> Targe
         # Between the lanes, clear of every swath including the 2 m the
         # vapour sensor reaches, so the sweep genuinely misses it.
         (0, 6.5, 2.0, 0.06, 140.0, True, 0.5, "outside_swath"),
+        # Laid on the surface of ground the sweep has not reached yet. A scout
+        # looking along the lanes can see these from the air; the rover's own
+        # map cannot contain them until it gets there, or until the link
+        # carries what the scout saw.
+        (2, 19.5, 0.9, 0.02, 120.0, True, 0.3, "surface_ahead"),
+        (3, 21.5, -1.4, 0.03, 85.0, True, 0.2, "surface_far"),
     ]
     targets = []
     for lane, along, offset, depth, mass, ferrous, voc, truth in placements:

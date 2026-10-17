@@ -297,7 +297,7 @@ class LaunchConsole(QWidget):
             return
         origin = Target(*self._origin)
         targets = self._current_targets()[: len(selected)]
-        self._sequencer.stage_formation(selected, targets, origin, is_reactive=False)
+        self._sequencer.stage_formation(selected, targets, origin)
         self.stage_label.setText(self._sequencer.stage.value)
         self.stageChanged.emit(self._sequencer.stage.value)
         self.eventLogged.emit(

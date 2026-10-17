@@ -16,6 +16,8 @@ is no real terrain data anywhere in this build (see DECISIONS.md).
 from __future__ import annotations
 
 import math
+
+import numpy as np
 import random
 
 from PySide6.QtCore import QPointF, QRectF, QTimer, Qt, Signal
@@ -64,6 +66,17 @@ TRAIL_MAX_POINTS = 240
 #: the honest picture of clearance work: the vehicle sees a long way and
 #: clears a hand's breadth.
 SWEPT_WIDTH_M = PULSE_INDUCTION_SWEEP_WIDTH_CM / 100.0
+
+#: Terrain colours as RGB rows, indexed by Terrain value, so a whole scan's
+#: colours are one lookup rather than a dict get per point.
+_TERRAIN_RGB = np.zeros((max(int(t) for t in Terrain) + 1, 3), dtype=np.float64)
+_RETURN_RGB = np.zeros_like(_TERRAIN_RGB)
+for _terrain in Terrain:
+    _dim = TERRAIN_COLORS.get(_terrain.name)
+    _bright = RETURN_COLORS.get(_terrain.name)
+    if _dim is not None and _bright is not None:
+        _TERRAIN_RGB[int(_terrain)] = (_dim.red(), _dim.green(), _dim.blue())
+        _RETURN_RGB[int(_terrain)] = (_bright.red(), _bright.green(), _bright.blue())
 COMPASS_RADIUS_PX = 60.0
 RADAR_TICK_MS = 60
 TERRAIN_SEED = 20260930
@@ -122,7 +135,7 @@ class MapView(QWidget):
         self._perception_image.fill(QColor(0, 0, 0, 0))
         self._mapped_m2 = 0.0
         self._cloud_points = 0
-        self._fresh_returns = []
+        self._fresh_returns = None
         self._fresh_age = 0.0
         self._planned_path: list[tuple[float, float]] = []
         self._planned_goal: tuple[float, float] | None = None
@@ -333,54 +346,66 @@ class MapView(QWidget):
         self._planned_goal = goal
         self.update()
 
-    def add_returns(self, returns, mapped_m2: float, stats: dict) -> None:
+    def add_returns(self, scan, mapped_m2: float, stats: dict) -> None:
         """Accumulate one scan's returns into the cached point cloud.
 
         Each return is a measurement, painted at its own position with a
         brightness taken from its intensity, so hard surfaces build bright
         dense clusters and grazed ground stays sparse and dim. That texture
         is the difference between a point cloud and a filled shape.
+
+        Written straight into the image's pixels. A scan is several thousand
+        points and a QPainter call each was most of a frame on its own.
         """
         width = self._perception_image.width()
         height = self._perception_image.height()
-        painter = QPainter(self._perception_image)
-        painter.setRenderHint(QPainter.Antialiasing, False)
 
-        for ret in returns:
-            px = int(ret.x * self._cloud_px_per_m) + self._cloud_half_px
-            py = self._cloud_half_px - int(ret.y * self._cloud_px_per_m)
-            if not (0 <= px < width and 0 <= py < height):
-                continue
+        px = (scan.xs * self._cloud_px_per_m).astype(np.int64) + self._cloud_half_px
+        py = self._cloud_half_px - (scan.ys * self._cloud_px_per_m).astype(np.int64)
+        inside = (px >= 0) & (px < width) & (py >= 0) & (py < height)
+        px, py = px[inside], py[inside]
+        kinds = scan.kinds[inside]
+        weight = scan.intensities[inside]
 
-            name = Terrain(ret.kind).name
-            dim = TERRAIN_COLORS.get(name)
-            bright = RETURN_COLORS.get(name)
-            if dim is None or bright is None:
-                continue
+        dim = _TERRAIN_RGB[kinds]
+        bright = _RETURN_RGB[kinds]
+        rgb = dim + (bright - dim) * weight[:, None]
+        alpha = 110.0 + 145.0 * weight
 
-            weight = ret.intensity
-            color = QColor(
-                int(dim.red() + (bright.red() - dim.red()) * weight),
-                int(dim.green() + (bright.green() - dim.green()) * weight),
-                int(dim.blue() + (bright.blue() - dim.blue()) * weight),
-                int(110 + 145 * weight),
-            )
-            painter.setPen(QPen(color))
-            painter.drawPoint(px, py)
-            if ret.kind in (Terrain.ROCK, Terrain.TREE):
-                # A hard surface fills more of the beam, so it returns a
-                # tighter cluster rather than one lonely sample.
-                painter.drawPoint(px + 1, py)
-                painter.drawPoint(px, py + 1)
-                painter.drawPoint(px + 1, py + 1)
-        painter.end()
+        # Premultiplied ARGB32, which is the image's own format: one packed
+        # 32-bit value per pixel, written by index.
+        scale = alpha / 255.0
+        packed = (
+            (alpha.astype(np.uint32) << 24)
+            | ((rgb[:, 0] * scale).astype(np.uint32) << 16)
+            | ((rgb[:, 1] * scale).astype(np.uint32) << 8)
+            | (rgb[:, 2] * scale).astype(np.uint32)
+        )
 
-        self._cloud_points += len(returns)
+        pixels = self._cloud_pixels()
+        pixels[py, px] = packed
+        # A hard surface fills more of the beam, so it returns a tighter
+        # cluster rather than one lonely sample.
+        hard = (kinds == int(Terrain.ROCK)) | (kinds == int(Terrain.TREE))
+        if hard.any():
+            hx, hy, hp = px[hard], py[hard], packed[hard]
+            for dx, dy in ((1, 0), (0, 1), (1, 1)):
+                nx, ny = hx + dx, hy + dy
+                ok = (nx < width) & (ny < height)
+                pixels[ny[ok], nx[ok]] = hp[ok]
+
+        self._cloud_points += scan.point_count
         self._mapped_m2 = mapped_m2
         self._lidar_stats = stats
         self.update()
 
-    def set_fresh_returns(self, returns) -> None:
+    def _cloud_pixels(self) -> np.ndarray:
+        """The cloud image's pixels as a 2-D array of packed ARGB values."""
+        image = self._perception_image
+        view = np.frombuffer(image.bits(), dtype=np.uint32)
+        return view.reshape(image.height(), image.bytesPerLine() // 4)
+
+    def set_fresh_returns(self, scan) -> None:
         """Hold the newest scan brighter for a moment before it settles.
 
         Real ground control displays do not draw the beam, because a laser
@@ -389,7 +414,7 @@ class MapView(QWidget):
         the accumulated cloud, which is how RViz-style displays convey that
         a sensor is live. Same data, no fiction.
         """
-        self._fresh_returns = returns
+        self._fresh_returns = scan
         self._fresh_age = 0.0
         self.update()
 
@@ -509,21 +534,31 @@ class MapView(QWidget):
 
     def _draw_fresh_returns(self, painter: QPainter) -> None:
         """The most recent returns, bright and decaying."""
-        if not self._fresh_returns:
+        scan = self._fresh_returns
+        if scan is None or scan.point_count == 0:
             return
         fade = max(0.0, 1.0 - self._fresh_age * 2.2)
         if fade <= 0.0:
             return
 
-        for ret in self._fresh_returns:
-            name = Terrain(ret.kind).name
-            base = RETURN_COLORS.get(name)
-            if base is None:
+        alpha = (200.0 * fade * (0.4 + 0.6 * scan.intensities)).astype(np.int64)
+        for name in ("GROUND", "TRACK", "SCRUB", "TREE", "ROCK"):
+            base = RETURN_COLORS[name]
+            mask = scan.kinds == int(Terrain[name])
+            if not mask.any():
                 continue
-            color = QColor(base)
-            color.setAlpha(int(200 * fade * (0.4 + 0.6 * ret.intensity)))
-            painter.setPen(QPen(color))
-            painter.drawPoint(self._to_screen(ret.x, ret.y))
+            xs, ys, alphas = scan.xs[mask], scan.ys[mask], alpha[mask]
+            # Grouped into a few alpha bands, so the pen changes a handful of
+            # times per scan instead of once per point.
+            bands = np.clip(alphas // 24, 0, 10)
+            for band in np.unique(bands):
+                in_band = bands == band
+                color = QColor(base)
+                color.setAlpha(int(band * 24 + 12))
+                painter.setPen(QPen(color))
+                painter.drawPoints(
+                    [self._to_screen(x, y) for x, y in zip(xs[in_band].tolist(), ys[in_band].tolist())]
+                )
 
     def _draw_swept(self, painter: QPainter) -> None:
         """Ground the detection array has covered, at the width it covers.
@@ -704,11 +739,18 @@ class MapView(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(center, radius_px, radius_px)
 
+        # The label sits on the ring's east-south-east side, inside it. On top
+        # of the ring it collides with the mesh banner whenever the rover is
+        # near the top of the view, and at the bottom with the legend.
+        angle = math.radians(110.0)
+        anchor = QPointF(
+            center.x() + radius_px * math.sin(angle), center.y() - radius_px * math.cos(angle)
+        )
         painter.setPen(QPen(TETHER_LABEL_COLOR))
         painter.setFont(QFont("Menlo", 8))
         painter.drawText(
-            QRectF(center.x() - 60, center.y() - radius_px - 16, 120, 13),
-            Qt.AlignHCenter,
+            QRectF(anchor.x() - 126, anchor.y() - 7, 120, 13),
+            Qt.AlignRight,
             f"UWB TETHER {TETHER_LIMIT_M:.0f} m",
         )
 

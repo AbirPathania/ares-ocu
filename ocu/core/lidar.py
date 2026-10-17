@@ -36,8 +36,9 @@ No Qt import belongs in this file.
 from __future__ import annotations
 
 import math
-import random
 from dataclasses import dataclass
+
+import numpy as np
 
 from ocu.core.terrain import PerceptionMap, Terrain, TerrainWorld
 
@@ -82,19 +83,47 @@ class Return:
 
 @dataclass(frozen=True)
 class ScanResult:
-    returns: list[Return]
+    """One revolution of the scanner.
+
+    The measurements are held as arrays, because a scan is several thousand
+    of them and a list of objects costs more to build than the scan does.
+    `returns` gives them as objects for anything that wants to read them one
+    at a time.
+    """
+
+    xs: np.ndarray
+    ys: np.ndarray
+    kinds: np.ndarray  # Terrain values
+    intensities: np.ndarray
+    ranges: np.ndarray
     new_cells: int
     hits: int  # rays that struck an obstacle inside range
 
     @property
     def point_count(self) -> int:
-        return len(self.returns)
+        return int(self.xs.size)
+
+    @property
+    def returns(self) -> list[Return]:
+        return [
+            Return(x, y, _TERRAIN_BY_VALUE[k], i, r)
+            for x, y, k, i, r in zip(
+                self.xs.tolist(), self.ys.tolist(), self.kinds.tolist(),
+                self.intensities.tolist(), self.ranges.tolist(),
+            )
+        ]
 
 
-def _intensity(kind: Terrain, range_m: float, rng: random.Random) -> float:
-    falloff = 1.0 / (1.0 + range_m / RANGE_HALF_POWER_M)
-    speckle = rng.uniform(0.78, 1.0)  # real returns are noisy
-    return max(0.0, min(1.0, REFLECTIVITY[kind] * falloff * speckle))
+_TERRAIN_BY_VALUE = {int(t): t for t in Terrain}
+_REFLECTIVITY_BY_VALUE = np.zeros(max(_TERRAIN_BY_VALUE) + 1, dtype=np.float64)
+for _kind, _value in REFLECTIVITY.items():
+    _REFLECTIVITY_BY_VALUE[int(_kind)] = _value
+
+
+def _intensity(kinds: np.ndarray, ranges: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    falloff = 1.0 / (1.0 + ranges / RANGE_HALF_POWER_M)
+    speckle = rng.uniform(0.78, 1.0, size=ranges.shape)  # real returns are noisy
+    return np.clip(_REFLECTIVITY_BY_VALUE[kinds] * falloff * speckle, 0.0, 1.0)
 
 
 def cast_scan(
@@ -106,48 +135,82 @@ def cast_scan(
     rays: int = LIDAR_RAYS,
     seed: int | None = None,
 ) -> ScanResult:
-    """Sweep a full circle and return every measurement it produced."""
-    rng = random.Random(seed if seed is not None else (int(origin_x * 97) ^ int(origin_y * 89)))
-    step = world.cell_size_m * 0.5
+    """Sweep a full circle and return every measurement it produced.
+
+    Every ray is sampled at once. Each ray stops at the first thing that
+    blocks the beam: the cells up to and including it are observed, a hard
+    return comes back off it, and nothing behind it on that bearing is
+    measured. Open ground is grazed rather than struck, so it is sampled
+    along the ray at irregular intervals rather than returned at every cell.
+    """
+    rng = np.random.default_rng(
+        seed if seed is not None else (int(origin_x * 97) ^ int(origin_y * 89)) & 0xFFFFFFFF
+    )
+    cell = world.cell_size_m
+    step = cell * 0.5
     steps = int(range_m / step)
-    returns: list[Return] = []
-    new_cells = 0
-    hits = 0
+    extent, span = world._extent, world._span
 
-    for i in range(rays):
-        bearing = (i / rays) * math.tau
-        dx, dy = math.sin(bearing) * step, math.cos(bearing) * step
-        x, y = origin_x, origin_y
-        distance = 0.0
-        next_ground_sample = rng.uniform(0.4, GROUND_SAMPLE_M)
+    bearing = np.arange(rays, dtype=np.float64) / rays * math.tau
+    distance = step * np.arange(1, steps + 1, dtype=np.float64)
+    xs = origin_x + np.sin(bearing)[:, None] * distance[None, :]  # (rays, steps)
+    ys = origin_y + np.cos(bearing)[:, None] * distance[None, :]
+    cx = np.floor(xs / cell).astype(np.int64)
+    cy = np.floor(ys / cell).astype(np.int64)
 
-        for _ in range(steps):
-            x += dx
-            y += dy
-            distance += step
-            cell = world.to_cell(x, y)
-            kind = world.at(cell)
-            if perception.observe(cell, kind):
-                new_cells += 1
+    ix, iy = cx + extent, cy + extent
+    inside = (ix >= 0) & (ix < span) & (iy >= 0) & (iy < span)
+    kinds = np.full(cx.shape, int(Terrain.GROUND), dtype=np.uint8)  # beyond the world is open
+    kinds[inside] = world._grid[ix[inside], iy[inside]]
 
-            if kind in (Terrain.ROCK, Terrain.TREE):
-                # A hard return off a near-normal surface, then nothing
-                # behind it on this bearing.
-                hits += 1
-                returns.append(
-                    Return(x, y, kind, _intensity(kind, distance, rng), distance)
-                )
-                break
+    blocking = (kinds == int(Terrain.ROCK)) | (kinds == int(Terrain.TREE))
+    hit = blocking.any(axis=1)
+    first = np.where(hit, blocking.argmax(axis=1), steps - 1)
 
-            if distance >= next_ground_sample:
-                next_ground_sample = distance + rng.uniform(
-                    GROUND_SAMPLE_M * 0.6, GROUND_SAMPLE_M * 1.5
-                )
-                returns.append(
-                    Return(x, y, kind, _intensity(kind, distance, rng), distance)
-                )
+    # Everything up to and including the first obstruction is observed.
+    seen = np.arange(steps)[None, :] <= first[:, None]
+    new_cells = perception.observe_many(cx[seen], cy[seen], kinds[seen])
 
-    return ScanResult(returns=returns, new_cells=new_cells, hits=hits)
+    # Hard returns, one per ray that struck something.
+    rows = np.nonzero(hit)[0]
+    hit_cols = first[rows]
+    hit_x, hit_y = xs[rows, hit_cols], ys[rows, hit_cols]
+    hit_kind = kinds[rows, hit_cols]
+    hit_range = distance[hit_cols]
+
+    # Ground samples: the first at a random distance, each next a random
+    # interval past the last, all short of the obstruction.
+    last_ground = np.where(hit, first - 1, steps - 1)
+    target = rng.uniform(0.4, GROUND_SAMPLE_M, size=rays)
+    every_ray = np.arange(rays)
+    gx, gy, gk, gr = [], [], [], []
+    while True:
+        index = np.maximum(np.ceil(target / step).astype(np.int64) - 1, 0)
+        valid = index <= last_ground
+        if not valid.any():
+            break
+        r, c = every_ray[valid], index[valid]
+        gx.append(xs[r, c])
+        gy.append(ys[r, c])
+        gk.append(kinds[r, c])
+        gr.append(distance[c])
+        target = (index + 1) * step + rng.uniform(
+            GROUND_SAMPLE_M * 0.6, GROUND_SAMPLE_M * 1.5, size=rays
+        )
+
+    all_x = np.concatenate(gx + [hit_x])
+    all_y = np.concatenate(gy + [hit_y])
+    all_k = np.concatenate(gk + [hit_kind])
+    all_r = np.concatenate(gr + [hit_range])
+    return ScanResult(
+        xs=all_x,
+        ys=all_y,
+        kinds=all_k,
+        intensities=_intensity(all_k, all_r, rng),
+        ranges=all_r,
+        new_cells=new_cells,
+        hits=int(hit.sum()),
+    )
 
 
 def has_line_of_sight(

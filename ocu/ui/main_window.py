@@ -1,6 +1,6 @@
 """Top bar plus the four-region layout, section 9. This file owns fleet
-state and wires every panel and the playback engine together. No equation
-lives here; it only reads core/ and sim/ and reflects their state.
+state and wires every panel, the mission clock and the simulation together.
+No equation lives here; it only reads core/ and sim/ and reflects their state.
 
 Layout priority is the map, because the map is the product. Panels earn
 their width by carrying state that changes: a roster that shows battery
@@ -8,11 +8,13 @@ and link, a threat list the operator acts on, a context panel that follows
 the selection. Nothing here prints the platform's spec sheet at an
 operator who already knows what the rover carries.
 
-One unit's position has exactly one owner at a time, tracked in
-_position_owner. The scripted playback owns a unit by default; the guided
-launch console takes ownership of the aircraft it launches and keeps it.
-Without that rule both write the same tricopter's pose ten times a second and
-the map draws the fight as a zigzag fan.
+Nothing in the mission happens on a schedule. Where the vehicles are, what
+they find, the state of the link and what the mission is doing are all
+computed from the simulation, and what the top bar and the roster say is
+derived from that state (_refresh_status), not announced by a script. The
+operator launches the aircraft, cuts the link, and sends the rover home;
+the rover may recommend, and never acts for them on the things that are
+theirs to decide.
 """
 
 from __future__ import annotations
@@ -32,8 +34,6 @@ from PySide6.QtWidgets import (
 
 from ocu.core.constants import (
     ALERT_CONFIDENCE_THRESHOLD,
-    LAUNCH_STAGGER_S,
-    MIN_AIRCRAFT_SEPARATION_M,
 )
 from ocu.core.comms import GHOST, LCA, STANDARD, profile_for
 from ocu.core.control_authority import ControlAuthority
@@ -57,10 +57,10 @@ from ocu.core.sweep import plan_lane_sweep, sweep_from_first_scan
 from ocu.core.targets import default_field
 from ocu.core.terrain import CELL_SIZE_M, PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
-from ocu.sim.playback_engine import REACTIVE_RALLY_ALTITUDE_M, PlaybackEngine
+from ocu.sim.mission_clock import MissionClock
 from ocu.ui.alert_banner import AlertBanner
+from ocu.core.aerial import scout_sighting
 from ocu.core.camera import CameraRig
-from ocu.core.formation import compute_formation_targets
 from ocu.core.occlusion import occlusion_bearing
 from ocu.ui.camera_feed import SimulatedCameraFeed
 from ocu.ui.context_panel import ContextPanel
@@ -76,11 +76,36 @@ ALL_UNIT_IDS = ["rover"] + TRICOPTER_IDS
 LINK_SEVERITY = {state: i for i, state in enumerate(("CONNECTED", "DEGRADED", "LOST"))}
 DIRECTOR_TICK_MS = 100
 
+#: How much of the ground ahead has to be hidden before the rover suggests
+#: sending scouts to look. A third unseen is enough that its own picture of
+#: where it is about to drive is materially incomplete.
+SCOUT_RECOMMEND_HIDDEN_FRACTION = 0.30
+
+#: How much a confidence has to rise before it is reported again. A reading
+#: that creeps up by a thousandth as the vehicle moves is not news, and
+#: reporting every one buries the log; a step of this size is.
+DETECTION_REPORT_STEP = 0.05
+
+#: The rover has to be moving at least this fast for "ahead" to be where it is
+#: going, before it recommends anything about it.
+MIN_SPEED_FOR_ADVICE_MS = 0.5
+
+#: What each aircraft mode is called on the roster.
+AIRCRAFT_TASK = {
+    "PREFLIGHT": "LAUNCHING",
+    "CLIMBING": "CLIMBING",
+    "TRANSITING": "TO STATION",
+    "STATION": "ON STATION",
+    "MANUAL": "MANUAL",
+    "RETURNING": "RETURNING",
+    "HOLDING": "HOLDING",
+    "DOCKING": "DOCKING",
+}
+
 #: Interval between camera frames. One tile is rendered per tick, so with
 #: four units each tile refreshes at about 1000 / (4 * this) Hz.
 CAMERA_TICK_MS = 85
 
-SCANNING_PHASES = {"drive_and_scan", "reactive_launch", "aerial_recon", "fusion", "alert"}
 
 
 def _default_units() -> dict[str, Unit]:
@@ -104,14 +129,16 @@ class MainWindow(QMainWindow):
         self.control_authority = ControlAuthority(self.units)
         self.mesh_link = MeshLink()
         self.geofence = Geofence()
-        self.playback = PlaybackEngine()
+        self.mission_clock = MissionClock()
         self.selected_unit_id = "rover"
         self._last_clock_s = 0.0
         self._docked_state: dict[str, bool] = {uid: True for uid in TRICOPTER_IDS}
         #: Launches in progress: which aircraft, whether the rover itself
         #: decided on it, and the last stage reported, so a change is noticed.
         self._launches: list[dict] = []
-        self._position_owner: dict[str, str] = {uid: "scripted" for uid in ALL_UNIT_IDS}
+        #: Where the rover says scouts would do most good, once it has said so.
+        self._recommended_bearing: float | None = None
+        self._status_key = None
         self._keys_down: set[int] = set()
         self._comms = profile_for(STANDARD)
         # Ground truth, and separately what the rover has actually seen of it.
@@ -126,6 +153,10 @@ class MainWindow(QMainWindow):
         # and what the suite has accumulated about each object swept over.
         self.target_field = default_field(sweep=self.sweep)
         self._target_evidence: dict[int, dict[str, float]] = {}
+        #: What the scouts have seen of each object, kept apart from the rover's
+        #: evidence: they are different replicas and cannot share it over a cut link.
+        self._aerial_evidence: dict[int, dict[str, float]] = {}
+        self._last_reported: dict[tuple, float] = {}
         self._escalated: set = set()
         # Which way the vapour plume runs. The SAW sensor only reads when
         # the vehicle is on the plume side of a source, so on this ground
@@ -173,7 +204,7 @@ class MainWindow(QMainWindow):
         self._wire_signals()
         self._refresh_all_rows()
         self._select_unit("rover")
-        self.playback.apply_initial_state()
+        self._refresh_status()
 
     # --- layout ---
 
@@ -337,21 +368,13 @@ class MainWindow(QMainWindow):
         console.launchRequested.connect(self._on_guided_launch_requested)
         console.launchComplete.connect(self._on_launch_complete)
         console.stageChanged.connect(self._on_guided_stage_changed)
-        console.eventLogged.connect(lambda msg: self.event_log.log(self.playback.clock_s, msg))
+        console.eventLogged.connect(lambda msg: self.event_log.log(self.mission_clock.clock_s, msg))
 
         self.alert_banner.confirmed.connect(self._on_alert_confirmed)
         self.alert_banner.rejected.connect(self._on_alert_rejected)
         self.alert_banner.timedOut.connect(self._on_alert_timed_out)
 
-        self.playback.unitPoseChanged.connect(self._on_unit_pose_changed)
-        self.playback.unitBatteryChanged.connect(self._on_unit_battery_changed)
-        self.playback.phaseChanged.connect(self._on_phase_changed)
-        self.playback.detectionOccurred.connect(self._on_detection)
-        self.playback.linkEvent.connect(self._on_scripted_link_event)
-        self.playback.reactiveLaunchRequested.connect(self._on_reactive_launch_requested)
-        self.playback.unitDockedChanged.connect(self._on_unit_docked_changed)
-        self.playback.clockTick.connect(self._on_clock_tick)
-        self.playback.missionFinished.connect(self._on_mission_finished)
+        self.mission_clock.clockTick.connect(self._on_clock_tick)
 
     # --- selection ---
 
@@ -386,13 +409,12 @@ class MainWindow(QMainWindow):
         # The formation faces the way the rover is heading unless the
         # operator turns the dial: scouting along the line of travel is what
         # nearly every launch is for, and a default of north is arbitrary.
-        self.context_panel.launch_console.bearing_from_map(rover.pose.heading)
+        self.context_panel.launch_console.bearing_from_map(
+            self._recommended_bearing if self._recommended_bearing is not None else rover.pose.heading
+        )
         self.context_panel.launch_console.set_available_tricopters(available, origin)
         self.context_panel.show_formation()
         self.map_view.set_compass_active(True, (origin[0], origin[1]))
-
-    def _on_unit_docked_changed(self, unit_id: str, docked: bool) -> None:
-        self._set_docked(unit_id, docked)
 
     def _set_docked(self, unit_id: str, docked: bool) -> None:
         if unit_id in self._docked_state:
@@ -441,10 +463,10 @@ class MainWindow(QMainWindow):
             # than on the next clock tick: with playback paused there may not
             # be a next tick, and a frozen picture must never look live.
             if self._silence_began_s is None:
-                self._silence_began_s = self.playback.clock_s
+                self._silence_began_s = self.mission_clock.clock_s
             self._update_silence_indicator()
 
-        self.event_log.log(self.playback.clock_s, f"Mission mode {mode}: {self._comms.summary}")
+        self.event_log.log(self.mission_clock.clock_s, f"Mission mode {mode}: {self._comms.summary}")
         self._refresh_all_rows()
 
     def _downlink_open(self) -> bool:
@@ -454,8 +476,8 @@ class MainWindow(QMainWindow):
         if not self._comms.telemetry:
             return False
         # Autonomous: a snapshot on the ping, nothing between pings.
-        if self.playback.clock_s - self._last_downlink_s >= self._comms.ping_interval_s:
-            self._last_downlink_s = self.playback.clock_s
+        if self.mission_clock.clock_s - self._last_downlink_s >= self._comms.ping_interval_s:
+            self._last_downlink_s = self.mission_clock.clock_s
             return True
         return False
 
@@ -470,14 +492,13 @@ class MainWindow(QMainWindow):
         if unit_id != "rover":
             self._ensure_director_owns(unit_id)
         if self.flight_director.take_manual(unit_id, rover.pose.x, rover.pose.y, rover.pose.heading):
-            self._position_owner[unit_id] = "operator"
             self.event_log.log(
-                self.playback.clock_s,
+                self.mission_clock.clock_s,
                 f"{short_label(unit_id)} on manual sticks: W/S drive, A/D turn"
                 + (", R/F altitude" if unit_id != "rover" else ""),
             )
         self.setFocus()
-        self.event_log.log(self.playback.clock_s, f"MANUAL control taken: {unit_id}")
+        self.event_log.log(self.mission_clock.clock_s, f"MANUAL control taken: {unit_id}")
         self._on_manual_authority_changed()
 
     def _on_release_manual(self) -> None:
@@ -487,7 +508,7 @@ class MainWindow(QMainWindow):
             self.flight_director.release_manual(holder, rover.pose.x, rover.pose.y)
         self.control_authority.release_manual()
         if holder:
-            self.event_log.log(self.playback.clock_s, f"MANUAL control released: {holder}")
+            self.event_log.log(self.mission_clock.clock_s, f"MANUAL control released: {holder}")
         self._on_manual_authority_changed()
 
     def _on_manual_authority_changed(self) -> None:
@@ -546,17 +567,122 @@ class MainWindow(QMainWindow):
             if self.selected_unit_id == unit_id:
                 self.context_panel.aircraft_panel.update_pose(z, heading)
 
+        # Rover telemetry is a downlink like any other. Read from the vehicle
+        # on the same tick that moves it, so the number is the vehicle's.
+        if self.selected_unit_id == "rover" and self._comms.telemetry:
+            self.context_panel.rover_panel.update_pose(
+                rover.pose.heading, self.flight_director.rover_body.speed_ms
+            )
+
         self._tick_power(dt)
         self._tick_navigation()
         self._tick_lidar()
         self._tick_detection_suite()
+        self._tick_aerial_detection()
 
         for unit_id, event in events:
             self._handle_director_event(unit_id, event)
         self._tick_launches()
+        self._check_geofence()
+        self._refresh_status()
 
         if self.selected_unit_id in TRICOPTER_IDS:
             self._refresh_aircraft_flight_state(self.selected_unit_id)
+
+    def _mission_started(self) -> bool:
+        return (
+            self.mission_clock.clock_s > 0.0
+            or self.flight_director.goal is not None
+            or self._waypoint_index > 0
+        )
+
+    def _refresh_status(self) -> None:
+        """What the mission is doing, read from what the vehicles are doing.
+
+        The top bar and the roster used to be told a phase by a script, at
+        fixed times, whether or not it was true. They are derived from the
+        simulation now: the rover's own mode and where it is in its sweep,
+        and each aircraft's flight mode.
+        """
+        director = self.flight_director
+        mode = director.rover_mode.value
+        if mode == "MANUAL":
+            rover_task = "MANUAL"
+        elif mode == "RETURNING":
+            rover_task = "RETURNING TO BASE"
+        elif mode == "AT_BASE":
+            rover_task = "AT BASE"
+        elif not self._mission_started():
+            rover_task = "STANDBY"
+        elif not self.mission_clock.playing:
+            rover_task = "HOLDING"
+        elif self._waypoint_index >= len(self._mission_waypoints):
+            rover_task = "SWEEP COMPLETE"
+        elif self._current_lane is None:
+            rover_task = "FIRST SCAN"
+        else:
+            rover_task = f"SWEEPING {self._current_lane}"
+
+        tasks = {"rover": rover_task}
+        for uid in TRICOPTER_IDS:
+            state = director.aircraft.get(uid)
+            if self._docked_state.get(uid, True) or state is None:
+                tasks[uid] = "IN BAY"
+            else:
+                tasks[uid] = AIRCRAFT_TASK.get(state.mode.value, state.mode.value)
+
+        scanning = (
+            mode == "NAVIGATING" and self.mission_clock.playing and director.goal is not None
+        )
+        key = (tuple(sorted(tasks.items())), scanning)
+        if key == self._status_key:
+            return
+        self._status_key = key
+
+        self.phase_label.setText(rover_task)
+        self.context_panel.rover_panel.sensors.set_scanning(scanning)
+        for uid, task in tasks.items():
+            self.units[uid].current_task = task
+        self._refresh_all_rows()
+
+    def _check_scout_recommendation(self) -> None:
+        """If the rover cannot see much of where it is going, say so once.
+
+        This is the rover reading its own map: unknown ground inside sensor
+        range is ground something is hiding. It recommends and does not
+        launch. Aircraft fly when the operator launches them, and the launch
+        dial opens on the bearing the rover would choose.
+        """
+        if self._recommended_bearing is not None or self.flight_director.aircraft:
+            return
+        # "Ahead" only means something once the rover is going somewhere. At a
+        # standstill its heading is whatever it was parked on, and the arc in
+        # front of that has nothing to do with where it is about to drive.
+        if self.flight_director.rover_body.speed_ms < MIN_SPEED_FOR_ADVICE_MS:
+            return
+        if not any(self._docked_state.get(uid, True) for uid in TRICOPTER_IDS):
+            return
+        rover = self.units["rover"].pose
+        bearing, hidden = occlusion_bearing(self.perception, rover.x, rover.y, rover.heading)
+        if hidden < SCOUT_RECOMMEND_HIDDEN_FRACTION:
+            return
+        self._recommended_bearing = bearing
+        self.event_log.log(
+            self.mission_clock.clock_s,
+            f"Rover recommends scouts: {hidden:.0%} of the ground ahead is hidden, "
+            f"best bearing {bearing:.0f}\u00b0",
+        )
+
+    def _check_geofence(self) -> None:
+        for unit_id, unit in self.units.items():
+            if unit_id in TRICOPTER_IDS and self._docked_state.get(unit_id, True):
+                continue
+            breach_action = self.geofence.check_breach(unit.pose.x, unit.pose.y)
+            if breach_action is not None and not unit.emergency_return:
+                unit.emergency_return = True
+                self.event_log.log(
+                    self.mission_clock.clock_s, f"Geofence breach: {unit_id}, action = {breach_action}"
+                )
 
     def _tick_cameras(self) -> None:
         """Render the next live unit's camera into its tile.
@@ -607,7 +733,7 @@ class MainWindow(QMainWindow):
         self.sweep = plan_lane_sweep(self.perception, (rover.x, rover.y))
         self._mission_waypoints = self.sweep.points
         self.event_log.log(
-            self.playback.clock_s,
+            self.mission_clock.clock_s,
             f"First scan complete: sweeping on {self.sweep.bearing_deg:.0f}\u00b0, "
             f"{self.sweep.clear_fraction:.0%} of the footprint clear",
         )
@@ -632,14 +758,13 @@ class MainWindow(QMainWindow):
             if previous[2] == lane:
                 lane_from = (previous[0], previous[1])
         self.flight_director.navigate_to(goal_x, goal_y, lane_from=lane_from)
-        self._position_owner["rover"] = "operator"
 
         # One line per lane, not per point. Nineteen "navigating to waypoint
         # n of nineteen" entries tell the operator nothing and bury the
         # entries that matter.
         if lane != self._current_lane:
             self._current_lane = lane
-            self.event_log.log(self.playback.clock_s, f"Sweeping {lane}")
+            self.event_log.log(self.mission_clock.clock_s, f"Sweeping {lane}")
 
         # Plan immediately. The next director tick runs before the next
         # navigation tick, and a NAVIGATING rover with no path halts, so
@@ -662,10 +787,10 @@ class MainWindow(QMainWindow):
             # of a leg already under way is worth the operator's attention,
             # and only once in a while.
             reroute = before > 0 and self._waypoint_index == self._last_replan_waypoint
-            if reroute and self.playback.clock_s - self._last_replan_s > 4.0:
-                self._last_replan_s = self.playback.clock_s
+            if reroute and self.mission_clock.clock_s - self._last_replan_s > 4.0:
+                self._last_replan_s = self.mission_clock.clock_s
                 self.event_log.log(
-                    self.playback.clock_s,
+                    self.mission_clock.clock_s,
                     "Route blocked by newly mapped terrain, rerouted",
                 )
             self._last_replan_waypoint = self._waypoint_index
@@ -683,7 +808,7 @@ class MainWindow(QMainWindow):
         which is why Ghost freezes the picture while the map underneath
         carries on filling in.
         """
-        now = self.playback.clock_s
+        now = self.mission_clock.clock_s
         if now - self._last_scan_s < 1.0 / LIDAR_SCAN_HZ:
             return
         self._last_scan_s = now
@@ -699,7 +824,7 @@ class MainWindow(QMainWindow):
             return
 
         self.map_view.add_returns(
-            scan.returns,
+            scan,
             self.perception.coverage_m2(),
             {
                 "returns_per_s": scan.point_count * LIDAR_SCAN_HZ,
@@ -708,7 +833,8 @@ class MainWindow(QMainWindow):
                 "scan_hz": LIDAR_SCAN_HZ,
             },
         )
-        self.map_view.set_fresh_returns(scan.returns)
+        self.map_view.set_fresh_returns(scan)
+        self._check_scout_recommendation()
 
     def _tick_detection_suite(self) -> None:
         """Sweep the detection suite over whatever the rover is standing on.
@@ -768,7 +894,7 @@ class MainWindow(QMainWindow):
                 continue
 
             fused = fuse(evidence)
-            if fused < REPORT_FLOOR:
+            if fused < REPORT_FLOOR or not self._worth_reporting((id(buried), "rover"), fused):
                 continue
 
             self._report_detection(
@@ -778,9 +904,35 @@ class MainWindow(QMainWindow):
                 threat_type=classify(evidence),
             )
 
-    def _report_detection(self, buried, sensors: list, confidence: float, threat_type: str) -> None:
+    def _worth_reporting(self, key: tuple, confidence: float) -> bool:
+        """Whether this reading is new enough to tell the operator about.
+
+        The first reading always is, a rise of a meaningful step is, and
+        crossing the escalation threshold always is, however small the step
+        that took it there.
+        """
+        last = self._last_reported.get(key)
+        if last is not None:
+            crossed = confidence >= ALERT_CONFIDENCE_THRESHOLD > last
+            if confidence < last + DETECTION_REPORT_STEP and not crossed:
+                return False
+        self._last_reported[key] = confidence
+        return True
+
+    def _report_detection(
+        self,
+        buried,
+        sensors: list,
+        confidence: float,
+        threat_type: str,
+        source: str = "rover",
+        source_id: str = "rover",
+    ) -> None:
         # Every sensor that has contributed, because which ones agree is the
         # evidence: metal with no vapour is scrap, metal with vapour is not.
+        # `source` is the replica the observation lands on: "rover" for the
+        # ground suite, "aircraft" for a scout, so that a cut link leaves each
+        # side holding only what it saw itself.
         self._on_detection(
             {
                 "x": buried.x,
@@ -788,11 +940,49 @@ class MainWindow(QMainWindow):
                 "confidence": confidence,
                 "sensor": sensors[0] if sensors else "",
                 "sensors": sensors,
-                "source": "rover",
-                "source_id": "rover",
+                "source": source,
+                "source_id": source_id,
                 "type": threat_type,
             }
         )
+
+    def _tick_aerial_detection(self) -> None:
+        """What each scout is looking at, and whether it sees anything in it.
+
+        A scout finds what is on or just under the surface, inside its camera's
+        view and in range, with nothing in the way (core/aerial.py). It is on
+        the mesh, so what it sees lands on the aircraft replica; the rover has
+        not seen it until the link carries it across. That is what makes a cut
+        link show something: a scout can have found what the rover's own map
+        cannot yet contain.
+        """
+        for unit_id in TRICOPTER_IDS:
+            state = self.flight_director.aircraft.get(unit_id)
+            if state is None or state.z < 2.0:
+                continue
+            if state.mode.value in ("PREFLIGHT", "DOCKING", "DOCKED"):
+                continue
+            for buried in self.target_field.targets:
+                seen = scout_sighting(
+                    self.camera_rig, buried, state.x, state.y, state.z, state.heading
+                )
+                if seen <= 0.0:
+                    continue
+                evidence = self._aerial_evidence.setdefault(id(buried), {})
+                if seen <= evidence.get("optical", 0.0):
+                    continue
+                evidence["optical"] = seen
+                fused = fuse(evidence)
+                if not self._worth_reporting((id(buried), "aircraft"), fused):
+                    continue
+                self._report_detection(
+                    buried,
+                    sensors=sorted(evidence),
+                    confidence=fused,
+                    threat_type=classify(evidence),
+                    source="aircraft",
+                    source_id=unit_id,
+                )
 
     def _tick_power(self, dt_s: float) -> None:
         """Integrate every battery from what that unit is actually doing.
@@ -807,8 +997,8 @@ class MainWindow(QMainWindow):
         # director ticks in real seconds, but the mission can be played back
         # faster; integrating against the wall clock would leave a
         # fast-forwarded run showing a pack that barely moved.
-        if self.playback.playing:
-            dt_s *= self.playback.speed
+        if self.mission_clock.playing:
+            dt_s *= self.mission_clock.speed
 
         rover = self.units["rover"]
         rover_speed = self.flight_director.speed_of("rover") or 0.0
@@ -862,26 +1052,24 @@ class MainWindow(QMainWindow):
 
     def _handle_director_event(self, unit_id: str, event: str) -> None:
         if event == "LIFTOFF":
-            self._position_owner[unit_id] = "operator"
             self._set_docked(unit_id, False)
-            self.event_log.log(self.playback.clock_s, f"{short_label(unit_id)} lifted off")
+            self.event_log.log(self.mission_clock.clock_s, f"{short_label(unit_id)} lifted off")
         elif event == "DOCKED":
-            self._position_owner[unit_id] = "scripted"
             self.flight_director.release(unit_id)
             self._set_docked(unit_id, True)
-            self.event_log.log(self.playback.clock_s, f"{short_label(unit_id)} docked and charging")
+            self.event_log.log(self.mission_clock.clock_s, f"{short_label(unit_id)} docked and charging")
         elif event == "HOLDING":
             self.event_log.log(
-                self.playback.clock_s, f"{short_label(unit_id)} holding above rover, awaiting dock slot"
+                self.mission_clock.clock_s, f"{short_label(unit_id)} holding above rover, awaiting dock slot"
             )
         elif event == "DOCKING":
-            self.event_log.log(self.playback.clock_s, f"{short_label(unit_id)} cleared to dock")
+            self.event_log.log(self.mission_clock.clock_s, f"{short_label(unit_id)} cleared to dock")
         elif event == "WAYPOINT_UNREACHABLE":
             _, _, lane = self._mission_waypoints[
                 min(self._waypoint_index, len(self._mission_waypoints) - 1)
             ]
             self.event_log.log(
-                self.playback.clock_s,
+                self.mission_clock.clock_s,
                 f"{lane} point blocked with no clearance, skipping to the next",
             )
             self._waypoint_index += 1
@@ -890,15 +1078,15 @@ class MainWindow(QMainWindow):
             self._waypoint_index += 1
             if self._waypoint_index >= len(self._mission_waypoints):
                 self.event_log.log(
-                    self.playback.clock_s,
+                    self.mission_clock.clock_s,
                     f"Lane sweep complete, {self.perception.coverage_m2():,.0f} m² mapped",
                 )
             self._begin_autonomous_sweep()
         elif event == "AT_BASE":
-            self.event_log.log(self.playback.clock_s, "Rover at base, stationary. Docking may proceed.")
+            self.event_log.log(self.mission_clock.clock_s, "Rover at base, stationary. Docking may proceed.")
         elif event.startswith("RECOVERY:"):
             self.event_log.log(
-                self.playback.clock_s, f"{short_label(unit_id)} recovery stage {event.split(':')[1]}"
+                self.mission_clock.clock_s, f"{short_label(unit_id)} recovery stage {event.split(':')[1]}"
             )
 
     def _refresh_aircraft_flight_state(self, unit_id: str) -> None:
@@ -912,7 +1100,7 @@ class MainWindow(QMainWindow):
         if commanded is not None:
             panel.set_commanded_altitude(commanded)
 
-    def _start_launch(self, aircraft: list[dict], bearing: float, reactive: bool) -> None:
+    def _start_launch(self, aircraft: list[dict], bearing: float) -> None:
         """Hand a launch to the flight director.
 
         Each aircraft's slot is an offset from the rover, so the formation
@@ -925,49 +1113,10 @@ class MainWindow(QMainWindow):
                 craft["id"], craft["dx"], craft["dy"], craft["altitude"], bearing,
                 rover.x, rover.y, rover.heading, liftoff_in_s=craft["delay"],
             )
-            self._position_owner[craft["id"]] = "operator"
-        self._launches.append(
-            {"ids": [c["id"] for c in aircraft], "reactive": reactive, "stage": "LAUNCHING"}
-        )
+        self._launches.append({"ids": [c["id"] for c in aircraft], "stage": "LAUNCHING"})
 
     def _on_guided_launch_requested(self, request: dict) -> None:
-        self._start_launch(request["aircraft"], request["bearing"], reactive=False)
-
-    def _on_reactive_launch_requested(self, count: int) -> None:
-        """The rover decides to commit scouts, and which way they look.
-
-        The direction comes from the rover's own map: the sector ahead with
-        the most ground it cannot see. Section 6.1's planner reaching the end
-        of what its sensors can resolve, and sending something to look.
-        """
-        available = [
-            uid for uid in TRICOPTER_IDS
-            if self._docked_state.get(uid, True) and uid not in self.flight_director.aircraft
-        ]
-        chosen = available[:count]
-        if not chosen:
-            return
-        rover = self.units["rover"].pose
-        bearing, hidden = occlusion_bearing(self.perception, rover.x, rover.y, rover.heading)
-        targets = compute_formation_targets(
-            rover.x, rover.y, bearing, "vee", MIN_AIRCRAFT_SEPARATION_M * 2, REACTIVE_RALLY_ALTITUDE_M
-        )[: len(chosen)]
-        held = [short_label(u) for u in available[len(chosen):]]
-        self.event_log.log(
-            self.playback.clock_s,
-            f"Reactive launch: {hidden:.0%} of the ground ahead is hidden, committing "
-            f"{len(chosen)} scouts on {bearing:.0f}\u00b0"
-            + (f"; {', '.join(held)} held in bay for operator tasking" if held else ""),
-        )
-        self._start_launch(
-            [
-                {"id": uid, "dx": t.x - rover.x, "dy": t.y - rover.y, "altitude": t.z,
-                 "delay": i * LAUNCH_STAGGER_S}
-                for i, (uid, t) in enumerate(zip(chosen, targets))
-            ],
-            bearing,
-            reactive=True,
-        )
+        self._start_launch(request["aircraft"], request["bearing"])
 
     def _tick_launches(self) -> None:
         """Report each launch's stage from what its aircraft are doing."""
@@ -979,25 +1128,16 @@ class MainWindow(QMainWindow):
 
             if stage == "IDLE":  # every aircraft stood down or was recalled
                 self._launches.remove(launch)
-                if not launch["reactive"]:
-                    self.context_panel.launch_console.abort_launch()
+                self.context_panel.launch_console.abort_launch()
                 continue
 
-            if launch["reactive"]:
-                self.event_log.log(self.playback.clock_s, f"Reactive launch: {stage}")
-                if self.selected_unit_id in launch["ids"]:
-                    self.context_panel.aircraft_panel.update_stage(stage)
-                if stage == "FORMED":
-                    self._launches.remove(launch)
-                    self._on_launch_complete(launch["ids"])
-            else:
-                self.context_panel.launch_console.report_stage(stage)
-                if stage == "FORMED":
-                    self._launches.remove(launch)
+            self.context_panel.launch_console.report_stage(stage)
+            if stage == "FORMED":
+                self._launches.remove(launch)
 
     def _on_launch_complete(self, tricopter_ids: list[str]) -> None:
         self.event_log.log(
-            self.playback.clock_s,
+            self.mission_clock.clock_s,
             f"Formation on station: {', '.join(short_label(i) for i in tricopter_ids)}",
         )
 
@@ -1017,7 +1157,6 @@ class MainWindow(QMainWindow):
             unit_id, unit.pose.x, unit.pose.y, unit.pose.z, unit.pose.heading,
             rover.pose.x, rover.pose.y,
         )
-        self._position_owner[unit_id] = "operator"
         return True
 
     def _on_altitude_commanded(self, unit_id: str, altitude_m: float) -> None:
@@ -1025,7 +1164,7 @@ class MainWindow(QMainWindow):
             return
         self.flight_director.set_commanded_altitude(unit_id, altitude_m)
         self.event_log.log(
-            self.playback.clock_s, f"{short_label(unit_id)} commanded to {altitude_m:.0f} m"
+            self.mission_clock.clock_s, f"{short_label(unit_id)} commanded to {altitude_m:.0f} m"
         )
 
     def _on_recall_requested(self, unit_id: str) -> None:
@@ -1033,25 +1172,24 @@ class MainWindow(QMainWindow):
             return
         recalled = self.flight_director.recall([unit_id])
         if recalled:
-            self.event_log.log(self.playback.clock_s, f"{short_label(unit_id)} returning to rover")
+            self.event_log.log(self.mission_clock.clock_s, f"{short_label(unit_id)} returning to rover")
 
     def _on_return_to_base(self) -> None:
         for unit_id in TRICOPTER_IDS:
             self._ensure_director_owns(unit_id)
-        self._position_owner["rover"] = "operator"
         rover = self.units["rover"]
         recalled = self.flight_director.return_rover_to_base(
             0.0, 0.0, rover.pose.x, rover.pose.y, rover.pose.heading
         )
         if recalled:
             self.event_log.log(
-                self.playback.clock_s,
+                self.mission_clock.clock_s,
                 "RETURN TO BASE: recalling "
                 + ", ".join(short_label(i) for i in recalled)
                 + " to travel home with the rover",
             )
         else:
-            self.event_log.log(self.playback.clock_s, "RETURN TO BASE: rover returning to start point")
+            self.event_log.log(self.mission_clock.clock_s, "RETURN TO BASE: rover returning to start point")
 
     def _on_guided_stage_changed(self, stage: str) -> None:
         if self.selected_unit_id in TRICOPTER_IDS:
@@ -1061,26 +1199,13 @@ class MainWindow(QMainWindow):
 
     def _on_cut_link(self) -> None:
         self._apply_link_cut(TRICOPTER_IDS)
-        self.event_log.log(self.playback.clock_s, "Operator cut link: rover and aircraft mesh disconnected")
+        self.event_log.log(self.mission_clock.clock_s, "Operator cut link: rover and aircraft mesh disconnected")
 
     def _on_restore_link(self) -> None:
         delta = self._apply_link_restore(TRICOPTER_IDS)
         self.event_log.log(
-            self.playback.clock_s, f"Operator restored link: {delta} observation(s) crossed to reconcile"
+            self.mission_clock.clock_s, f"Operator restored link: {delta} observation(s) crossed to reconcile"
         )
-
-    def _on_scripted_link_event(self, event: str, unit_ids: list[str]) -> None:
-        if event == "cut":
-            self._apply_link_cut(unit_ids)
-            self.event_log.log(
-                self.playback.clock_s, f"Link cut: {', '.join(unit_ids)} diverging from rover map"
-            )
-        else:
-            delta = self._apply_link_restore(unit_ids)
-            self.event_log.log(
-                self.playback.clock_s,
-                f"Link restored: {', '.join(unit_ids)}, {delta} observation(s) crossed to reconcile",
-            )
 
     def _check_lost_comms_autonomous(self) -> None:
         """LCA is entered, not ordered, section 4.1."""
@@ -1127,7 +1252,7 @@ class MainWindow(QMainWindow):
         source_id = detection.get("source_id", source)
         observation = VoxelObservation(
             voxel_key=voxel_key(x, y, 0.0),
-            timestamp_us=int(self.playback.clock_s * 1_000_000),
+            timestamp_us=int(self.mission_clock.clock_s * 1_000_000),
             confidence=confidence,
             threat_type=detection.get("type", "unknown"),
             source_id=source_id,
@@ -1141,9 +1266,10 @@ class MainWindow(QMainWindow):
             return
         self.map_view.add_detection(detection)
         self.threat_panel.add_detection(detection)
-        self.context_panel.rover_panel.sensors.register_hit(detection.get("sensor", ""))
+        if source == "rover":
+            self.context_panel.rover_panel.sensors.register_hit(detection.get("sensor", ""))
         self.event_log.log(
-            self.playback.clock_s,
+            self.mission_clock.clock_s,
             f"Detection: {detection.get('sensor')} at ({x:.0f}, {y:.0f}), confidence {confidence:.2f}",
         )
         key = (round(x, 2), round(y, 2))
@@ -1151,7 +1277,7 @@ class MainWindow(QMainWindow):
             self._escalated.add(key)
             self.alert_banner.show_alert(detection)
             self.event_log.log(
-                self.playback.clock_s, f"ALERT escalated: confidence {confidence:.2f} at ({x:.0f}, {y:.0f})"
+                self.mission_clock.clock_s, f"ALERT escalated: confidence {confidence:.2f} at ({x:.0f}, {y:.0f})"
             )
 
     def _on_alert_confirmed(self, detection: dict) -> None:
@@ -1159,7 +1285,7 @@ class MainWindow(QMainWindow):
         self.map_view.confirm_detection(detection["x"], detection["y"])
         self.threat_panel.set_status(detection["x"], detection["y"], "CONFIRMED")
         self.event_log.log(
-            self.playback.clock_s,
+            self.mission_clock.clock_s,
             f"Threat confirmed at ({detection['x']:.0f}, {detection['y']:.0f}); marked as exclusion zone",
         )
 
@@ -1167,12 +1293,12 @@ class MainWindow(QMainWindow):
         self.alert_banner.dismiss_for(detection)
         self.threat_panel.set_status(detection["x"], detection["y"], "CLEARED")
         self.event_log.log(
-            self.playback.clock_s, f"Alert rejected at ({detection['x']:.0f}, {detection['y']:.0f})"
+            self.mission_clock.clock_s, f"Alert rejected at ({detection['x']:.0f}, {detection['y']:.0f})"
         )
 
     def _on_alert_timed_out(self, detection: dict) -> None:
         self.event_log.log(
-            self.playback.clock_s,
+            self.mission_clock.clock_s,
             f"Alert timed out, unresolved, at ({detection['x']:.0f}, {detection['y']:.0f})",
         )
 
@@ -1181,87 +1307,53 @@ class MainWindow(QMainWindow):
     def _on_clock_tick(self, clock_s: float) -> None:
         minutes, seconds = divmod(int(clock_s), 60)
         self.clock_label.setText(f"{minutes:02d}:{seconds:02d}")
-        dt = clock_s - self._last_clock_s
         self._last_clock_s = clock_s
         self._update_silence_indicator()
-        # Rover telemetry is a downlink like any other.
-        if self.selected_unit_id == "rover" and self._comms.telemetry:
-            rover = self.units["rover"]
-            self.context_panel.rover_panel.update_pose(rover.pose.x, rover.pose.y, rover.pose.heading, dt)
 
     def _update_silence_indicator(self) -> None:
         if self._comms.telemetry or self._silence_began_s is None:
             return
-        elapsed = max(0.0, self.playback.clock_s - self._silence_began_s)
+        elapsed = max(0.0, self.mission_clock.clock_s - self._silence_began_s)
         minutes, seconds = divmod(int(elapsed), 60)
         label = "CONTACT LOST" if self._comms.mode == LCA else "EMISSIONS SILENT"
         self.map_view.set_telemetry_stale(True, f"{label} \u00b7 LAST CONTACT {minutes:02d}:{seconds:02d}")
 
-    def _on_phase_changed(self, phase: str, t: float) -> None:
-        self.phase_label.setText(phase.replace('_', ' ').upper())
-        self.context_panel.rover_panel.sensors.set_scanning(phase in SCANNING_PHASES)
-        self.event_log.log(t, f"Phase: {phase.replace('_', ' ')}")
-        for unit in self.units.values():
-            unit.current_task = phase.replace("_", " ")
-        self._refresh_all_rows()
-
-    def _on_unit_pose_changed(self, unit_id: str, x: float, y: float, z: float, heading: float) -> None:
-        unit = self.units.get(unit_id)
-        if unit is None or self._position_owner.get(unit_id) != "scripted":
-            return
-        if unit.kind == "tricopter":
-            # Aircraft are never placed from the script. In the bay they ride
-            # on the rover; once launched the flight director flies them.
-            return
-        unit.pose.x, unit.pose.y, unit.pose.z, unit.pose.heading = x, y, z, heading
-        if self._downlink_open():
-            self.map_view.set_unit_pose(unit_id, x, y, z, heading)
-            if self.selected_unit_id == unit_id and unit.kind == "tricopter":
-                self.context_panel.aircraft_panel.update_pose(z, heading)
-
-        breach_action = self.geofence.check_breach(x, y)
-        if breach_action is not None and not unit.emergency_return:
-            unit.emergency_return = True
-            self.event_log.log(
-                self.playback.clock_s, f"Geofence breach: {unit_id}, action = {breach_action}"
-            )
-
-    def _on_unit_battery_changed(self, unit_id: str, pct: float) -> None:
-        unit = self.units.get(unit_id)
-        if unit is None:
-            return
-        unit.battery_pct = pct
-        if self.selected_unit_id == unit_id and unit.kind == "tricopter":
-            self.context_panel.aircraft_panel.update_battery(pct)
-        self._refresh_all_rows()
-
-    def _on_mission_finished(self) -> None:
-        self.event_log.log(
-            self.playback.clock_s, "Mission complete: waypoints exhausted, rover returned to start point"
-        )
-        self.play_btn.setText("▶ DEPLOY")
-
     # --- transport ---
 
     def _on_play_clicked(self) -> None:
-        if self.playback.playing:
-            self.playback.pause()
-            self.play_btn.setText("▶ DEPLOY")
+        if self.mission_clock.playing:
+            # Hold: the rover stops where it is and the aircraft keep station
+            # on it. The mission clock stops with them.
+            self.mission_clock.pause()
+            self.flight_director.hold_navigation = True
+            self.play_btn.setText("\u25b6 RESUME")
         else:
-            self.playback.play()
-            self.play_btn.setText("⏸ HOLD")
-            if self.flight_director.goal is None and self._waypoint_index == 0:
+            first_time = not self._mission_started()
+            self.mission_clock.play()
+            self.flight_director.hold_navigation = False
+            self.play_btn.setText("\u23f8 HOLD")
+            if first_time and self.flight_director.goal is None and self._waypoint_index == 0:
                 self._plan_sweep_from_first_scan()
                 self._begin_autonomous_sweep()
+        self._refresh_status()
 
     def _on_reset_clicked(self) -> None:
-        self.playback.reset()
+        self.mission_clock.reset()
+        self._status_key = None
         self.map_view.clear()
         self.perception.clear()
         self.map_view.clear_perception()
         self._last_scan_s = -1e9
         self._obstacle_returns = 0
         self._launches.clear()
+        self._recommended_bearing = None
+        # What was found, and what has already been escalated, belongs to the
+        # mission that is being reset. Left in place the rover stays silent about
+        # everything it found last time and no alert can fire again.
+        self._target_evidence.clear()
+        self._aerial_evidence.clear()
+        self._last_reported.clear()
+        self._escalated.clear()
         self._waypoint_index = 0
         self._current_lane = None
         self._last_replan_s = -1e9
@@ -1282,14 +1374,13 @@ class MainWindow(QMainWindow):
         self.context_panel.rover_panel.sensors.set_scanning(False)
         self.flight_director.reset()
         self._keys_down.clear()
-        self._position_owner = {uid: "scripted" for uid in ALL_UNIT_IDS}
         for unit_id in TRICOPTER_IDS:
             self._set_docked(unit_id, True)
         self._last_clock_s = 0.0
         self.play_btn.setText("▶ DEPLOY")
         self.clock_label.setText("00:00")
-        self.playback.apply_initial_state()
         self._select_unit(self.selected_unit_id)
+        self._refresh_status()
         self._refresh_all_rows()
 
     # --- manual driving ---
