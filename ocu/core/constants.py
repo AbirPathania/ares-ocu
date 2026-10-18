@@ -74,6 +74,17 @@ HOLD_ALTITUDE_M = 12.0  # altitude aircraft settle to while queued for docking
 
 # Docking requires a stationary rover: the funnel pad and the ArUco fiducial
 # in section 7 are both fixed to the deck, so the deck has to stop moving.
+#: How fast the rover drives while sweeping a lane. The 15 km/h above is a
+#: transit figure: it is how fast the platform can move, not how fast it can
+#: clear ground. A detection pass is limited by the sensors, not the wheels.
+#: The pulse induction array is 40 cm wide, so at this speed an object stays
+#: inside the swath for about half a second, and the ground-penetrating radar
+#: gets the dense trace spacing a subsurface picture needs. Survey GPR is
+#: normally walked at about this pace for the same reason. Not a figure from
+#: the technical baseline, which gives only the transit top speed; see
+#: DECISIONS.md.
+ROVER_SURVEY_SPEED_MS = 0.8
+
 ROVER_STATIONARY_SPEED_MS = 0.15
 
 # --- Section 6.2 / 10: formation and separation ---------------------------

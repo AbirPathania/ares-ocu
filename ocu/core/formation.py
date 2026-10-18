@@ -23,9 +23,10 @@ the purpose each pattern is given in the section 6.2 table instead:
     line    a wide sweep        abreast, widest swath across the track
     column  tight terrain       single file in depth, down a trail
 
-Slot altitudes are deconflicted around the commanded rally altitude so
-three aircraft never occupy one layer, and the whole formation is scaled
-as a rigid shape if it would otherwise breach the tether.
+Every slot flies the commanded rally altitude, because the pattern already
+separates the aircraft on the ground plane; altitude is only layered when a
+pattern is squeezed close enough that it does not. The whole formation is
+scaled as a rigid shape if it would otherwise breach the tether.
 """
 
 from __future__ import annotations
@@ -106,13 +107,34 @@ def _scale_into_tether(offsets: list[tuple[float, float]], limit_m: float) -> li
     return [(dx * scale, dy * scale) for dx, dy in offsets]
 
 
-def _slot_altitudes(rally_altitude_m: float, count: int) -> list[float]:
-    """Layer the slots around the commanded altitude.
+def _slot_altitudes(
+    rally_altitude_m: float, offsets: list[tuple[float, float]]
+) -> list[float]:
+    """Altitude for each slot.
 
-    Three aircraft in one horizontal plane is a collision the moment any of
-    them is pushed off station, so the stack is spread by
-    ALTITUDE_DECONFLICTION_M with the operator's number as its centre.
+    Every aircraft flies the altitude the operator asked for. A formation is
+    already separated on the ground plane by its own spacing, so stacking it
+    in height as well buys nothing and costs the operator the one number they
+    actually set: ask for 26 m and all three should read 26 m.
+
+    The exception is a formation whose slots are not far enough apart in plan
+    to be safe on their own -- a pattern squeezed by the tether, or a spacing
+    set near the minimum. Then, and only then, the slots are layered around
+    the commanded altitude so that two aircraft pushed off station cannot
+    arrive in the same place.
     """
+    count = len(offsets)
+    closest = min(
+        (
+            math.hypot(a[0] - b[0], a[1] - b[1])
+            for i, a in enumerate(offsets)
+            for b in offsets[i + 1 :]
+        ),
+        default=math.inf,
+    )
+    if closest >= MIN_AIRCRAFT_SEPARATION_M:
+        return [rally_altitude_m] * count
+
     middle = (count - 1) / 2.0
     altitudes = [rally_altitude_m + (i - middle) * ALTITUDE_DECONFLICTION_M for i in range(count)]
     floor = min(altitudes)
@@ -143,7 +165,7 @@ def compute_formation_targets(
     standoff_m = max(standoff_m, MIN_AIRCRAFT_SEPARATION_M)
 
     offsets = _scale_into_tether(_slot_offsets(pattern, standoff_m, spacing_m), TETHER_LIMIT_M)
-    altitudes = _slot_altitudes(rally_altitude_m, len(offsets))
+    altitudes = _slot_altitudes(rally_altitude_m, offsets)
 
     bearing = math.radians(bearing_deg % 360.0)
     # Compass frame: forward is (sin, cos), right is 90 degrees clockwise of it.

@@ -191,3 +191,24 @@ def sweep_from_first_scan(
     seen = PerceptionMap()
     cast_scan(world, seen, origin[0], origin[1])
     return plan_lane_sweep(seen, origin)
+
+
+#: Washouts cut onto the lanes themselves, as (lane, metres along, metres
+#: across, radius, depth). Scenario content, like the buried objects in
+#: targets.py: the sweep is laid on the clearest ground the first scan can
+#: see, so whether the generated washouts happen to fall on it is luck of the
+#: seed. These are placed past the range at which a negative obstacle can be
+#: resolved, so the rover cannot know about them when it plans and has to
+#: find them and route around them as it drives. That is the behaviour worth
+#: watching, and it is the one thing the terrain cannot be relied on to stage.
+LANE_WASHOUTS = (
+    (0, 15.5, 0.10, 0.95, 0.50),
+    (2, 11.0, -0.30, 0.80, 0.45),
+)
+
+
+def cut_washouts_on_lanes(world: TerrainWorld, sweep: LaneSweep) -> None:
+    """Put the scenario's washouts on the lanes this sweep will drive."""
+    for lane, along, across, radius, depth in LANE_WASHOUTS:
+        x, y = sweep.at(lane, along, across)
+        world.cut_washout(x, y, radius, depth)

@@ -116,6 +116,7 @@ real decision from the team, not this build's placeholder.
 
 | Element | Status |
 |---|---|
+| Playback speed | A control, not a cheat: ½× to 4× decides how fast mission time runs, and the vehicles drive at their own speeds either way. A long tick is split before it is integrated, so the same mission plays out at every speed |
 | Unit positions | Simulated. The rover plans and follows its own route (`core/navigation.py`); aircraft are flown by the flight director under the baseline's speed and acceleration limits, with slots held as offsets from the rover |
 | Buried objects and detections | Real. Physical objects in `core/targets.py` with depth, metal mass, ferrous state and vapour; four sensor response models in `core/detection.py` built from the baseline's own reach figures. What is found depends on where the rover drives |
 | Battery and endurance | Real, integrated from the power budget in `core/power.py`. Reproduces the baseline: 430 Wh at 143 W gives 3.0 h, ARES-A cruise gives 11 min, a 30 W pad charges in 9 min |
@@ -125,6 +126,7 @@ real decision from the team, not this build's placeholder.
 | Scout detections | Simulated from the camera's own geometry (`core/aerial.py`): what is on or just under the surface, inside the frame, in range and not hidden. Optical evidence alone stays below the escalation threshold |
 | Mission status | Derived from the vehicles' own state (rover mode and sweep progress, each aircraft's flight mode), not announced by a script |
 | Camera feeds | Rendered from the simulated world: a forward camera for the rover and, for each tricopter, a forward-looking camera tipped down (18° pitch, 84° field of view; this build's choices, not a published airframe figure). Occlusion, shadows, haze and discrete boulders. Not recorded footage, and not watermarked as simulated on screen; section 9.4 asks for that label, see the open item in DECISIONS.md |
-| Terrain ground truth | Generated from a fixed seed. A plausible piece of ground, not a real place |
+| Terrain ground truth | Generated from a fixed seed. A plausible piece of ground, not a real place. Rock is individual boulders up to 3.6 m, and washouts are cut where water runs |
+| Negative obstacles | Real. A hole stops the wheels and not the beam, so it is found by the drive stereo pair within 8 m rather than by the scanner, and once mapped it is not unlearned |
 | The rover's terrain map | Real. Built only from simulated LiDAR returns, with occlusion: unscanned ground stays unknown and obstacles cast shadows that close as the rover drives around them |
 | Mission theme | Generic hazard sweep, never labeled minefield |

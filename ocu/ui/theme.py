@@ -119,6 +119,7 @@ TERRAIN_COLORS = {
     "SCRUB": QColor("#1E2E1C"),   # low vegetation, passable
     "TREE": QColor("#2C4A2E"),    # canopy: impassable, and it blocks the beam
     "ROCK": QColor("#66727E"),    # impassable, and it blocks the beam
+    "POTHOLE": QColor("#2A1F2C"),  # a hole: darker than anything around it
 }
 
 TERRAIN_LABELS = {
@@ -127,6 +128,7 @@ TERRAIN_LABELS = {
     "SCRUB": "scrub",
     "TREE": "tree",
     "ROCK": "rock",
+    "POTHOLE": "hole",
 }
 
 
@@ -140,4 +142,5 @@ RETURN_COLORS = {
     "SCRUB": QColor("#6E9B5A"),
     "TREE": QColor("#7FD08C"),
     "ROCK": QColor("#D5DEE6"),   # cold pale grey: nothing else on the map is
+    "POTHOLE": QColor("#9B6BA8"),  # a hole reads as a hazard, not as terrain
 }

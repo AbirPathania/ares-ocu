@@ -63,8 +63,18 @@ REFLECTIVITY = {
     Terrain.SCRUB: 0.60,
     Terrain.ROCK: 0.95,
     Terrain.TREE: 0.88,
+    Terrain.POTHOLE: 0.30,  # the far wall of a hole, caught at an angle
     Terrain.UNKNOWN: 0.0,
 }
+
+#: How far ahead a hole in the ground can be resolved. A scanning LiDAR
+#: sweeping a horizontal plane looks straight over a pothole and reports the
+#: ground beyond it; a negative obstacle has to be found by looking *down*,
+#: which is the drive stereo pair's job and only works near the vehicle.
+#: Short detection range is exactly what makes holes dangerous, and it is why
+#: the planner has to replan when one appears rather than route round it from
+#: the start.
+NEGATIVE_OBSTACLE_RANGE_M = 8.0
 
 #: Range at which returned energy has fallen by half.
 RANGE_HALF_POWER_M = 14.0
@@ -162,6 +172,13 @@ def cast_scan(
     inside = (ix >= 0) & (ix < span) & (iy >= 0) & (iy < span)
     kinds = np.full(cx.shape, int(Terrain.GROUND), dtype=np.uint8)  # beyond the world is open
     kinds[inside] = world._grid[ix[inside], iy[inside]]
+
+    # A hole further out than the stereo pair can resolve reads as the ground
+    # it is cut into: the horizontal beam passes over it and returns off what
+    # is behind. It only becomes a hole once the rover is close enough to
+    # look into it.
+    too_far = distance[None, :] > NEGATIVE_OBSTACLE_RANGE_M
+    kinds[(kinds == int(Terrain.POTHOLE)) & too_far] = int(Terrain.GROUND)
 
     blocking = (kinds == int(Terrain.ROCK)) | (kinds == int(Terrain.TREE))
     hit = blocking.any(axis=1)

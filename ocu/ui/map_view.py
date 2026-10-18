@@ -128,7 +128,10 @@ class MapView(QWidget):
         # The point cloud is accumulated into a cached image at 12.5 cm per
         # pixel, which is fine enough that individual returns read as points
         # rather than as filled cells. Only new returns are painted into it.
-        self._cloud_px_per_m = 8.0
+        # Finer than the half-metre terrain grid, so two returns from
+        # neighbouring cells land on different pixels instead of stacking on
+        # one and flattening the cloud into fill.
+        self._cloud_px_per_m = 14.0
         self._cloud_half_px = int(WORLD_HALF_EXTENT_M * self._cloud_px_per_m)
         span = self._cloud_half_px * 2
         self._perception_image = QImage(span, span, QImage.Format_ARGB32_Premultiplied)
@@ -542,7 +545,7 @@ class MapView(QWidget):
             return
 
         alpha = (200.0 * fade * (0.4 + 0.6 * scan.intensities)).astype(np.int64)
-        for name in ("GROUND", "TRACK", "SCRUB", "TREE", "ROCK"):
+        for name in ("GROUND", "TRACK", "SCRUB", "TREE", "ROCK", "POTHOLE"):
             base = RETURN_COLORS[name]
             mask = scan.kinds == int(Terrain[name])
             if not mask.any():
@@ -646,16 +649,21 @@ class MapView(QWidget):
         An operator judging a map needs to know how much of it is measured
         and how recently, not only what colour means what.
         """
+        keys = ("TRACK", "GROUND", "SCRUB", "TREE", "ROCK", "POTHOLE")
+        row_height = 13.0
+        stats_gap = 16.0
         x = 16.0
-        y = self.height() - 164.0
+        # Laid out from the bottom up, so adding a class to the key pushes the
+        # block up rather than pushing the numbers underneath it off the map.
+        y = self.height() - 24.0 - 5 * 12.0 - stats_gap - len(keys) * row_height
 
         painter.setFont(QFont("DIN Condensed", 13, QFont.Bold))
         painter.setPen(QPen(QColor("#8FC9E8")))
         painter.drawText(QRectF(x, y - 16, 240, 14), Qt.AlignLeft, "LIDAR \u00b7 SLAM")
 
         painter.setFont(QFont("Menlo", 8))
-        for i, key in enumerate(("TRACK", "GROUND", "SCRUB", "TREE", "ROCK")):
-            row = y + i * 13
+        for i, key in enumerate(keys):
+            row = y + i * row_height
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(RETURN_COLORS[key]))
             painter.drawRect(QRectF(x, row, 9, 9))
@@ -673,7 +681,11 @@ class MapView(QWidget):
         painter.setPen(QPen(QColor(150, 164, 178, 210)))
         painter.setFont(QFont("Menlo", 8))
         for i, line in enumerate(lines):
-            painter.drawText(QRectF(x, y + 68 + i * 12, 240, 13), Qt.AlignLeft, line)
+            painter.drawText(
+                QRectF(x, y + len(keys) * row_height + stats_gap + i * 12, 240, 13),
+                Qt.AlignLeft,
+                line,
+            )
 
     def _draw_grid(self, painter: QPainter) -> None:
         """A 10 m grid with coordinates on the majors, so distances on this

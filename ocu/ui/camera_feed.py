@@ -51,14 +51,14 @@ class SimulatedCameraFeed(QWidget):
     def render_size(self) -> tuple[int, int]:
         """The resolution frames should be rendered at for this tile.
 
-        Rendered below display size and scaled up smoothly, which is also
-        what a small camera sensor looks like, and is a fraction of the cost
-        of rendering every device pixel.
+        Rendered at the tile's own pixels rather than below them and scaled
+        up: a soft, upscaled picture is the one thing on this display that
+        cannot be defended as what the sensor really saw.
         """
-        scale = 1.7
+        ratio = self.devicePixelRatioF() or 1.0
         return (
-            int(min(max(self.width() / scale, 96), 240)),
-            int(min(max(self.height() / scale, 40), 96)),
+            int(min(max(self.width() * ratio, 96), 520)),
+            int(min(max(self.height() * ratio, 40), 220)),
         )
 
     def set_frame(self, rgb: np.ndarray) -> None:

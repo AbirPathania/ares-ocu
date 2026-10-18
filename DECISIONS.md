@@ -594,3 +594,90 @@ about everything it had found and no alert could fire again.
 **The geofence is checked on real positions.** It was only ever checked against
 scripted poses, so real motion was never tested against it. It is unconfigured by
 default, so nothing changes visibly, but the check is on the right data.
+
+## Pace, and what the operator's numbers mean
+
+**The rover sweeps at a survey speed.** It was driving lanes at up to 2.17 m/s
+(7.8 km/h). The platform's 15 km/h is a transit figure: how fast it can move,
+not how fast it can clear ground. A detection pass is limited by the sensors.
+The pulse induction array is 40 cm wide, and ground-penetrating radar needs
+dense trace spacing to form a subsurface picture, which is why survey GPR is
+walked rather than driven. `ROVER_SURVEY_SPEED_MS = 0.8` (2.9 km/h, a slow
+walk) is this build's figure, not the baseline's. Driving home is transit and
+is not held to it: the crawl is the sensors' doing, and when nothing is being
+cleared there is nothing to crawl for. The full lane sweep now takes about
+2:10 of mission time instead of 1:07.
+
+**Playback speed is a real control, and it was half-wired.** The mission clock
+had a speed multiplier that scaled the clock readout and the battery
+integration but not the vehicles, so a fast-forwarded run drove at normal
+speed under a fast clock. One mission `dt` now feeds the director, the power
+model and the scan schedule, and the top bar carries a ½×/1×/2×/4× control.
+Playback speed decides when you watch, not how fast anything drives.
+
+**A long tick is split before it is integrated.** At 4× a tick covers 0.4 s of
+mission time, and a follower that re-aims once per step tracks its path more
+loosely the longer the step gets. `MAX_INTEGRATION_STEP_S` splits anything
+longer, so one long tick is the same motion as that much mission time taken in
+short ones. Measured: at every playback speed the rover is within 0.19 m after
+40 s of mission time. The residual is the control loop above the integrator
+(replanning, taking the next lane point) running once per tick like a real
+one, not the motion model.
+
+**Rally altitude means rally altitude.** Ask for 26 m and all three aircraft
+read 26 m. They used to be layered to 23/26/29 by an automatic ±3 m
+deconfliction, which took the one number the operator actually sets. A
+formation is already separated on the ground plane by its own spacing, so the
+layering bought nothing; it is now applied only when the slots are closer
+together in plan than the minimum separation, which happens when the tether
+squeezes a pattern or the spacing is set near its floor.
+
+## Holes in the ground
+
+**A pothole is impassable but not occluding**, which is the first thing in
+this model that is one and not the other: `OCCLUDING` used to equal
+`IMPASSABLE` and a test asserted it. A hole stops the wheels and lets the beam
+straight over, so the sets are now properly nested and the test says so.
+
+**Negative obstacles have their own, much shorter range.** A scanning LiDAR
+sweeping a horizontal plane cannot see a hole: it passes over and returns off
+the ground beyond, reporting open ground perfectly honestly. Finding a hole
+means looking *down*, which is the drive stereo pair's job and only works near
+the vehicle (`NEGATIVE_OBSTACLE_RANGE_M = 8 m`). Short detection range is
+exactly what makes negative obstacles dangerous, and it is why the rover meets
+these and replans rather than routing around them from the start.
+
+**A mapped hole is not unlearned.** Found by driving it: the rover resolved a
+washout at 8 m, drove on, and the far-field reading of the same cells -- honest
+open ground, because the beam passes over -- overwrote the hazard. The map
+forgot every hole the moment it moved away. A reading of open ground no longer
+supersedes a mapped hole; everything else still replaces what came before.
+
+**The washouts on the lanes are scenario content.** Potholes are generated
+across the terrain, thicker along the track where water runs, but the sweep is
+laid on the clearest axis the first scan can find, so whether any fall on it is
+luck of the seed. Measured across three densities, none did: the planner keeps
+finding a clean corridor, which is its job. Two washouts are therefore cut onto
+the lanes deliberately (`sweep.LANE_WASHOUTS`), past the range at which a
+negative obstacle can be resolved, exactly as the buried objects in targets.py
+are placed. This is a demonstration arrangement and is called one.
+
+**Boulders run larger.** The size distribution was capped at 2.4 m and is now
+3.6 m, with a wider spread, so an outcrop reads as something to route around
+rather than gravel.
+
+## Resolution
+
+The camera tiles were rendered at 1/1.7 of their own size and scaled up, which
+is the one thing on this display that cannot be defended as what the sensor
+saw. They now render at the tile's own device pixels (about 2.9x the pixels,
+31 ms per camera tick against an 85 ms budget). The map's accumulated point
+cloud went from 8 to 14 px/m, finer than the half-metre terrain grid, so two
+returns from neighbouring cells land on different pixels instead of stacking on
+one and flattening the cloud into fill.
+
+**The terrain grid stays at 0.5 m.** Measured, 0.25 m takes 9.0 s to generate
+against 2.3 s and quadruples the costmap and planner work for ground detail
+finer than the rover is wide (1.8 m). The resolution that matters for
+navigation is already there; what was missing was pixels where the operator
+actually looks.

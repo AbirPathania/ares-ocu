@@ -17,6 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from ocu.core.constants import ROVER_SURVEY_SPEED_MS  # noqa: E402
 from ocu.ui.main_window import MainWindow  # noqa: E402
 
 TRICOPTERS = ["tricopter-1", "tricopter-2", "tricopter-3"]
@@ -435,14 +436,29 @@ def test_video_resumes_when_the_link_carries_it_again(app):
     assert not window.camera_feeds["rover"]._emcon
 
 
-def test_a_tile_is_rendered_at_a_sensible_size_for_its_shape(app):
+def test_a_tile_is_rendered_at_its_own_resolution_rather_than_upscaled(app):
+    """A soft, upscaled picture is the one thing on this display that cannot
+    be defended as what the sensor really saw."""
     window = MainWindow()
     window.resize(1760, 1040)
     window.show()
     pump(app)
-    width, height = window.camera_feeds["rover"].render_size()
-    assert 96 <= width <= 240 and 40 <= height <= 96
-    assert width / height > 1.8, "tiles are wide, and frames should match"
+
+    tile = window.camera_feeds["rover"]
+    width, height = tile.render_size()
+    ratio = tile.devicePixelRatioF() or 1.0
+    assert width >= tile.width() * ratio - 1
+    assert height >= tile.height() * ratio - 1
+    assert abs(width / height - tile.width() / tile.height()) < 0.25, "same shape as the tile"
+
+
+def test_a_tile_asks_for_a_sane_size_even_before_it_is_laid_out(app):
+    """An unshown widget has no useful size yet, and a render of zero pixels
+    would be a crash rather than a blank tile."""
+    from ocu.ui.camera_feed import SimulatedCameraFeed
+
+    width, height = SimulatedCameraFeed("rover", "ROVER").render_size()
+    assert width >= 96 and height >= 40
 
 
 # --- launches, in the real window, with the rover driving ---------------------------
@@ -478,10 +494,18 @@ def test_a_guided_launch_from_a_driving_rover_forms_on_the_pattern_the_operator_
     console._on_stage_clicked()
     console._on_launch_confirmed()
 
-    start = (window.units["rover"].pose.x, window.units["rover"].pose.y)
-    _drive(window, 45.0)
+    # Distance driven, not displacement: the lanes reverse, so a rover that
+    # has swept thirty metres can finish a few metres from where it started.
+    previous = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+    driven = 0.0
+    for _ in range(450):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        here = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+        driven += math.hypot(here[0] - previous[0], here[1] - previous[1])
+        previous = here
     rover = window.units["rover"].pose
-    assert math.hypot(rover.x - start[0], rover.y - start[1]) > 8.0, "the rover must have driven on"
+    assert driven > 8.0, "the rover must have driven on during the launch"
     assert window.flight_director.launch_stage(TRICOPTERS) == "FORMED"
 
     want = compute_formation_targets(
@@ -891,3 +915,105 @@ def test_a_reset_forgets_what_was_found_so_it_can_be_found_again(app):
 
     _deploy_and_drive(window, 15.0)
     assert window.threat_panel._threats, "the rover can find the same objects again"
+
+
+# --- how fast things move, and how fast you watch them ------------------------------
+
+
+def _peak_speed_over(window, seconds):
+    fastest = 0.0
+    for _ in range(int(seconds / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        fastest = max(fastest, window.flight_director.rover_body.speed_ms)
+    return fastest
+
+
+def test_the_rover_sweeps_at_survey_speed_not_transit_speed(app):
+    """A clearance pass is limited by what the sensors can resolve, not by
+    what the wheels can do. The platform's 15 km/h is a transit figure."""
+    from ocu.core.constants import ROVER_SURVEY_SPEED_MS, ROVER_TOP_SPEED_MS
+
+    window = MainWindow()
+    window._on_play_clicked()
+    assert _peak_speed_over(window, 60.0) <= ROVER_SURVEY_SPEED_MS + 1e-6
+    assert ROVER_SURVEY_SPEED_MS < ROVER_TOP_SPEED_MS / 3, "a survey crawl, not a slightly slower drive"
+
+
+def test_driving_home_is_transit_and_is_not_held_to_survey_speed(app):
+    """Nothing is being cleared on the way back, so nothing holds it to a
+    crawl. The distinction is the point: the crawl is the sensors' doing."""
+    from ocu.core.constants import ROVER_SURVEY_SPEED_MS
+
+    window = MainWindow()
+    window._on_play_clicked()
+    _drive(window, 25.0)
+    window._on_return_to_base()
+    assert _peak_speed_over(window, 25.0) > ROVER_SURVEY_SPEED_MS * 1.5
+
+
+def test_playback_speed_changes_when_you_see_the_mission_not_what_happens(app):
+    """Faster playback is the same mission seen sooner.
+
+    Exactly the same is not achievable and not claimed: the motion model is
+    integrated in sub-steps so a body never travels further in one jump than
+    its acceleration allows, but the control loop above it (replanning,
+    taking the next lane point) runs once per tick like a real one, so fast
+    playback revises the route less often per mission second. What that may
+    not do is fly a different mission, so the vehicle has to end up on the
+    same route, within a small fraction of how far it has driven.
+    """
+    import math
+
+    def after(speed_index, mission_seconds):
+        window = MainWindow()
+        window.speed_combo.setCurrentIndex(speed_index)
+        window._on_play_clicked()
+        speed = float(window.speed_combo.currentData())
+        for _ in range(int(mission_seconds / (0.1 * speed))):
+            window.mission_clock._tick()
+            window._on_director_tick()
+        pose = window.units["rover"].pose
+        return (pose.x, pose.y), window.mission_clock.clock_s
+
+    seconds = 30.0
+    driven = ROVER_SURVEY_SPEED_MS * seconds  # upper bound on distance covered
+    real_time, clock = after(1, seconds)
+    for index in (0, 2, 3):
+        moved, other_clock = after(index, seconds)
+        assert abs(other_clock - clock) < 0.5, "the same mission time elapsed"
+        drift = math.hypot(moved[0] - real_time[0], moved[1] - real_time[1])
+        assert drift < driven * 0.05, f"speed index {index} flew a different mission: {drift:.2f} m apart"
+
+
+def test_the_speed_control_drives_the_clock(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    for index in range(window.speed_combo.count()):
+        window.speed_combo.setCurrentIndex(index)
+        assert window.mission_clock.speed == float(window.speed_combo.currentData())
+
+
+def test_a_reset_keeps_the_speed_the_operator_chose(app):
+    window = MainWindow()
+    window.speed_combo.setCurrentIndex(0)
+    window._on_reset_clicked()
+    assert window.mission_clock.speed == 0.5
+
+
+def test_the_batteries_burn_on_mission_time_at_any_playback_speed(app):
+    slow, fast = MainWindow(), MainWindow()
+    slow.speed_combo.setCurrentIndex(1)  # 1x
+    fast.speed_combo.setCurrentIndex(3)  # 4x
+    slow._on_play_clicked()
+    fast._on_play_clicked()
+
+    for _ in range(80):
+        slow.mission_clock._tick(); slow._on_director_tick()
+    for _ in range(20):
+        fast.mission_clock._tick(); fast._on_director_tick()
+
+    slow_used = 96.0 - slow.units["rover"].battery_pct
+    fast_used = 96.0 - fast.units["rover"].battery_pct
+    assert slow_used > 0
+    assert abs(slow_used - fast_used) < slow_used * 0.05

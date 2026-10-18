@@ -53,7 +53,7 @@ from ocu.core.power import (
     tricopter_drain_pct_per_s,
     tricopter_endurance_s,
 )
-from ocu.core.sweep import plan_lane_sweep, sweep_from_first_scan
+from ocu.core.sweep import cut_washouts_on_lanes, plan_lane_sweep, sweep_from_first_scan
 from ocu.core.targets import default_field
 from ocu.core.terrain import CELL_SIZE_M, PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
@@ -149,6 +149,11 @@ class MainWindow(QMainWindow):
         # that same choice made ahead of time so the scenario can be set up
         # consistently with it. See core/sweep.py.
         self.sweep = sweep_from_first_scan(self.terrain)
+        # Scenario content, cut before anything reads the ground: washouts on
+        # the lanes themselves, past the range a negative obstacle can be
+        # resolved at, so the rover meets them as it drives rather than
+        # planning around them from the start. See core/sweep.py.
+        cut_washouts_on_lanes(self.terrain, self.sweep)
         # What is actually buried out there, placed relative to the lanes,
         # and what the suite has accumulated about each object swept over.
         self.target_field = default_field(sweep=self.sweep)
@@ -329,6 +334,28 @@ class MainWindow(QMainWindow):
             chip.setObjectName("statusChip")
             layout.addWidget(chip)
         self.manual_chip.setVisible(False)  # only shown when somebody holds the sticks
+
+        # How fast mission time runs against the clock on the wall. The
+        # vehicles move at their own speeds; this only decides how long the
+        # operator waits to watch them do it, which on a small screen is the
+        # difference between following the sweep and missing it.
+        self.speed_combo = make_styled_combo(
+            [
+                ("\u00bd\u00d7 · half speed", 0.5),
+                ("1\u00d7 · real time", 1.0),
+                ("2\u00d7", 2.0),
+                ("4\u00d7", 4.0),
+            ]
+        )
+        self.speed_combo.setObjectName("speedCombo")
+        self.speed_combo.setCurrentIndex(1)
+        self.speed_combo.setToolTip(
+            "Playback speed.\n"
+            "How fast mission time runs, not how fast the vehicles drive:\n"
+            "the rover sweeps at its survey speed either way."
+        )
+        self.speed_combo.currentIndexChanged.connect(self._on_speed_changed)
+        layout.addWidget(self.speed_combo)
 
         self.play_btn = QPushButton("▶ DEPLOY")
         self.play_btn.setObjectName("playButton")
@@ -536,7 +563,11 @@ class MainWindow(QMainWindow):
         self.flight_director.set_manual_input(holder, forward, turn, vertical)
 
     def _on_director_tick(self) -> None:
-        dt = DIRECTOR_TICK_MS / 1000.0
+        # Mission seconds, not wall seconds. Everything downstream integrates
+        # against this one number, so playing the mission faster moves the
+        # vehicles, burns the batteries and schedules the scans at one rate
+        # rather than each at its own.
+        dt = DIRECTOR_TICK_MS / 1000.0 * self.mission_clock.speed
         self._apply_manual_input()
         rover = self.units["rover"]
         poses, rover_pose, events = self.flight_director.tick(
@@ -993,12 +1024,9 @@ class MainWindow(QMainWindow):
         charge. Hovering costs more than cruising, climbing more than either,
         and a docked aircraft charges and tapers.
         """
-        # Battery has to burn on mission time, not wall-clock time. The
-        # director ticks in real seconds, but the mission can be played back
-        # faster; integrating against the wall clock would leave a
-        # fast-forwarded run showing a pack that barely moved.
-        if self.mission_clock.playing:
-            dt_s *= self.mission_clock.speed
+        # dt_s is already mission time (see _on_director_tick), so a
+        # fast-forwarded run drains the pack by the same amount per mission
+        # second as a real-time one.
 
         rover = self.units["rover"]
         rover_speed = self.flight_director.speed_of("rover") or 0.0
@@ -1337,8 +1365,15 @@ class MainWindow(QMainWindow):
                 self._begin_autonomous_sweep()
         self._refresh_status()
 
+    def _on_speed_changed(self) -> None:
+        speed = self.speed_combo.currentData()
+        if speed is None:
+            return
+        self.mission_clock.set_speed(float(speed))
+
     def _on_reset_clicked(self) -> None:
         self.mission_clock.reset()
+        self.mission_clock.set_speed(float(self.speed_combo.currentData() or 1.0))
         self._status_key = None
         self.map_view.clear()
         self.perception.clear()

@@ -42,6 +42,7 @@ from ocu.core.constants import (
     ROVER_ACCEL_MS2,
     ROVER_DECEL_MS2,
     ROVER_STATIONARY_SPEED_MS,
+    ROVER_SURVEY_SPEED_MS,
     ROVER_TOP_SPEED_MS,
     ROVER_TURN_ACCEL_DEG_S2,
     ROVER_TURN_RATE_DEG_S,
@@ -78,6 +79,14 @@ PLAN_RETRY_TICKS = 10
 #: After this many consecutive failures the waypoint is called unreachable
 #: and the operator is told, rather than the vehicle holding in silence.
 MAX_PLAN_FAILURES = 3
+
+#: Largest step the motion model is integrated over. Playing the mission back
+#: faster makes each tick cover more mission time, and a follower that re-aims
+#: once per step tracks its path more loosely the longer the step gets.
+#: Splitting anything longer keeps one long tick equivalent to the same mission
+#: time taken in short ones, which is what makes playback speed a choice about
+#: when you watch rather than about what the vehicles do.
+MAX_INTEGRATION_STEP_S = 0.1
 
 TOUCHDOWN_ALTITUDE_M = 0.06
 
@@ -583,6 +592,25 @@ class FlightDirector:
         if dt_s <= 0:
             return {}, None, events
 
+        # Split, so that one long step is the same motion as that much mission
+        # time taken in short ones: the follower re-aims and the ramps resolve
+        # at their own rate rather than at whatever rate the operator is
+        # watching.
+        if dt_s > MAX_INTEGRATION_STEP_S:
+            steps = int(math.ceil(dt_s / MAX_INTEGRATION_STEP_S))
+            poses: dict[str, tuple[float, float, float, float]] = {}
+            rover_pose = None
+            for _ in range(steps):
+                step_poses, step_rover, step_events = self.tick(
+                    dt_s / steps, rover_x, rover_y, rover_heading
+                )
+                poses.update(step_poses)
+                if step_rover is not None:
+                    rover_pose = step_rover
+                    rover_x, rover_y, rover_heading = step_rover
+                events.extend(step_events)
+            return poses, rover_pose, events
+
         rover_pose = self._update_rover(dt_s, rover_x, rover_y, rover_heading, events)
         effective_x, effective_y = (rover_pose[0], rover_pose[1]) if rover_pose else (rover_x, rover_y)
 
@@ -651,7 +679,12 @@ class FlightDirector:
                 dx, dy = target[0] - body.x, target[1] - body.y
                 if math.hypot(dx, dy) > 0.2:
                     body.step_heading(math.degrees(math.atan2(dx, dy)) % 360.0, dt_s)
-                body.step_toward(target[0], target[1], dt_s)
+                # Sweeping, not transiting: the pace is set by what the
+                # detection array can resolve, not by what the wheels can do.
+                body.step_toward(
+                    target[0], target[1], dt_s,
+                    speed_scale=ROVER_SURVEY_SPEED_MS / body.limits.max_speed_ms,
+                )
 
             if math.hypot(self.goal[0] - body.x, self.goal[1] - body.y) < WAYPOINT_TOLERANCE_M:
                 self.goal = None

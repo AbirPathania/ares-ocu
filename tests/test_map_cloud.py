@@ -123,3 +123,19 @@ def test_an_empty_scan_is_harmless(app):
     view = MapView()
     view.add_returns(scan_of([]), 0.0, {})
     assert view._cloud_points == 0
+
+
+def test_the_legend_and_its_numbers_do_not_overlap(app):
+    """The key is laid out from the bottom up, so adding a class to it pushes
+    the block up rather than printing the numbers through it."""
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.resize(900, 700)
+    keys, row_height, stats_gap = 6, 13.0, 16.0
+    top = view.height() - 24.0 - 5 * 12.0 - stats_gap - keys * row_height
+    last_key_row = top + (keys - 1) * row_height
+    first_stat_row = top + keys * row_height + stats_gap
+    assert first_stat_row > last_key_row + row_height
+    assert first_stat_row + 4 * 12.0 + 13 <= view.height()
+    assert top - 16 > 0

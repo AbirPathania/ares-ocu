@@ -156,9 +156,11 @@ def test_different_seeds_give_different_ground():
     assert not np.array_equal(a._grid, b._grid)
 
 
-def test_occluding_and_impassable_agree():
-    """Anything that stops the beam is also something you cannot drive through."""
-    assert OCCLUDING == IMPASSABLE
+def test_anything_that_stops_the_beam_also_stops_the_wheels():
+    """But not the other way round: a hole stops the wheels and lets the beam
+    straight over, which is why negative obstacles need their own sensor."""
+    assert OCCLUDING < IMPASSABLE
+    assert Terrain.POTHOLE in IMPASSABLE and Terrain.POTHOLE not in OCCLUDING
 
 
 def test_coverage_grows_as_the_vehicle_drives():
@@ -227,3 +229,107 @@ def test_every_ray_that_hits_reports_a_hit():
     assert result.hits > 0
     tree_returns = [r for r in result.returns if r.kind is Terrain.TREE]
     assert len(tree_returns) == result.hits
+
+
+# --- holes in the ground --------------------------------------------------
+
+
+def pothole_world(distance_m: float) -> TerrainWorld:
+    """Open ground with a hole in it, due north at `distance_m`."""
+    world = blank_world()
+    centre = int(distance_m / CELL_SIZE_M)
+    for dx in range(-4, 5):
+        for dy in range(centre - 2, centre + 3):
+            world.set_cell((dx, dy), Terrain.POTHOLE)
+    return world
+
+
+def test_a_hole_does_not_cast_a_shadow():
+    """You can see straight over a hole. Treating it like a wall would hide
+    ground the rover can see perfectly well."""
+    world, perception = pothole_world(5.0), PerceptionMap()
+    cast_scan(world, perception, 0.0, 0.0)
+    assert perception.is_known((0, 24)), "the ground beyond a hole is still visible"
+
+
+def test_a_hole_further_off_than_the_stereo_pair_reads_as_ground():
+    """A scanning LiDAR sweeping a horizontal plane passes over a hole and
+    returns off what is behind it. That is what makes negative obstacles
+    dangerous, and this model says so rather than quietly seeing everything."""
+    from ocu.core.lidar import NEGATIVE_OBSTACLE_RANGE_M
+
+    far = NEGATIVE_OBSTACLE_RANGE_M + 6.0
+    world, perception = pothole_world(far), PerceptionMap()
+    cast_scan(world, perception, 0.0, 0.0)
+    assert perception.at((0, int(far / CELL_SIZE_M))) is Terrain.GROUND
+
+
+def test_driving_closer_resolves_the_hole():
+    from ocu.core.lidar import NEGATIVE_OBSTACLE_RANGE_M
+
+    far = NEGATIVE_OBSTACLE_RANGE_M + 6.0
+    cell = (0, int(far / CELL_SIZE_M))
+    world, perception = pothole_world(far), PerceptionMap()
+
+    cast_scan(world, perception, 0.0, 0.0)
+    assert perception.at(cell) is Terrain.GROUND
+
+    cast_scan(world, perception, 0.0, far - 3.0)  # close enough to look into it
+    assert perception.at(cell) is Terrain.POTHOLE
+
+
+def test_the_generated_world_has_holes_in_it_and_they_are_real_dips():
+    world = shared_world()
+    import numpy as np
+
+    deep = world._pothole_depth >= 0.25
+    assert int(deep.sum()) > 40, "the ground should have washouts in it"
+    # Where a hole is, the ground is actually lower, so a camera sees a dip.
+    index = np.argwhere(deep)[0]
+    cell = (int(index[0]) - world._extent, int(index[1]) - world._extent)
+    assert world.at(cell) is Terrain.POTHOLE
+    assert world.pothole_depth_at(cell) >= 0.25
+
+
+def test_painting_a_cell_keeps_the_hazard_fields_honest():
+    world = blank_world()
+    world.set_cell((3, 3), Terrain.POTHOLE)
+    assert world.pothole_depth_at((3, 3)) > 0.0
+    assert world.rock_height_at((3, 3)) == 0.0
+
+    world.set_cell((3, 3), Terrain.ROCK)
+    assert world.pothole_depth_at((3, 3)) == 0.0
+    assert world.rock_height_at((3, 3)) > 0.0
+
+    world.set_cell((3, 3), Terrain.GROUND)
+    assert world.pothole_depth_at((3, 3)) == 0.0 and world.rock_height_at((3, 3)) == 0.0
+
+
+def test_a_mapped_hole_is_not_unlearned_by_driving_away_from_it():
+    """The far-field reading of a hole is honest open ground: the beam passes
+    over it. It is not evidence the hole is gone, and a map that accepts it
+    forgets every hazard the moment the rover drives on."""
+    from ocu.core.lidar import NEGATIVE_OBSTACLE_RANGE_M
+
+    far = NEGATIVE_OBSTACLE_RANGE_M + 6.0
+    cell = (0, int(far / CELL_SIZE_M))
+    world, perception = pothole_world(far), PerceptionMap()
+
+    cast_scan(world, perception, 0.0, far - 3.0)  # close: resolved
+    assert perception.at(cell) is Terrain.POTHOLE
+
+    cast_scan(world, perception, 0.0, 0.0)  # driven away again
+    assert perception.at(cell) is Terrain.POTHOLE, "the map must not forget a hazard"
+
+
+def test_a_fresh_reading_still_replaces_everything_else():
+    """The exception is narrow: anything else the sensor reports is the
+    ground as it last saw it."""
+    perception = PerceptionMap()
+    perception.observe((0, 0), Terrain.SCRUB)
+    assert perception.observe((0, 0), Terrain.GROUND)
+    assert perception.at((0, 0)) is Terrain.GROUND
+
+    perception.observe((1, 1), Terrain.POTHOLE)
+    assert perception.observe((1, 1), Terrain.ROCK), "a hole filled by a rock is still news"
+    assert perception.at((1, 1)) is Terrain.ROCK

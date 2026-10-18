@@ -323,3 +323,60 @@ def test_a_slot_beyond_the_tether_is_pulled_back_onto_it():
     fly(director, rover, 60.0)
     state = director.aircraft["tricopter-1"]
     assert math.hypot(state.x - rover.x, state.y - rover.y) <= TETHER_LIMIT_M + 1e-6
+
+
+# --- one long step is the same motion as many short ones -------------------------
+
+
+def open_ground(extent: int = 80):
+    from ocu.core.terrain import PerceptionMap, Terrain
+
+    perception = PerceptionMap()
+    for x in range(-extent, extent + 1):
+        for y in range(-extent, extent + 1):
+            perception.observe((x, y), Terrain.GROUND)
+    return perception
+
+
+def test_a_long_tick_moves_a_vehicle_the_same_way_as_many_short_ones():
+    """What makes playback speed a choice about when you watch.
+
+    A tick at four times speed covers four times the mission time. The
+    follower re-aims once per step, so a long step tracks its path more
+    loosely; splitting it keeps the motion the same whatever rate the
+    operator happens to be watching at.
+    """
+    from ocu.core.terrain import CELL_SIZE_M, PerceptionMap, Terrain
+
+    def drive(step_s, total_s):
+        director, rover = FlightDirector(), MovingRover()
+        perception = open_ground(extent=80)
+        # A leg with a corner in it, where re-aiming rate actually matters.
+        director.navigate_to(18.0, 18.0, lane_from=(0.0, 0.0))
+        director.replan(perception, CELL_SIZE_M)
+        for _ in range(int(round(total_s / step_s))):
+            director.tick(step_s, rover.x, rover.y, rover.heading)
+        body = director.rover_body
+        return body.x, body.y, body.heading
+
+    fine = drive(0.1, 20.0)
+    coarse = drive(0.4, 20.0)  # what a 4x tick hands it
+    assert math.hypot(coarse[0] - fine[0], coarse[1] - fine[1]) < 0.05
+    assert abs((coarse[2] - fine[2] + 180.0) % 360.0 - 180.0) < 1.0
+
+
+def test_a_single_huge_step_is_still_the_same_motion():
+    """The whole of a twenty second leg handed over at once."""
+    from ocu.core.terrain import CELL_SIZE_M
+
+    def drive(step_s):
+        director, rover = FlightDirector(), MovingRover()
+        perception = open_ground(extent=80)
+        director.navigate_to(18.0, 18.0, lane_from=(0.0, 0.0))
+        director.replan(perception, CELL_SIZE_M)
+        for _ in range(int(20.0 / step_s)):
+            director.tick(step_s, rover.x, rover.y, rover.heading)
+        return director.rover_body.x, director.rover_body.y
+
+    fine, huge = drive(0.1), drive(20.0)
+    assert math.hypot(huge[0] - fine[0], huge[1] - fine[1]) < 0.05

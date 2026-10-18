@@ -161,16 +161,45 @@ def test_oversized_formation_shrinks_without_distorting():
     assert abs(aspect(small) - aspect(huge)) < 1e-6
 
 
-def test_altitudes_are_deconflicted_between_slots():
-    slots = targets("line", altitude=25.0)
-    altitudes = sorted(t.z for t in slots)
-    assert len(set(altitudes)) == 3, "stacked aircraft share one altitude"
+def test_every_aircraft_flies_the_altitude_the_operator_asked_for():
+    """Ask for 26 m and all three read 26 m. A formation is already separated
+    on the ground plane by its own spacing, so stacking it in height as well
+    buys nothing and costs the operator the number they actually set."""
+    for pattern in ("vee", "line", "column"):
+        slots = targets(pattern, spacing=12.0, altitude=26.0)
+        assert [t.z for t in slots] == [26.0, 26.0, 26.0], pattern
+
+
+def test_a_formation_too_tight_to_separate_itself_is_layered_instead():
+    """The exception, and the reason the layering exists: slots closer than
+    the minimum separation in plan are spread in height so that two aircraft
+    pushed off station cannot arrive in the same place."""
+    from ocu.core.constants import MIN_AIRCRAFT_SEPARATION_M
+
+    slots = targets("column", spacing=0.5, altitude=25.0)  # clamped, then squeezed
+    plan_gaps = [
+        math.hypot(a.x - b.x, a.y - b.y)
+        for i, a in enumerate(slots)
+        for b in slots[i + 1 :]
+    ]
+    if min(plan_gaps) < MIN_AIRCRAFT_SEPARATION_M:
+        assert len(set(t.z for t in slots)) == 3, "nothing separates them, so height must"
+        assert all(t.z >= 1.0 for t in slots)
+
+
+def test_a_layered_formation_is_still_centred_on_the_commanded_altitude():
+    import ocu.core.formation as formation
+
+    altitudes = formation._slot_altitudes(30.0, [(0.0, 0.0), (0.5, 0.0), (1.0, 0.0)])
+    assert len(set(altitudes)) == 3
+    assert abs(sum(altitudes) / 3 - 30.0) < 1e-6
+
+
+def test_no_slot_is_ever_below_a_safe_height():
+    import ocu.core.formation as formation
+
+    altitudes = formation._slot_altitudes(1.0, [(0.0, 0.0), (0.5, 0.0), (1.0, 0.0)])
     assert all(z >= 1.0 for z in altitudes)
-
-
-def test_commanded_altitude_is_the_middle_of_the_stack():
-    slots = targets("vee", altitude=30.0)
-    assert abs(sum(t.z for t in slots) / 3 - 30.0) < 1e-6
 
 
 # --- heading and inputs ---------------------------------------------------

@@ -89,6 +89,7 @@ GROUND_RGB = {
     Terrain.SCRUB: (101, 108, 62),
     Terrain.ROCK: (124, 122, 116),
     Terrain.TREE: (74, 84, 52),  # leaf litter beneath a canopy
+    Terrain.POTHOLE: (74, 62, 50),  # bare earth in shadow, down inside it
 }
 CANOPY_RGB = (48, 78, 42)
 TRUNK_RGB = (62, 47, 34)

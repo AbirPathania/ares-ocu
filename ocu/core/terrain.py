@@ -50,6 +50,7 @@ class Terrain(IntEnum):
     SCRUB = 3  # low vegetation, traversable but slow
     ROCK = 4  # impassable, and it blocks the beam
     TREE = 5  # impassable, and it blocks the beam
+    POTHOLE = 6  # a hole: impassable, but you can see straight over it
 
 
 _TERRAIN_BY_VALUE = {int(t): t for t in Terrain}
@@ -57,8 +58,12 @@ _TERRAIN_BY_VALUE = {int(t): t for t in Terrain}
 #: Classes that stop a LiDAR ray.
 OCCLUDING = frozenset({Terrain.ROCK, Terrain.TREE})
 
-#: Classes a rover cannot drive through.
-IMPASSABLE = OCCLUDING
+#: Classes a rover cannot drive through. A hole stops the wheels without
+#: stopping the beam, which is why these two sets are not the same: a
+#: scanning LiDAR looks straight over a pothole and sees the ground beyond.
+#: Negative obstacles are found by looking down, not across, which is what
+#: the drive stereo pair is for (see lidar.NEGATIVE_OBSTACLE_RANGE_M).
+IMPASSABLE = OCCLUDING | frozenset({Terrain.POTHOLE})
 
 #: Relative cost of crossing each traversable class, for the planner.
 TRAVERSE_COST = {
@@ -86,8 +91,8 @@ ROCK_SLOPE = 0.46  # slope at which scree is as thick as it gets
 # large (lognormal in radius), rarely round, partly buried, and far thicker
 # where the ground is steep enough to shed them.
 BOULDER_MEDIAN_RADIUS_M = 0.5
-BOULDER_RADIUS_SIGMA = 0.55
-BOULDER_RADIUS_RANGE_M = (0.16, 2.4)
+BOULDER_RADIUS_SIGMA = 0.70
+BOULDER_RADIUS_RANGE_M = (0.16, 3.6)
 BOULDER_FLAT_DENSITY = 0.0042  # per square metre on level ground
 BOULDER_SCREE_DENSITY = 0.040  # extra per square metre where it is steepest
 SCREE_ONSET_SLOPE = 0.16
@@ -98,6 +103,19 @@ BOULDER_CLEAR_RADIUS_M = 8.0  # around the deploy point
 #: How tall a boulder has to stand before a wheeled vehicle treats it as an
 #: obstacle. Lower than this is stone, which is rendered but driven over.
 ROCK_IMPASSABLE_HEIGHT_M = 0.30
+
+# Potholes. Washouts and collapses on and beside a worn track: wider than a
+# wheel and deep enough to drop one in, which for a six-wheel platform is a
+# stop rather than a bump. They gather where water runs, so they follow the
+# track and the damper ground rather than falling evenly.
+POTHOLE_RADIUS_RANGE_M = (0.45, 1.6)
+POTHOLE_DEPTH_RANGE_M = (0.22, 0.75)
+POTHOLE_DENSITY_OPEN = 0.008  # per square metre away from a track
+POTHOLE_DENSITY_TRACK = 0.030  # per square metre on one
+POTHOLE_CLEAR_RADIUS_M = 7.0  # around the deploy point
+
+#: Depth at which a hole stops being a bump and becomes an obstacle.
+POTHOLE_IMPASSABLE_DEPTH_M = 0.25
 
 #: Height given to a cell painted ROCK by hand, as tests and scenarios do.
 PAINTED_ROCK_HEIGHT_M = 0.9
@@ -166,6 +184,10 @@ class TerrainWorld:
     #: source of truth for rock: the ROCK class is where this exceeds
     #: ROCK_IMPASSABLE_HEIGHT_M, and the cameras draw the domes themselves.
     _rock_height: np.ndarray = field(default=None, repr=False)
+    #: Depth of any hole in each cell, in metres. Like rock height, this is
+    #: the source of truth: the POTHOLE class is where it exceeds
+    #: POTHOLE_IMPASSABLE_DEPTH_M, and the cameras render the dip itself.
+    _pothole_depth: np.ndarray = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._extent = int(self.half_extent_m / self.cell_size_m)
@@ -175,6 +197,9 @@ class TerrainWorld:
         if self._rock_height is None:
             self._rock_height = np.zeros((self._span, self._span), dtype=np.float32)
             self._rock_height[self._grid == int(Terrain.ROCK)] = PAINTED_ROCK_HEIGHT_M
+        if self._pothole_depth is None:
+            self._pothole_depth = np.zeros((self._span, self._span), dtype=np.float32)
+            self._pothole_depth[self._grid == int(Terrain.POTHOLE)] = POTHOLE_IMPASSABLE_DEPTH_M
 
     @classmethod
     def blank(cls, half_extent_m: float = WORLD_HALF_EXTENT_M, cell_size_m: float = CELL_SIZE_M):
@@ -187,6 +212,7 @@ class TerrainWorld:
             _grid=np.full((span, span), int(Terrain.GROUND), dtype=np.uint8),
             _elevation=np.zeros((span, span), dtype=np.float64),
             _rock_height=np.zeros((span, span), dtype=np.float32),
+            _pothole_depth=np.zeros((span, span), dtype=np.float32),
         )
 
     # --- frame conversion -------------------------------------------------
@@ -215,12 +241,23 @@ class TerrainWorld:
             # painted rock stands up, so the two views of rock never disagree.
             if kind == Terrain.ROCK:
                 self._rock_height[index] = max(float(self._rock_height[index]), PAINTED_ROCK_HEIGHT_M)
+                self._pothole_depth[index] = 0.0
+            elif kind == Terrain.POTHOLE:
+                self._pothole_depth[index] = max(
+                    float(self._pothole_depth[index]), POTHOLE_IMPASSABLE_DEPTH_M
+                )
+                self._rock_height[index] = 0.0
             else:
                 self._rock_height[index] = 0.0
+                self._pothole_depth[index] = 0.0
 
     def rock_height_at(self, cell: tuple[int, int]) -> float:
         index = self._index(cell)
         return float(self._rock_height[index]) if index else 0.0
+
+    def pothole_depth_at(self, cell: tuple[int, int]) -> float:
+        index = self._index(cell)
+        return float(self._pothole_depth[index]) if index else 0.0
 
     def classify(self, x: float, y: float) -> Terrain:
         return self.at(self.to_cell(x, y))
@@ -272,8 +309,17 @@ class TerrainWorld:
         self._elevation = elevation
         self._grid = grid
         self._rock_height = rock_height
+        # Empty for now: carving the track writes cells, and set_cell keeps
+        # the hazard fields in step with the classes.
+        self._pothole_depth = np.zeros((span, span), dtype=np.float32)
 
         self._carve_track(slope, moisture)
+        self._pothole_depth = self._scatter_potholes(moisture)
+        deep = self._pothole_depth >= POTHOLE_IMPASSABLE_DEPTH_M
+        grid[deep & (grid != int(Terrain.ROCK)) & (grid != int(Terrain.TREE))] = int(Terrain.POTHOLE)
+        # A hole is a hole in the ground, so the ground goes down with it and
+        # the cameras show the dip rather than a flat patch of a new colour.
+        self._elevation = self._elevation - self._pothole_depth
         self._clear_deploy_point()
 
     def _scatter_boulders(
@@ -317,7 +363,7 @@ class TerrainWorld:
                     (
                         ox + rng.normal(0.0, 1.8),
                         oy + rng.normal(0.0, 1.8),
-                        rng.uniform(1.0, 2.6),
+                        rng.uniform(1.4, 3.6),
                     )
                 )
 
@@ -332,6 +378,65 @@ class TerrainWorld:
             top = r * rng.uniform(0.5, 0.9)  # partly buried: lower than it is wide
             self._raise_dome(height, x, y, r, r * aspect, theta, top)
         return height
+
+    def _scatter_potholes(self, moisture: np.ndarray) -> np.ndarray:
+        """Washouts, thicker along the track where water runs and wheels pass."""
+        rng = np.random.default_rng(self.seed ^ 0x9014E)
+        cell = self.cell_size_m
+        on_track = self._grid == int(Terrain.TRACK)
+        wet = np.clip(0.5 + moisture, 0.0, 2.0)
+        density = np.where(on_track, POTHOLE_DENSITY_TRACK, POTHOLE_DENSITY_OPEN) * wet
+
+        counts = rng.poisson(density * cell * cell)
+        ids = np.repeat(np.arange(counts.size), counts.ravel())
+        ix, iy = np.unravel_index(ids, counts.shape)
+        xs = (ix + rng.uniform(0.0, 1.0, ix.size) - self._extent) * cell
+        ys = (iy + rng.uniform(0.0, 1.0, iy.size) - self._extent) * cell
+        radii = rng.uniform(*POTHOLE_RADIUS_RANGE_M, size=ix.size)
+        depths = rng.uniform(*POTHOLE_DEPTH_RANGE_M, size=ix.size)
+
+        depth_field = np.zeros((self._span, self._span), dtype=np.float32)
+        for x, y, radius, depth in zip(xs, ys, radii, depths):
+            if math.hypot(x, y) < POTHOLE_CLEAR_RADIUS_M:
+                continue
+            self._sink_dish(depth_field, x, y, radius, depth)
+        return depth_field
+
+    def cut_washout(self, x: float, y: float, radius_m: float, depth_m: float) -> None:
+        """Cut one washout into the ground at a world position.
+
+        Scenario setup: the generated terrain decides where water has cut
+        the ground, and this puts one somewhere specific on top of that.
+        The hole itself is no different from a generated one.
+        """
+        self._sink_dish(self._pothole_depth, x, y, radius_m, depth_m)
+        before = self._pothole_depth >= POTHOLE_IMPASSABLE_DEPTH_M
+        fresh = before & (self._grid != int(Terrain.ROCK)) & (self._grid != int(Terrain.TREE))
+        newly = fresh & (self._grid != int(Terrain.POTHOLE))
+        self._grid[fresh] = int(Terrain.POTHOLE)
+        self._elevation[newly] -= self._pothole_depth[newly]
+
+    def _sink_dish(
+        self, depth: np.ndarray, x: float, y: float, radius: float, deepest: float
+    ) -> None:
+        """Sink one dish-shaped hollow into the depth field, deepest at its
+        centre and feathering to nothing at the rim."""
+        cell = self.cell_size_m
+        reach = int(math.ceil(radius / cell)) + 1
+        cx = int(math.floor(x / cell)) + self._extent
+        cy = int(math.floor(y / cell)) + self._extent
+        x0, x1 = max(cx - reach, 0), min(cx + reach + 1, self._span)
+        y0, y1 = max(cy - reach, 0), min(cy + reach + 1, self._span)
+        if x0 >= x1 or y0 >= y1:
+            return
+
+        gx = (np.arange(x0, x1) - self._extent + 0.5) * cell - x
+        gy = (np.arange(y0, y1) - self._extent + 0.5) * cell - y
+        dx, dy = np.meshgrid(gx, gy, indexing="ij")
+        inside = 1.0 - (dx * dx + dy * dy) / (radius * radius)
+        dish = deepest * np.clip(inside, 0.0, None)
+        window = depth[x0:x1, y0:y1]
+        np.maximum(window, dish.astype(np.float32), out=window)
 
     def _raise_dome(
         self,
@@ -431,7 +536,8 @@ class PerceptionMap:
     epoch: int = 0
 
     def observe(self, cell: tuple[int, int], kind: Terrain) -> bool:
-        if self._observed.get(cell) == kind:
+        known = self._observed.get(cell)
+        if known == kind or not self._supersedes(known, kind):
             return False
         self._observed[cell] = kind
         self._journal.append((cell, kind))
@@ -460,12 +566,27 @@ class PerceptionMap:
         for x, y, value in zip(xs.tolist(), ys.tolist(), kinds[first].tolist()):
             kind = _TERRAIN_BY_VALUE[value]
             cell = (x, y)
-            if observed.get(cell) is kind:
+            known = observed.get(cell)
+            if known is kind or not self._supersedes(known, kind):
                 continue
             observed[cell] = kind
             journal.append((cell, kind))
             changed += 1
         return changed
+
+    @staticmethod
+    def _supersedes(known: Terrain | None, fresh: Terrain) -> bool:
+        """Whether a new reading should replace what is already mapped.
+
+        Almost always yes: the ground is what the sensor last said it was.
+        The exception is a hole already mapped. A scanning LiDAR can only
+        resolve a negative obstacle close up; from further off it passes over
+        the hole and returns off the ground beyond, reporting open ground
+        perfectly honestly. That reading is not evidence the hole is gone, and
+        letting it overwrite one means the rover forgets every hazard the
+        moment it drives on -- and then drives back into it.
+        """
+        return not (known is Terrain.POTHOLE and fresh is Terrain.GROUND)
 
     def at(self, cell: tuple[int, int]) -> Terrain:
         return self._observed.get(cell, Terrain.UNKNOWN)
