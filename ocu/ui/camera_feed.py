@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 LINK_COLORS = {
     "CONNECTED": QColor("#4A9FD4"),
@@ -39,8 +39,12 @@ class SimulatedCameraFeed(QWidget):
         self._downlink_reason = ""
         self._frame: QImage | None = None
 
+        # A 16:9 feed wants height, and the left column has it: the roster
+        # below is a fixed stack of four cards, so whatever is left belongs
+        # to the feeds rather than to empty background.
         self.setMinimumHeight(104)
-        self.setMaximumHeight(124)
+        self.setMaximumHeight(220)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
     def set_active(self, active: bool) -> None:
         self._active = active

@@ -139,3 +139,89 @@ def test_the_legend_and_its_numbers_do_not_overlap(app):
     assert first_stat_row > last_key_row + row_height
     assert first_stat_row + 4 * 12.0 + 13 <= view.height()
     assert top - 16 > 0
+
+
+# --- the display runs faster than the simulation ----------------------------------
+
+
+def test_the_drawn_icon_eases_toward_the_reported_position(app):
+    """The simulation advances ten times a second. Drawing an aircraft only
+    when it does makes it jump across the map; the display runs at sixty and
+    eases, so a step in the simulation is a glide on the screen."""
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.set_unit_pose("rover", 0.0, 0.0, 0.0, 0.0)
+    view.set_unit_pose("rover", 10.0, 0.0, 0.0, 0.0)
+
+    view._advance_shown_poses(0.016)
+    part_way = view._drawn_pose("rover")["x"]
+    assert 0.0 < part_way < 10.0, "a frame covers part of the step, not all of it"
+
+    for _ in range(60):
+        view._advance_shown_poses(0.016)
+    assert abs(view._drawn_pose("rover")["x"] - 10.0) < 0.01, "and it arrives"
+
+
+def test_easing_never_changes_what_the_simulation_said(app):
+    """The drawn position is a presentation detail. Anything that asks where
+    a unit is gets the simulation's answer."""
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.set_unit_pose("rover", 0.0, 0.0, 0.0, 0.0)
+    view.set_unit_pose("rover", 7.0, -3.0, 0.0, 90.0)
+    view._advance_shown_poses(0.016)
+    assert view._units["rover"] == {"x": 7.0, "y": -3.0, "z": 0.0, "heading": 90.0}
+
+
+def test_the_easing_does_not_depend_on_how_often_it_runs(app):
+    """Frame rate is not something the operator chose, so it must not change
+    where anything appears to be."""
+    from ocu.ui.map_view import MapView
+
+    def after(step_s, total_s):
+        view = MapView()
+        view.set_unit_pose("rover", 0.0, 0.0, 0.0, 0.0)
+        view.set_unit_pose("rover", 10.0, 0.0, 0.0, 0.0)
+        for _ in range(int(round(total_s / step_s))):
+            view._advance_shown_poses(step_s)
+        return view._drawn_pose("rover")["x"]
+
+    assert abs(after(0.016, 0.096) - after(0.004, 0.096)) < 0.05
+
+
+def test_a_heading_change_takes_the_short_way_round(app):
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.set_unit_pose("rover", 0.0, 0.0, 0.0, 350.0)
+    view.set_unit_pose("rover", 0.0, 0.0, 0.0, 10.0)
+    for _ in range(3):
+        view._advance_shown_poses(0.016)
+    heading = view._drawn_pose("rover")["heading"]
+    assert heading > 345.0 or heading < 25.0, f"swept the long way through {heading:.0f}"
+
+
+def test_docking_jumps_rather_than_flying_the_icon_home(app):
+    """A unit that docks is on the rover. Easing across that gap draws it
+    crossing ground it never crossed."""
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.set_unit_pose("tricopter-1", 40.0, 40.0, 20.0, 0.0)
+    view._advance_shown_poses(0.5)
+    view.set_unit_docked("tricopter-1", True)
+    view.set_unit_pose("tricopter-1", 0.0, 0.0, 0.0, 0.0)
+    view._advance_shown_poses(0.016)
+    assert view._drawn_pose("tricopter-1")["x"] == 0.0
+
+
+def test_a_unit_appears_where_it_is_first_reported(app):
+    """No glide in from the origin the first time something is seen."""
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.set_unit_pose("tricopter-2", 25.0, -14.0, 18.0, 200.0)
+    assert view._drawn_pose("tricopter-2")["x"] == 25.0
+    assert view._drawn_pose("tricopter-2")["y"] == -14.0

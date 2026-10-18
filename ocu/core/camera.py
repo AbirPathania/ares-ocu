@@ -99,6 +99,18 @@ SCRUB_RGB = (96, 106, 58)
 SKY_ZENITH_RGB = (96, 138, 186)
 HAZE_RGB = (186, 200, 208)
 
+#: How finely the scene is sampled, and what that costs.
+#:
+#: AZIMUTH_OVERSAMPLE: ray bearings per pixel column. Above one, neighbouring
+#: pixels looking along slightly different bearings get their own ray.
+#: NEAR_STEP_CELLS / FAR_STEP_FRACTION: ground sampled about a cell apart
+#: close in, then spreading geometrically, because a half-metre step at sixty
+#: metres is far finer than a pixel is wide. These set the cost of a frame
+#: almost entirely: the scene is sampled rays x steps times.
+AZIMUTH_OVERSAMPLE = 0.85
+NEAR_STEP_CELLS = 1.0
+FAR_STEP_FRACTION = 0.030
+
 #: Atmospheric extinction length. Distant ground fades into haze, which is
 #: what gives a view its depth and hides the edge of the rendered range.
 HAZE_LENGTH_M = 170.0
@@ -402,7 +414,7 @@ class CameraRig:
 
         # Azimuth is sampled finer than the pixel grid, so adjacent pixels
         # that look along slightly different azimuths do not share a ray.
-        bins = max(int(width * 1.3), 8)
+        bins = max(int(width * AZIMUTH_OVERSAMPLE), 8)
         lo, hi = float(azimuth.min()), float(azimuth.max())
         edges = np.linspace(lo, hi, bins)
         spacing = (hi - lo) / max(bins - 1, 1)
@@ -435,7 +447,7 @@ class CameraRig:
         depths = []
         distance = 0.6
         while distance < max_range_m:
-            distance += max(self._cell * 0.8, distance * 0.018)
+            distance += max(self._cell * NEAR_STEP_CELLS, distance * FAR_STEP_FRACTION)
             depths.append(distance)
         depth = np.array(depths, dtype=np.float32)[:, None]  # (S, 1)
         step = np.diff(depth[:, 0], prepend=depth[0, 0] - self._cell)[:, None]
@@ -459,9 +471,28 @@ class CameraRig:
         reach = np.maximum.accumulate(angle_top, axis=0)  # (S, B)
         flat_bins = bin_of.ravel()
         flat_elev = elevation.ravel()
-        reached = reach[:, flat_bins] >= flat_elev[None, :]  # (S, H*W)
-        painted = reached.any(axis=0)
-        owner = reached.argmax(axis=0)
+
+        # That running maximum only ever rises, so the owning sample can be
+        # found by binary search rather than by testing every sample against
+        # every pixel. Each ray's samples are offset into one ascending array
+        # -- the offset is far wider than the range of an elevation, so the
+        # rays cannot interleave -- and the whole frame resolves in one
+        # searchsorted instead of a comparison per pixel per sample.
+        samples, rays = reach.shape
+        # Elevations are angles, so a separation of four radians is already
+        # wider than any two can span. Done in double precision: the offset
+        # for a ray far across the frame is thousands of times larger than
+        # the angles being compared, and in single precision that gap
+        # swallows them.
+        separation = 4.0
+        offsets = np.arange(rays, dtype=np.float64) * separation
+        ordered = (reach.astype(np.float64) + offsets[None, :]).T.ravel()
+        found = np.searchsorted(
+            ordered, flat_elev.astype(np.float64) + flat_bins * separation
+        )
+        owner = found - flat_bins * samples
+        painted = owner < samples
+        owner = np.clip(owner, 0, samples - 1)
 
         pix = np.nonzero(painted)[0]
         k = owner[pix]

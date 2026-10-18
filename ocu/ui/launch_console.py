@@ -40,6 +40,7 @@ from ocu.core.constants import (
 )
 from ocu.core.formation import Target, compute_formation_targets
 from ocu.core.launch_sequencer import LaunchSequencer, LaunchStage
+from ocu.ui.labels import short_label
 from ocu.ui.widgets import HoldToConfirmButton
 
 TICK_MS = 100
@@ -52,12 +53,6 @@ PATTERN_PURPOSE = {
     "line": "wide sweep",
     "column": "tight trail",
 }
-
-
-def short_label(unit_id: str) -> str:
-    if unit_id.startswith("tricopter-"):
-        return "TRI-" + unit_id.split("-")[-1]
-    return unit_id.upper()
 
 
 class LaunchConsole(QWidget):

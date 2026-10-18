@@ -681,3 +681,69 @@ against 2.3 s and quadruples the costmap and planner work for ground detail
 finer than the rover is wide (1.8 m). The resolution that matters for
 navigation is already there; what was missing was pixels where the operator
 actually looks.
+
+## The display runs at its own rate
+
+**Drawing was tied to the simulation.** The simulation advances ten times a
+second and the map was drawn when it did, so an aircraft crossing the map
+moved in five-pixel steps. The display now runs at sixty and eases each icon
+toward wherever the simulation last put it (`POSE_SMOOTHING_S`). The
+simulation is untouched: what moves is only the position an icon is drawn at,
+and anything that asks where a unit *is* gets the simulation's answer. A
+docking or a reset snaps instead, because easing across a teleport draws a
+unit crossing ground it never crossed.
+
+**A frame cost 33 ms, which is thirty hertz at best.** Three things were being
+redone every frame that had not changed:
+
+- The newest scan's returns, drawn point by point: 23 ms of the 33. They do
+  not move once measured, so they are rasterised once into a layer and the
+  decay is applied to the layer.
+- The accumulated cloud, held at 14 px/m and scaled down to the viewport
+  every frame. Scaled once per scan now.
+- The grid, a few hundred lines and labels that only move when the view does.
+
+A frame is now 6.0 ms, about a third of a core at sixty hertz.
+
+**Camera frames go where the operator is looking.** A tile costs about 20 ms,
+so four live feeds cannot all be current. The selected tile takes every other
+turn (about 8 Hz) and the rest share the remainder, because an even split
+would make the one feed being watched as slow as the three that are not.
+
+**Occlusion resolves by binary search.** Each pixel was tested against every
+sample along its ray, which is steps x pixels per frame and scales with tile
+area, so making the tiles bigger made it worse. The running maximum of the
+sample tops only ever rises, so the owning sample can be found by
+searchsorted instead: rays are offset into one ascending array and the whole
+frame resolves in one call. 31 ms to 19 ms at the larger tile size.
+
+That offset has to be done in double precision, which the tests caught. In
+single precision the offset for a ray far across the frame is thousands of
+times larger than the angles being compared, and the gap between
+representable values swallows them: four tests failed with a handful of
+pixels leaking through a ridge.
+
+## Layout
+
+**A four pixel baseline** (`theme.UNIT`), so the rhythm of the layout is
+decided once rather than argued out again in each panel. Panels that each
+chose their own padding are what make an interface look assembled rather than
+designed.
+
+**The camera tiles take the column's slack.** The roster below them is a fixed
+stack of four cards, so a trailing stretch left a third of the column as empty
+background. The tiles went from 104 px to 149 px and render at their own
+device pixels.
+
+**The log reads like a log.** A confidence climbing on one buried object was
+five lines of it, which pushes everything else off the visible log -- the one
+place a missed alert can still be found. An entry now carries the subject it
+is about, and a fresh report on the subject already at the bottom rewrites
+that line. Lines carry a severity, which is the only thing that colours them,
+and the list is bounded because the display is meant to run for a shift.
+
+**One table of names.** `ui/labels.py`. The sensor abbreviations lived in the
+threat panel and the call signs in the launch console, which is how an
+abbreviation comes to mean one thing in one place and another elsewhere: the
+log was cutting raw sensor names to three letters and showing PUL for the
+pulse induction array.

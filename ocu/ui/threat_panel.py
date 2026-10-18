@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWi
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD
 from ocu.core.mesh_state import voxel_key
 from ocu.ui.icons import draw_threat_glyph
+from ocu.ui.labels import sensor_list
 
 CARD_HEIGHT = 64
 
@@ -29,17 +30,6 @@ STATUS_COLORS = {
     "CONFIRMED": QColor("#C04438"),
     "CLEARED": QColor("#4F5B68"),
 }
-
-SENSOR_ABBR = {
-    "gpr": "GPR",
-    "pulse_induction": "PI",
-    "magnetic_gradiometer": "MAG",
-    "saw_voc": "VOC",
-    "thermal": "THRM",
-    "optical": "OPT",
-    "fused": "FUSE",
-}
-
 
 def confidence_color(confidence: float) -> QColor:
     if confidence >= ALERT_CONFIDENCE_THRESHOLD:
@@ -147,7 +137,7 @@ class ThreatCard(QWidget):
             f"{confidence:.2f}",
         )
 
-        sensors = " ".join(SENSOR_ABBR.get(s, s.upper()[:4]) for s in self.threat.get("sensors", []))
+        sensors = sensor_list(self.threat.get("sensors", []))
         painter.setPen(QPen(QColor("#7B8794")))
         painter.setFont(QFont("Menlo", 8))
         painter.drawText(

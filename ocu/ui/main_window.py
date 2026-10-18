@@ -66,8 +66,9 @@ from ocu.ui.camera_feed import SimulatedCameraFeed
 from ocu.ui.context_panel import ContextPanel
 from ocu.ui.event_log import EventLog
 from ocu.ui.fleet_roster import FleetRoster
-from ocu.ui.launch_console import short_label
+from ocu.ui.labels import sensor_list, short_label
 from ocu.ui.map_view import MapView
+from ocu.ui.theme import GUTTER, PANEL_PAD, SECTION_GAP
 from ocu.ui.widgets import make_styled_combo
 from ocu.ui.threat_panel import ThreatPanel
 
@@ -102,9 +103,12 @@ AIRCRAFT_TASK = {
     "DOCKING": "DOCKING",
 }
 
-#: Interval between camera frames. One tile is rendered per tick, so with
-#: four units each tile refreshes at about 1000 / (4 * this) Hz.
-CAMERA_TICK_MS = 85
+#: Interval between camera frames. One tile is rendered per tick, because a
+#: frame costs about 20 ms and rendering four of them together would stall
+#: the display every time it happened. The tile the operator has selected
+#: takes every other turn: they are watching one feed, and an even share
+#: would make that one as slow as the three they are not watching.
+CAMERA_TICK_MS = 60
 
 
 
@@ -249,22 +253,25 @@ class MainWindow(QMainWindow):
     def _build_left_column(self) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(6, 4, 4, 4)
-        layout.setSpacing(3)
+        layout.setContentsMargins(PANEL_PAD, PANEL_PAD, GUTTER, PANEL_PAD)
+        layout.setSpacing(GUTTER)
 
         feeds_label = QLabel("CAMERA FEEDS")
         feeds_label.setObjectName("sectionLabel")
         layout.addWidget(feeds_label)
 
         feeds_column = QVBoxLayout()
-        feeds_column.setSpacing(3)
+        feeds_column.setSpacing(GUTTER)
         self.camera_feeds: dict[str, SimulatedCameraFeed] = {}
         for unit_id in ALL_UNIT_IDS:
             feed = SimulatedCameraFeed(unit_id, short_label(unit_id))
             self.camera_feeds[unit_id] = feed
-            feeds_column.addWidget(feed)
+            feeds_column.addWidget(feed, stretch=1)
         self.camera_feeds["rover"].set_active(True)
-        layout.addLayout(feeds_column)
+        # The roster below is a fixed stack of four cards, so the slack in
+        # this column belongs to the feeds. A trailing stretch would instead
+        # leave a third of the column as empty background.
+        layout.addLayout(feeds_column, stretch=1)
 
         roster_label = QLabel("FLEET")
         roster_label.setObjectName("sectionLabel")
@@ -272,14 +279,13 @@ class MainWindow(QMainWindow):
 
         self.fleet_roster = FleetRoster()
         layout.addWidget(self.fleet_roster)
-        layout.addStretch(1)
         return container
 
     def _build_right_column(self) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(4, 4, 6, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(GUTTER, PANEL_PAD, PANEL_PAD, PANEL_PAD)
+        layout.setSpacing(GUTTER)
 
         self.threat_panel = ThreatPanel()
         layout.addWidget(self.threat_panel, stretch=1)
@@ -293,8 +299,8 @@ class MainWindow(QMainWindow):
         bar = QWidget()
         bar.setObjectName("topBar")
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(10, 2, 10, 2)
-        layout.setSpacing(12)
+        layout.setContentsMargins(SECTION_GAP, GUTTER, SECTION_GAP, GUTTER)
+        layout.setSpacing(SECTION_GAP)
 
         self.clock_label = QLabel("00:00")
         self.clock_label.setObjectName("missionClock")
@@ -702,6 +708,7 @@ class MainWindow(QMainWindow):
             self.mission_clock.clock_s,
             f"Rover recommends scouts: {hidden:.0%} of the ground ahead is hidden, "
             f"best bearing {bearing:.0f}\u00b0",
+            level="caution",
         )
 
     def _check_geofence(self) -> None:
@@ -731,8 +738,14 @@ class MainWindow(QMainWindow):
         ]
         if not live:
             return
-        self._camera_turn = (self._camera_turn + 1) % len(live)
-        unit_id = live[self._camera_turn]
+
+        self._camera_turn += 1
+        watched = self.selected_unit_id if self.selected_unit_id in live else None
+        if watched is not None and self._camera_turn % 2 == 0:
+            unit_id = watched
+        else:
+            others = [uid for uid in live if uid != watched] or live
+            unit_id = others[(self._camera_turn // 2) % len(others)]
 
         feed = self.camera_feeds[unit_id]
         width, height = feed.render_size()
@@ -823,6 +836,7 @@ class MainWindow(QMainWindow):
                 self.event_log.log(
                     self.mission_clock.clock_s,
                     "Route blocked by newly mapped terrain, rerouted",
+                    level="caution",
                 )
             self._last_replan_waypoint = self._waypoint_index
         if self._comms.telemetry:
@@ -1099,6 +1113,7 @@ class MainWindow(QMainWindow):
             self.event_log.log(
                 self.mission_clock.clock_s,
                 f"{lane} point blocked with no clearance, skipping to the next",
+                level="caution",
             )
             self._waypoint_index += 1
             self._begin_autonomous_sweep()
@@ -1108,6 +1123,7 @@ class MainWindow(QMainWindow):
                 self.event_log.log(
                     self.mission_clock.clock_s,
                     f"Lane sweep complete, {self.perception.coverage_m2():,.0f} m² mapped",
+                    level="good",
                 )
             self._begin_autonomous_sweep()
         elif event == "AT_BASE":
@@ -1167,6 +1183,7 @@ class MainWindow(QMainWindow):
         self.event_log.log(
             self.mission_clock.clock_s,
             f"Formation on station: {', '.join(short_label(i) for i in tricopter_ids)}",
+            level="good",
         )
 
     def _ensure_director_owns(self, unit_id: str) -> bool:
@@ -1227,12 +1244,18 @@ class MainWindow(QMainWindow):
 
     def _on_cut_link(self) -> None:
         self._apply_link_cut(TRICOPTER_IDS)
-        self.event_log.log(self.mission_clock.clock_s, "Operator cut link: rover and aircraft mesh disconnected")
+        self.event_log.log(
+            self.mission_clock.clock_s,
+            "Operator cut link: rover and aircraft mesh disconnected",
+            level="caution",
+        )
 
     def _on_restore_link(self) -> None:
         delta = self._apply_link_restore(TRICOPTER_IDS)
         self.event_log.log(
-            self.mission_clock.clock_s, f"Operator restored link: {delta} observation(s) crossed to reconcile"
+            self.mission_clock.clock_s,
+            f"Operator restored link: {delta} observation(s) crossed to reconcile",
+            level="good",
         )
 
     def _check_lost_comms_autonomous(self) -> None:
@@ -1276,6 +1299,7 @@ class MainWindow(QMainWindow):
 
     def _on_detection(self, detection: dict) -> None:
         x, y, confidence = detection["x"], detection["y"], detection["confidence"]
+        threat_label = str(detection.get("type", "unknown")).replace("_", " ").upper()
         source = detection.get("source", "rover")
         source_id = detection.get("source_id", source)
         observation = VoxelObservation(
@@ -1298,14 +1322,19 @@ class MainWindow(QMainWindow):
             self.context_panel.rover_panel.sensors.register_hit(detection.get("sensor", ""))
         self.event_log.log(
             self.mission_clock.clock_s,
-            f"Detection: {detection.get('sensor')} at ({x:.0f}, {y:.0f}), confidence {confidence:.2f}",
+            f"{threat_label} at ({x:.0f}, {y:.0f}) \u00b7 {confidence:.2f} \u00b7 "
+            + sensor_list(detection.get("sensors", [])),
+            key=f"contact:{round(x, 1)}:{round(y, 1)}",
+            level="caution" if confidence >= 0.5 else "info",
         )
         key = (round(x, 2), round(y, 2))
         if confidence >= ALERT_CONFIDENCE_THRESHOLD and key not in self._escalated:
             self._escalated.add(key)
             self.alert_banner.show_alert(detection)
             self.event_log.log(
-                self.mission_clock.clock_s, f"ALERT escalated: confidence {confidence:.2f} at ({x:.0f}, {y:.0f})"
+                self.mission_clock.clock_s,
+                f"ALERT \u00b7 {threat_label} at ({x:.0f}, {y:.0f}) \u00b7 {confidence:.2f}, operator decision required",
+                level="threat",
             )
 
     def _on_alert_confirmed(self, detection: dict) -> None:
@@ -1315,19 +1344,23 @@ class MainWindow(QMainWindow):
         self.event_log.log(
             self.mission_clock.clock_s,
             f"Threat confirmed at ({detection['x']:.0f}, {detection['y']:.0f}); marked as exclusion zone",
+            level="threat",
         )
 
     def _on_alert_rejected(self, detection: dict) -> None:
         self.alert_banner.dismiss_for(detection)
         self.threat_panel.set_status(detection["x"], detection["y"], "CLEARED")
         self.event_log.log(
-            self.mission_clock.clock_s, f"Alert rejected at ({detection['x']:.0f}, {detection['y']:.0f})"
+            self.mission_clock.clock_s,
+            f"Contact cleared as inert at ({detection['x']:.0f}, {detection['y']:.0f})",
+            level="good",
         )
 
     def _on_alert_timed_out(self, detection: dict) -> None:
         self.event_log.log(
             self.mission_clock.clock_s,
             f"Alert timed out, unresolved, at ({detection['x']:.0f}, {detection['y']:.0f})",
+            level="caution",
         )
 
     # --- playback engine reflection ---

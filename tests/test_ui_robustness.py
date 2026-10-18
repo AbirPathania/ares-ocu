@@ -533,9 +533,9 @@ def _capture_log(window):
     messages = []
     original = window.event_log.log
 
-    def recording(clock_s, message):
+    def recording(clock_s, message, *args, **kwargs):
         messages.append(message)
-        original(clock_s, message)
+        original(clock_s, message, *args, **kwargs)
 
     window.event_log.log = recording
     return messages
@@ -1017,3 +1017,47 @@ def test_the_batteries_burn_on_mission_time_at_any_playback_speed(app):
     fast_used = 96.0 - fast.units["rover"].battery_pct
     assert slow_used > 0
     assert abs(slow_used - fast_used) < slow_used * 0.05
+
+
+# --- which feed gets the frames ---------------------------------------------------
+
+
+def _count_frames(window, ticks=40):
+    from collections import Counter
+
+    seen = Counter()
+    for unit_id, feed in window.camera_feeds.items():
+        feed.set_frame = (lambda uid: (lambda frame: seen.update([uid])))(unit_id)
+    for _ in range(ticks):
+        window._tick_cameras()
+    return seen
+
+
+def test_the_feed_the_operator_is_watching_gets_the_frames(app):
+    """A frame costs about twenty milliseconds, so they cannot all be live.
+    An even share would make the one feed being watched as slow as the three
+    that are not."""
+    window = MainWindow()
+    for uid in TRICOPTERS:
+        window._set_docked(uid, False)
+    window._select_unit("tricopter-2")
+
+    seen = _count_frames(window)
+    assert seen["tricopter-2"] >= sum(v for k, v in seen.items() if k != "tricopter-2")
+    assert all(seen[uid] > 0 for uid in seen), "the others still refresh"
+
+
+def test_every_live_feed_still_refreshes_when_the_rover_is_selected(app):
+    window = MainWindow()
+    for uid in TRICOPTERS:
+        window._set_docked(uid, False)
+    window._select_unit("rover")
+    seen = _count_frames(window)
+    assert set(seen) == {"rover", *TRICOPTERS}
+
+
+def test_only_live_units_are_rendered(app):
+    window = MainWindow()
+    window._select_unit("rover")
+    seen = _count_frames(window)
+    assert set(seen) == {"rover"}, "aircraft in the bay have no view to render"

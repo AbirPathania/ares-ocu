@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
     QPolygonF,
 )
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
@@ -78,7 +79,21 @@ for _terrain in Terrain:
         _TERRAIN_RGB[int(_terrain)] = (_dim.red(), _dim.green(), _dim.blue())
         _RETURN_RGB[int(_terrain)] = (_bright.red(), _bright.green(), _bright.blue())
 COMPASS_RADIUS_PX = 60.0
-RADAR_TICK_MS = 60
+#: Display refresh. The simulation advances ten times a second; drawing at
+#: that rate makes an aircraft crossing the map jump five pixels at a time.
+#: The display runs at sixty and eases each icon toward wherever the
+#: simulation last put it, so motion is continuous without the simulation
+#: having to be.
+#: Height set aside at the bottom of the map for the scale bar, so the
+#: legend above it is laid out clear of it.
+SCALE_BAR_RESERVED_PX = 48.0
+
+RENDER_TICK_MS = 16
+
+#: Time constant of that easing. Short enough that an icon is effectively on
+#: its reported position within a simulation tick, long enough to smooth the
+#: step between two of them.
+POSE_SMOOTHING_S = 0.055
 TERRAIN_SEED = 20260930
 BAY_SLOT_ORDER = ["tricopter-1", "tricopter-2", "tricopter-3"]
 
@@ -109,6 +124,13 @@ class MapView(QWidget):
         self.setMouseTracking(True)
 
         self._units: dict[str, dict] = {}
+        # Where each icon is actually drawn, eased toward _units. Separate,
+        # because the simulation's position is the one anything else reads.
+        self._shown: dict[str, dict] = {}
+        # Units whose next frame should jump rather than ease: a reset or a
+        # dock teleports, and easing across that draws a unit flying over
+        # ground it never crossed.
+        self._snap: set[str] = set()
         self._docked: dict[str, bool] = {uid: True for uid in BAY_SLOT_ORDER}
         self._trails: dict[str, list[tuple[float, float]]] = {}
         # Ground the detection array has actually passed over. Kept as runs
@@ -136,9 +158,21 @@ class MapView(QWidget):
         span = self._cloud_half_px * 2
         self._perception_image = QImage(span, span, QImage.Format_ARGB32_Premultiplied)
         self._perception_image.fill(QColor(0, 0, 0, 0))
+        self._cloud_dirty = True
         self._mapped_m2 = 0.0
         self._cloud_points = 0
         self._fresh_returns = None
+        self._fresh_layer: QPixmap | None = None
+        # Two more layers that only change when their contents do, not every
+        # frame: the grid (pan and size) and the accumulated cloud (a scan).
+        # Rebuilding either costs a few milliseconds, and at sixty frames a
+        # second that is most of the budget for something that did not move.
+        self._grid_layer: QPixmap | None = None
+        self._cloud_layer: QPixmap | None = None
+        self._cloud_layer_pan = QPointF(0.0, 0.0)
+        self._cloud_dirty = True
+        self._grid_layer_pan = QPointF(0.0, 0.0)
+        self._fresh_layer_pan = QPointF(0.0, 0.0)
         self._fresh_age = 0.0
         self._planned_path: list[tuple[float, float]] = []
         self._planned_goal: tuple[float, float] | None = None
@@ -162,7 +196,7 @@ class MapView(QWidget):
         self._terrain = self._generate_terrain()
         self._radar_angle = 0.0
         self._radar_timer = QTimer(self)
-        self._radar_timer.setInterval(RADAR_TICK_MS)
+        self._radar_timer.setInterval(RENDER_TICK_MS)
         self._radar_timer.timeout.connect(self._on_radar_tick)
         self._radar_timer.start()
 
@@ -227,16 +261,47 @@ class MapView(QWidget):
             self.cutLinkRequested.emit()
 
     def _on_radar_tick(self) -> None:
-        self._fresh_age += RADAR_TICK_MS / 1000.0
+        dt = RENDER_TICK_MS / 1000.0
+        self._fresh_age += dt
         if self._reconciled_flash > 0:
-            self._reconciled_flash = max(0.0, self._reconciled_flash - RADAR_TICK_MS / 1000.0)
-        self._radar_angle = (self._radar_angle + 2.4) % 360.0
+            self._reconciled_flash = max(0.0, self._reconciled_flash - dt)
+        self._radar_angle = (self._radar_angle + 0.64) % 360.0
+        self._advance_shown_poses(dt)
         self.update()
+
+    def _advance_shown_poses(self, dt_s: float) -> None:
+        """Ease each drawn icon toward where the simulation last put it.
+
+        The simulation is the truth and is never changed by this; what moves
+        is only the position the icon is drawn at. An exponential approach
+        rather than a fixed step, so the result does not depend on how often
+        this happens to run.
+        """
+        alpha = 1.0 - math.exp(-dt_s / POSE_SMOOTHING_S)
+        for unit_id, pose in self._units.items():
+            shown = self._shown.get(unit_id)
+            if shown is None or unit_id in self._snap:
+                self._snap.discard(unit_id)
+                self._shown[unit_id] = dict(pose)
+                continue
+            for axis in ("x", "y", "z"):
+                shown[axis] += (pose[axis] - shown[axis]) * alpha
+            turn = (pose["heading"] - shown["heading"] + 180.0) % 360.0 - 180.0
+            shown["heading"] = (shown["heading"] + turn * alpha) % 360.0
+
+    def _drawn_pose(self, unit_id: str) -> dict:
+        """Where an icon is drawn, which trails the truth by a few hundredths
+        of a second so that motion between simulation ticks is continuous."""
+        return self._shown.get(unit_id) or self._units.get(
+            unit_id, {"x": 0.0, "y": 0.0, "z": 0.0, "heading": 0.0}
+        )
 
     # --- public API, called by main_window in response to engine signals ---
 
     def set_unit_pose(self, unit_id: str, x: float, y: float, z: float, heading: float) -> None:
         self._units[unit_id] = {"x": x, "y": y, "z": z, "heading": heading}
+        if unit_id not in self._shown:
+            self._shown[unit_id] = {"x": x, "y": y, "z": z, "heading": heading}
         if not self._docked.get(unit_id, False):
             trail = self._trails.setdefault(unit_id, [])
             if not trail or trail[-1] != (x, y):
@@ -246,6 +311,9 @@ class MapView(QWidget):
         self.update()
 
     def set_unit_docked(self, unit_id: str, docked: bool) -> None:
+        # Docking puts a unit on the rover from wherever it was; easing
+        # across that gap draws it flying over ground it never crossed.
+        self._snap.add(unit_id)
         if unit_id in self._docked:
             self._docked[unit_id] = docked
             if not docked:
@@ -267,6 +335,8 @@ class MapView(QWidget):
 
     def clear(self) -> None:
         self._units.clear()
+        self._shown.clear()
+        self._snap.clear()
         self._trails.clear()
         self._swept.clear()
         self._detections.clear()
@@ -397,6 +467,7 @@ class MapView(QWidget):
                 ok = (nx < width) & (ny < height)
                 pixels[ny[ok], nx[ok]] = hp[ok]
 
+        self._cloud_dirty = True
         self._cloud_points += scan.point_count
         self._mapped_m2 = mapped_m2
         self._lidar_stats = stats
@@ -419,6 +490,7 @@ class MapView(QWidget):
         """
         self._fresh_returns = scan
         self._fresh_age = 0.0
+        self._build_fresh_layer()
         self.update()
 
 
@@ -487,7 +559,7 @@ class MapView(QWidget):
         return ((px.x() - c.x()) / SCALE_PX_PER_M, -(px.y() - c.y()) / SCALE_PX_PER_M)
 
     def _rover_pose(self) -> dict:
-        return self._units.get("rover", {"x": 0.0, "y": 0.0, "z": 0.0, "heading": 0.0})
+        return self._drawn_pose("rover")
 
     # --- painting ---
 
@@ -528,40 +600,94 @@ class MapView(QWidget):
         Unknown ground is transparent, so the background shows through and
         the operator can see at a glance how much has actually been swept
         and where the sensor shadows still are.
+
+        The cloud is held at a much finer resolution than the screen, so
+        scaling it down is real work. It only changes when a scan comes in,
+        so the scaled result is kept and the frame is a straight blit.
         """
+        if (
+            self._cloud_layer is None
+            or self._cloud_dirty
+            or self._cloud_layer.size() != self.size()
+            or self._cloud_layer_pan != self._pan
+        ):
+            self._build_cloud_layer()
+        if self._cloud_layer is not None:
+            painter.drawPixmap(0, 0, self._cloud_layer)
+
+    def _build_cloud_layer(self) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        layer = QPixmap(self.size())
+        layer.fill(Qt.transparent)
+        into = QPainter(layer)
+        into.setRenderHint(QPainter.SmoothPixmapTransform, False)
         top_left = self._to_screen(-WORLD_HALF_EXTENT_M, WORLD_HALF_EXTENT_M)
         bottom_right = self._to_screen(WORLD_HALF_EXTENT_M, -WORLD_HALF_EXTENT_M)
-        target = QRectF(top_left, bottom_right)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
-        painter.drawImage(target, self._perception_image)
+        into.drawImage(QRectF(top_left, bottom_right), self._perception_image)
+        into.end()
+        self._cloud_layer = layer
+        self._cloud_layer_pan = QPointF(self._pan)
+        self._cloud_dirty = False
 
-    def _draw_fresh_returns(self, painter: QPainter) -> None:
-        """The most recent returns, bright and decaying."""
+    def _build_fresh_layer(self) -> None:
+        """Rasterise the newest scan once, to be faded as a layer.
+
+        A scan is several thousand returns and the overlay decays over about
+        half a second, so drawing it point by point costs that work on every
+        frame: measured, 23 ms of a 33 ms frame, which on its own held the
+        whole display at thirty hertz. The returns do not move once measured,
+        so they are drawn once into a layer the size of the viewport and the
+        fade is applied to the layer.
+        """
+        self._fresh_layer = None
         scan = self._fresh_returns
-        if scan is None or scan.point_count == 0:
-            return
-        fade = max(0.0, 1.0 - self._fresh_age * 2.2)
-        if fade <= 0.0:
+        if scan is None or scan.point_count == 0 or self.width() <= 0:
             return
 
-        alpha = (200.0 * fade * (0.4 + 0.6 * scan.intensities)).astype(np.int64)
+        layer = QPixmap(self.size())
+        layer.fill(Qt.transparent)
+        painter = QPainter(layer)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+
+        alpha = (255.0 * (0.4 + 0.6 * scan.intensities)).astype(np.int64)
         for name in ("GROUND", "TRACK", "SCRUB", "TREE", "ROCK", "POTHOLE"):
-            base = RETURN_COLORS[name]
             mask = scan.kinds == int(Terrain[name])
             if not mask.any():
                 continue
+            base = RETURN_COLORS[name]
             xs, ys, alphas = scan.xs[mask], scan.ys[mask], alpha[mask]
             # Grouped into a few alpha bands, so the pen changes a handful of
-            # times per scan instead of once per point.
+            # times per scan rather than once per point.
             bands = np.clip(alphas // 24, 0, 10)
             for band in np.unique(bands):
                 in_band = bands == band
-                color = QColor(base)
-                color.setAlpha(int(band * 24 + 12))
-                painter.setPen(QPen(color))
+                colour = QColor(base)
+                colour.setAlpha(int(band * 24 + 12))
+                painter.setPen(QPen(colour))
                 painter.drawPoints(
                     [self._to_screen(x, y) for x, y in zip(xs[in_band].tolist(), ys[in_band].tolist())]
                 )
+        painter.end()
+        self._fresh_layer = layer
+        self._fresh_layer_pan = QPointF(self._pan)
+
+    def _draw_fresh_returns(self, painter: QPainter) -> None:
+        """The most recent returns, bright and decaying."""
+        fade = max(0.0, 1.0 - self._fresh_age * 2.2)
+        if fade <= 0.0 or self._fresh_returns is None:
+            return
+        if self._fresh_layer is None or self._fresh_layer.size() != self.size():
+            self._build_fresh_layer()
+        if self._fresh_layer is None:
+            return
+
+        # Panned since the layer was drawn: shift it rather than rebuild, so
+        # dragging the map stays as cheap as sitting still.
+        offset = self._pan - self._fresh_layer_pan
+        painter.setOpacity(fade)
+        painter.drawPixmap(offset, self._fresh_layer)
+        painter.setOpacity(1.0)
 
     def _draw_swept(self, painter: QPainter) -> None:
         """Ground the detection array has covered, at the width it covers.
@@ -653,9 +779,16 @@ class MapView(QWidget):
         row_height = 13.0
         stats_gap = 16.0
         x = 16.0
-        # Laid out from the bottom up, so adding a class to the key pushes the
-        # block up rather than pushing the numbers underneath it off the map.
-        y = self.height() - 24.0 - 5 * 12.0 - stats_gap - len(keys) * row_height
+        # Laid out from the bottom up, above the scale bar, so adding a class
+        # to the key pushes the block up rather than printing the numbers
+        # through the scale or off the map.
+        y = (
+            self.height()
+            - SCALE_BAR_RESERVED_PX
+            - 5 * 12.0
+            - stats_gap
+            - len(keys) * row_height
+        )
 
         painter.setFont(QFont("DIN Condensed", 13, QFont.Bold))
         painter.setPen(QPen(QColor("#8FC9E8")))
@@ -689,9 +822,28 @@ class MapView(QWidget):
 
     def _draw_grid(self, painter: QPainter) -> None:
         """A 10 m grid with coordinates on the majors, so distances on this
-        map can be read rather than estimated."""
-        self._draw_grid_lines(painter, 10.0, GRID, labelled=False)
-        self._draw_grid_lines(painter, 50.0, GRID_MAJOR, labelled=True)
+        map can be read rather than estimated.
+
+        Kept as a layer: it is a few hundred lines and labels that only move
+        when the view does.
+        """
+        if self._grid_layer is None or self._grid_layer.size() != self.size():
+            self._build_grid_layer()
+        if self._grid_layer is not None:
+            painter.drawPixmap(self._pan - self._grid_layer_pan, self._grid_layer)
+
+    def _build_grid_layer(self) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        layer = QPixmap(self.size())
+        layer.fill(Qt.transparent)
+        into = QPainter(layer)
+        into.setRenderHint(QPainter.Antialiasing)
+        self._draw_grid_lines(into, 10.0, GRID, labelled=False)
+        self._draw_grid_lines(into, 50.0, GRID_MAJOR, labelled=True)
+        into.end()
+        self._grid_layer = layer
+        self._grid_layer_pan = QPointF(self._pan)
 
     def _draw_grid_lines(self, painter: QPainter, spacing_m: float, color, labelled: bool) -> None:
         pen = QPen(color)
@@ -929,7 +1081,8 @@ class MapView(QWidget):
     def _draw_units(self, painter: QPainter) -> None:
         if self._stale:
             painter.setOpacity(0.45)
-        for unit_id, pose in self._units.items():
+        for unit_id in self._units:
+            pose = self._drawn_pose(unit_id)
             if self._docked.get(unit_id, False):
                 continue  # rendered as a bay slot on the rover instead
 
@@ -1149,10 +1302,10 @@ class MapView(QWidget):
             self.bayLaunchRequested.emit()
             return
 
-        for unit_id, pose in self._units.items():
+        for unit_id in self._units:
             if self._docked.get(unit_id, False):
                 continue
-            center = self._to_screen(pose["x"], pose["y"])
+            center = self._to_screen(*(self._drawn_pose(unit_id)[k] for k in ("x", "y")))
             if _dist(event.position(), center) <= 12:
                 self.unitClicked.emit(unit_id)
                 return

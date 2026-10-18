@@ -32,6 +32,18 @@ from __future__ import annotations
 
 from PySide6.QtGui import QColor
 
+# --- spacing --------------------------------------------------------------
+#
+# A four pixel baseline. Every gap in the interface is a multiple of one
+# number, so the rhythm of the layout is decided once rather than argued out
+# again in each panel. Panels that each chose their own padding are what make
+# an interface look assembled instead of designed.
+
+UNIT = 4
+GUTTER = UNIT  # between items in a stack
+PANEL_PAD = UNIT * 2  # inside a panel's edge
+SECTION_GAP = UNIT * 3  # between one group of controls and the next
+
 # --- surfaces -------------------------------------------------------------
 
 BACKGROUND = QColor("#0A0E12")
