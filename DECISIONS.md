@@ -948,3 +948,42 @@ and one on the surface for a scout to find. Nothing is scattered at random. A
 dozen contacts buried the one the operator had to decide about.
 
 The classification key and scanner statistics were taken off the map.
+
+## The rover only knows the way over ground it has seen
+
+The first go-to drew a complete route to the destination the instant it was set,
+across ground the rover had never looked at. The planner treated unseen cells as
+open, which draws a path to anywhere; it is a guess presented as navigation, and
+it made the vehicle look as though it knew the way. That was wrong, and it was
+wrong for lane sweeps too.
+
+Every autonomous route is now planned by `plan_toward` over **seen ground only**,
+within a **planning horizon of 22 m** of the rover (the scanner reports out to
+32 m, but the far end of that is thin and about to be revised). If the goal is
+inside what has been seen, the route is complete. If it is not, the route
+is as long as what is known and ends at the **frontier**, a seen, drivable cell
+beside an unseen one, that costs least to reach plus 1.5 times the distance
+still to go. The rover drives there, scans, and chooses again. A frontier it has
+already stood at and found still unresolved is a shadow it cannot see into from
+there, and is not gone to twice.
+
+What is drawn follows: the line stops where the knowledge stops, with the
+frontier marked, and the destination is marked separately. The rover reports
+EXPLORING TO DESTINATION until it has seen all the way, logs once when it has,
+and then GOING TO DESTINATION. The old optimistic planner is still there
+(`explore=False`) for a caller that hands it a complete map; nothing in the
+application uses it.
+
+**Sensor ranges are honest about what they can resolve.** A rock half a metre
+across is a return or two from a one-degree scan at thirty metres, which is not
+something to plan around, so rocks are resolved at **16 m** (`ROCK_DETECTION_RANGE_M`),
+potholes at 8 m, trees at the scanner's full 32 m. Beyond its range a rock reads
+as ground and does not cast a shadow, so the rover plans a route over it and
+reroutes when it is close enough to see: the same way holes were already
+handled. A rock or a hole that has been mapped is not forgotten when the
+rover turns away and reads ground beyond it.
+
+Known limit: a destination inside or behind dense forest can take the rover a long
+time to approach, because it explores the forest edge one frontier at a time.
+Measured on this seed, one such point was still unreached after 400 s at the
+survey crawl; the other seven drives tried arrived, none entered an obstacle.

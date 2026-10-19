@@ -333,3 +333,65 @@ def test_a_fresh_reading_still_replaces_everything_else():
     perception.observe((1, 1), Terrain.POTHOLE)
     assert perception.observe((1, 1), Terrain.ROCK), "a hole filled by a rock is still news"
     assert perception.at((1, 1)) is Terrain.ROCK
+
+
+# --- how far away each kind of obstacle can be resolved --------------------
+
+
+def _object_world(kind: Terrain, distance_m: float) -> tuple[TerrainWorld, tuple[int, int]]:
+    world = blank_world()
+    cell = (0, int(distance_m / CELL_SIZE_M))
+    world.set_cell(cell, kind)
+    return world, cell
+
+
+def test_a_rock_beyond_what_the_scanner_can_resolve_reads_as_ground():
+    """A rock half a metre across is a return or two at thirty metres. The
+    rover must not be able to plan around something it cannot yet see."""
+    from ocu.core.lidar import ROCK_DETECTION_RANGE_M
+
+    world, cell = _object_world(Terrain.ROCK, ROCK_DETECTION_RANGE_M + 8.0)
+    perception = PerceptionMap()
+    cast_scan(world, perception, 0.0, 0.0)
+    assert perception.at(cell) is Terrain.GROUND
+
+
+def test_a_rock_inside_that_range_is_mapped_as_a_rock():
+    from ocu.core.lidar import ROCK_DETECTION_RANGE_M
+
+    world, cell = _object_world(Terrain.ROCK, ROCK_DETECTION_RANGE_M - 4.0)
+    perception = PerceptionMap()
+    cast_scan(world, perception, 0.0, 0.0)
+    assert perception.at(cell) is Terrain.ROCK
+
+
+def test_driving_toward_a_rock_resolves_it():
+    from ocu.core.lidar import ROCK_DETECTION_RANGE_M
+
+    far = ROCK_DETECTION_RANGE_M + 8.0
+    world, cell = _object_world(Terrain.ROCK, far)
+    perception = PerceptionMap()
+    cast_scan(world, perception, 0.0, 0.0)
+    assert perception.at(cell) is Terrain.GROUND
+    cast_scan(world, perception, 0.0, far - 8.0)
+    assert perception.at(cell) is Terrain.ROCK
+
+
+def test_a_tree_is_resolved_out_to_the_scanners_full_range():
+    world, cell = _object_world(Terrain.TREE, LIDAR_RANGE_M - 4.0)
+    perception = PerceptionMap()
+    cast_scan(world, perception, 0.0, 0.0)
+    assert perception.at(cell) is Terrain.TREE
+
+
+def test_a_rock_that_was_mapped_is_not_forgotten_when_the_rover_drives_away_from_it():
+    """From further off the same rock reads as ground, honestly. That is not
+    evidence it has gone."""
+    from ocu.core.lidar import ROCK_DETECTION_RANGE_M
+
+    world, cell = _object_world(Terrain.ROCK, 10.0)
+    perception = PerceptionMap()
+    cast_scan(world, perception, 0.0, 0.0)
+    assert perception.at(cell) is Terrain.ROCK
+    cast_scan(world, perception, 0.0, -(ROCK_DETECTION_RANGE_M + 4.0))
+    assert perception.at(cell) is Terrain.ROCK

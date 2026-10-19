@@ -76,6 +76,15 @@ REFLECTIVITY = {
 #: the start.
 NEGATIVE_OBSTACLE_RANGE_M = 8.0
 
+#: How far away a rock can be resolved as an obstacle. A boulder half a metre
+#: across subtends under a degree at thirty metres, which is a return or two
+#: from a one-degree scan: not something a vehicle may plan around. Inside this
+#: range it is several returns wide and classified; beyond it the beam
+#: passes over it the way it passes over a hole, and the cell reads as ground
+#: until the vehicle is close enough to resolve it. Trees are tall as well as
+#: wide and are resolved at the full range of the scanner.
+ROCK_DETECTION_RANGE_M = 16.0
+
 #: Range at which returned energy has fallen by half.
 RANGE_HALF_POWER_M = 14.0
 
@@ -179,6 +188,10 @@ def cast_scan(
     # look into it.
     too_far = distance[None, :] > NEGATIVE_OBSTACLE_RANGE_M
     kinds[(kinds == int(Terrain.POTHOLE)) & too_far] = int(Terrain.GROUND)
+    # A rock further out than a return or two can describe is the same: the
+    # cell reads as ground, and the rock neither blocks the ray nor is mapped.
+    unresolved = distance[None, :] > ROCK_DETECTION_RANGE_M
+    kinds[(kinds == int(Terrain.ROCK)) & unresolved] = int(Terrain.GROUND)
 
     blocking = (kinds == int(Terrain.ROCK)) | (kinds == int(Terrain.TREE))
     hit = blocking.any(axis=1)

@@ -584,9 +584,12 @@ class PerceptionMap:
         the hole and returns off the ground beyond, reporting open ground
         perfectly honestly. That reading is not evidence the hole is gone, and
         letting it overwrite one means the rover forgets every hazard the
-        moment it drives on -- and then drives back into it.
+        moment it drives on -- and then drives back into it. A rock is the same:
+        it is only resolved close up, and the rover turning away from one it
+        mapped a moment ago must not unmap it on the strength of the ground
+        it reads beyond.
         """
-        return not (known is Terrain.POTHOLE and fresh is Terrain.GROUND)
+        return not (known in (Terrain.POTHOLE, Terrain.ROCK) and fresh is Terrain.GROUND)
 
     def at(self, cell: tuple[int, int]) -> Terrain:
         return self._observed.get(cell, Terrain.UNKNOWN)

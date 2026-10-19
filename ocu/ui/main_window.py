@@ -243,6 +243,7 @@ class MainWindow(QMainWindow):
         # were left.
         self._destination: tuple[float, float] | None = None
         self._destination_state = ""  # "enroute", "reached" or "unreachable"
+        self._route_announced = False
         self._parked_sweep: tuple[list, int, str | None] | None = None
         self._last_replan_s = -1e9
         self._last_replan_waypoint = -1
@@ -761,7 +762,10 @@ class MainWindow(QMainWindow):
             rover_task = {
                 "reached": "AT DESTINATION",
                 "unreachable": "DESTINATION BLOCKED",
-            }.get(self._destination_state, "GOING TO DESTINATION")
+            }.get(
+                self._destination_state,
+                "GOING TO DESTINATION" if director.route_known else "EXPLORING TO DESTINATION",
+            )
         elif self._waypoint_index >= len(self._mission_waypoints):
             rover_task = "SWEEP COMPLETE"
         elif self._current_lane is None:
@@ -914,6 +918,7 @@ class MainWindow(QMainWindow):
             self._parked_sweep = (self._mission_waypoints, self._waypoint_index, self._current_lane)
         self._destination = (x, y)
         self._destination_state = "enroute"
+        self._route_announced = False
         self._mission_waypoints = [(x, y, DESTINATION_LANE)]
         self._waypoint_index = 0
         self._current_lane = None
@@ -922,7 +927,9 @@ class MainWindow(QMainWindow):
         rover = self.units["rover"].pose
         distance = math.hypot(x - rover.x, y - rover.y)
         self.event_log.log(
-            now, f"Destination set: ({x:.0f}, {y:.0f}) m, {distance:.0f} m away, routing around obstacles"
+            now,
+            f"Destination set: ({x:.0f}, {y:.0f}) m, {distance:.0f} m away. "
+            "The rover routes only over ground it has seen and explores toward it",
         )
         if self._mission_started():
             if self.flight_director.rover_mode == RoverMode.RETURNING:
@@ -963,6 +970,10 @@ class MainWindow(QMainWindow):
                 now, "Destination unreachable: no clear route to it from here", level="caution"
             )
         self._refresh_status()
+
+    def perception_cell(self, x: float, y: float) -> tuple[int, int]:
+        """The map cell a world position falls in."""
+        return (int(math.floor(x / CELL_SIZE_M)), int(math.floor(y / CELL_SIZE_M)))
 
     def _begin_autonomous_sweep(self) -> None:
         """Hand the rover its next lane point and let it drive itself."""
@@ -1028,9 +1039,24 @@ class MainWindow(QMainWindow):
                 )
             self._last_replan_waypoint = self._waypoint_index
         if self._comms.telemetry:
+            # What is drawn is what the rover knows: the route to its goal if
+            # it has seen all the way there, and otherwise as far as it has
+            # seen, ending at the place it is going to look from next.
             self.map_view.set_planned_path(
-                self.flight_director.path, self.flight_director.goal
+                self.flight_director.path, self.flight_director.display_goal
             )
+            if (
+                self._destination is not None
+                and self._destination_state == "enroute"
+                and self.flight_director.route_known
+                and not self._route_announced
+            ):
+                self._route_announced = True
+                self.event_log.log(
+                    self.mission_clock.clock_s,
+                    "Route to the destination found over ground already seen",
+                    level="good",
+                )
 
     def _tick_lidar(self) -> None:
         """Sweep the rover's scanner and fold the returns into its map.

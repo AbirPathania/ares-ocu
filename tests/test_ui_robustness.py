@@ -22,6 +22,10 @@ from ocu.ui.main_window import MainWindow  # noqa: E402
 
 TRICOPTERS = ["tricopter-1", "tricopter-2", "tricopter-3"]
 
+#: What the rover reports while it is heading for a destination: exploring until
+#: it has seen the whole way, then going.
+EN_ROUTE = ("EXPLORING TO DESTINATION", "GOING TO DESTINATION")
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -738,8 +742,10 @@ def test_with_nothing_recommended_the_dial_opens_straight_ahead(app):
     """Zero is the rover's nose. Scouting along the line of travel is what
     nearly every launch is for, and it stays true when the rover turns."""
     window = MainWindow()
-    _deploy_and_drive(window, 3.0)  # too soon for the rover to have said anything
-    assert window._recommended_bearing is None
+    _deploy_and_drive(window, 3.0)
+    # Whether the rover has already said something by now depends on the ground
+    # it happens to be crossing; the dial is what is under test.
+    window._recommended_bearing = None
     window._on_bay_launch_requested()
     assert window.context_panel.launch_console.bearing_spin.value() == 0.0
 
@@ -1004,14 +1010,18 @@ def _plant_surface_object_ahead_of(window, uid, distance_m=40.0):
 
     from ocu.core.targets import BuriedTarget
 
+    from ocu.core.terrain import IMPASSABLE
+
     _settle_heading(window, uid)
     scout = window.flight_director.aircraft[uid]
     heading = math.radians(scout.heading)
-    target = BuriedTarget(
-        scout.x + math.sin(heading) * distance_m,
-        scout.y + math.cos(heading) * distance_m,
-        0.02, 90.0, True, 0.1, "planted",
-    )
+    # An object under a tree or in a hole cannot be seen from above whatever
+    # the scout does, so plant it on ground that is open to the sky.
+    for distance in (distance_m, distance_m - 5, distance_m + 5, distance_m - 10, distance_m - 15):
+        x, y = scout.x + math.sin(heading) * distance, scout.y + math.cos(heading) * distance
+        if window.terrain.classify(x, y) not in IMPASSABLE:
+            break
+    target = BuriedTarget(x, y, 0.02, 90.0, True, 0.1, "planted")
     window.target_field.targets.append(target)
     return target
 
@@ -1312,7 +1322,7 @@ def test_the_rover_drives_to_a_destination_the_operator_sets_and_stops_there(app
     window.pace_slider.setValue(60)  # a transit, not a survey crawl
     window._on_play_clicked()
     window._on_destination_placed(25.0, -18.0)
-    assert window.phase_label.text() == "GOING TO DESTINATION"
+    assert window.phase_label.text() in EN_ROUTE
     assert _drive_until_settled(window) == "reached"
     rover = window.units["rover"].pose
     assert math.hypot(rover.x - 25.0, rover.y + 18.0) < 1.5
@@ -1346,7 +1356,7 @@ def test_a_destination_set_before_deploying_is_the_job_the_rover_starts_on(app):
     window._on_destination_placed(15.0, 15.0)
     assert window.phase_label.text() == "STANDBY"
     window._on_play_clicked()
-    assert window.phase_label.text() == "GOING TO DESTINATION"
+    assert window.phase_label.text() in EN_ROUTE
     assert window.flight_director.goal is not None
     assert not any("Sweeping" in m for m in messages)
 
@@ -1397,7 +1407,7 @@ def test_a_destination_can_be_set_while_the_mission_is_on_hold(app):
     assert (window.units["rover"].pose.x, window.units["rover"].pose.y) == pytest.approx(before, abs=0.05)
     assert window.phase_label.text() == "HOLDING"
     window._on_play_clicked()  # resume
-    assert window.phase_label.text() == "GOING TO DESTINATION"
+    assert window.phase_label.text() in EN_ROUTE
 
 
 def test_a_reset_forgets_the_destination_and_restores_the_sweep(app):
@@ -1531,3 +1541,39 @@ def test_a_destination_off_the_edge_of_the_view_is_marked_on_the_edge(app):
     top_rows = [image.pixelColor(x, y) for x in range(0, 900) for y in range(0, 60)]
     assert any(c.alpha() > 0 for c in top_rows)
     assert image.pixelColor(450, 350).alpha() == 0
+
+
+# --- the rover only knows the way over ground it has seen ------------------------------------
+
+
+def test_a_route_to_a_far_destination_is_drawn_only_over_ground_the_rover_has_seen(app):
+    import math
+
+    from ocu.core.navigation import PLANNING_HORIZON_M
+
+    window = MainWindow()
+    window.pace_slider.setValue(60)
+    window._on_play_clicked()
+    window._on_destination_placed(60.0, 70.0)  # ~90 m away, none of it seen
+    for tick in range(400):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        rover = window.units["rover"].pose
+        path = window.map_view._planned_path
+        for x, y in path:
+            assert math.hypot(x - rover.x, y - rover.y) <= PLANNING_HORIZON_M + 3.0, (tick, x, y)
+            assert window.perception.is_known(window.perception_cell(x, y)), "a route over unseen ground"
+        goal = window.map_view._planned_goal
+        if goal is not None and not window.flight_director.route_known:
+            assert goal != window._destination, "the frontier is marked, not the destination"
+    assert window.phase_label.text() == "EXPLORING TO DESTINATION"
+
+
+def test_the_rover_announces_the_route_once_it_has_seen_all_the_way(app):
+    window = MainWindow()
+    messages = _capture_log(window)
+    window.pace_slider.setValue(60)
+    window._on_play_clicked()
+    window._on_destination_placed(-30.0, -25.0)
+    assert _drive_until_settled(window) == "reached"
+    assert sum("Route to the destination found" in m for m in messages) == 1

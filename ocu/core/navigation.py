@@ -39,7 +39,13 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from ocu.core.terrain import IMPASSABLE, TRAVERSE_COST, PerceptionMap, Terrain
+from ocu.core.terrain import (
+    IMPASSABLE,
+    TRAVERSE_COST,
+    WORLD_HALF_EXTENT_M,
+    PerceptionMap,
+    Terrain,
+)
 
 #: Half the rover's width plus clearance. The ARES-G is a 25 kg six-wheel
 #: platform; this is the radius a planner must keep clear of obstacles.
@@ -519,3 +525,142 @@ def pure_pursuit_target(
         if math.hypot(point[0] - x, point[1] - y) >= lookahead_m:
             return point
     return path_world[-1]
+
+
+# --- exploring toward a place the vehicle has not seen the way to ---------------------------
+
+#: How much more the distance still to go beyond a frontier counts than the
+#: distance to reach it. Above one, the vehicle prefers to make progress toward
+#: the goal over tidying up the nearest unexplored edge.
+FRONTIER_GOAL_WEIGHT = 1.5
+
+#: A frontier this close teaches nothing the vehicle cannot already see, and
+#: one it has already stood at and found still unresolved is a shadow it
+#: cannot see into from there; neither is worth driving to.
+FRONTIER_MIN_DISTANCE_M = 3.0
+FRONTIER_EXCLUSION_M = 4.0
+
+#: How far from itself the vehicle will plan a route over. The scanner reports
+#: ground out to 32 m, but the far end of that is thin, noisy and soon to be
+#: revised; a route is laid only over ground close enough to be trusted, and
+#: what lies beyond is, for planning, still unseen. A longer journey is a series
+#: of these: drive to the edge of what can be trusted, look again, decide again.
+PLANNING_HORIZON_M = 22.0
+
+
+@dataclass
+class ExplorePlan:
+    """What the vehicle can honestly say about the way to a goal.
+
+    `reaches_goal` is true only if the whole route lies over ground it has
+    seen. Otherwise the path ends at the frontier it judged the best place to
+    go and look from, which is as much of the way as it actually knows.
+    """
+
+    path: list[tuple[int, int]]
+    reaches_goal: bool
+
+
+def plan_toward(
+    costmap: Costmap,
+    start: tuple[int, int],
+    goal: tuple[int, int],
+    visited: Iterable[tuple[int, int]] = (),
+    radius_m: float = PLANNING_HORIZON_M,
+    max_expansions: int = MAX_PLAN_EXPANSIONS,
+    corridor: Corridor | None = None,
+) -> ExplorePlan:
+    """Plan over known ground only, to the goal if it can be reached and to the
+    most promising frontier if not, within the planning horizon either way.
+
+    A planner that treats unseen ground as open will draw a straight line to
+    anywhere, which is not navigation: it is a guess drawn as a route, and it
+    is why a vehicle appears to know the way to somewhere it has never been.
+    Here unseen ground is not traversable. The vehicle goes only where it has
+    looked, and when the goal is not among what it has looked at, to the
+    boundary of what it has looked at that leaves the least still to cover,
+    where looking again will show it more.
+
+    A frontier is a known, drivable cell with an unseen cell beside it. Each
+    is scored by what it costs to get there plus the weighted straight-line
+    distance on to the goal, and the cheapest wins.
+    """
+    size = costmap.cell_size_m
+    world_cells = int(WORLD_HALF_EXTENT_M / size)
+    escaping = costmap.is_blocked(start)
+    escape_cells = ESCAPE_RADIUS_M / size
+    radius_cells = radius_m / size
+    visited_cells = [(int(v[0]), int(v[1])) for v in visited]
+    exclusion_cells = FRONTIER_EXCLUSION_M / size
+    min_cells = FRONTIER_MIN_DISTANCE_M / size
+    known = costmap.base
+
+    def distance_to_goal(cell: tuple[int, int]) -> float:
+        dx, dy = abs(cell[0] - goal[0]), abs(cell[1] - goal[1])
+        return (dx + dy) + (math.sqrt(2) - 2) * min(dx, dy)
+
+    def is_frontier(cell: tuple[int, int]) -> bool:
+        for dx, dy, _ in _NEIGHBOURS:
+            n = (cell[0] + dx, cell[1] + dy)
+            if abs(n[0]) >= world_cells or abs(n[1]) >= world_cells:
+                continue
+            if n not in known or math.hypot(n[0] - start[0], n[1] - start[1]) > radius_cells:
+                return True
+        return False
+
+    goal_known = goal in known and not costmap.is_blocked(goal)
+    open_heap: list[tuple[float, tuple[int, int]]] = [(0.0, start)]
+    came_from: dict[tuple[int, int], tuple[int, int]] = {}
+    best: dict[tuple[int, int], float] = {start: 0.0}
+    best_frontier: tuple[float, tuple[int, int]] | None = None
+    expansions = 0
+
+    while open_heap:
+        travelled, current = heapq.heappop(open_heap)
+        if travelled > best.get(current, math.inf):
+            continue
+        if goal_known and current == goal:
+            return ExplorePlan(_reconstruct(came_from, current), True)
+        expansions += 1
+        if expansions > max_expansions:
+            break
+
+        if (
+            current != start
+            and math.hypot(current[0] - start[0], current[1] - start[1]) >= min_cells
+            and is_frontier(current)
+            and not any(
+                math.hypot(current[0] - v[0], current[1] - v[1]) <= exclusion_cells for v in visited_cells
+            )
+        ):
+            score = travelled + FRONTIER_GOAL_WEIGHT * 1.4 * distance_to_goal(current)
+            if best_frontier is None or score < best_frontier[0]:
+                best_frontier = (score, current)
+
+        for dx, dy, step in _NEIGHBOURS:
+            neighbour = (current[0] + dx, current[1] + dy)
+            if neighbour not in known:
+                continue
+            if math.hypot(neighbour[0] - start[0], neighbour[1] - start[1]) > radius_cells:
+                continue
+            if costmap.is_blocked(neighbour):
+                if (
+                    not escaping
+                    or neighbour in costmap.hard
+                    or math.hypot(neighbour[0] - start[0], neighbour[1] - start[1]) > escape_cells
+                ):
+                    continue
+                cell_cost = costmap.base.get(neighbour, TRAVERSE_COST[Terrain.UNKNOWN]) * ESCAPE_COST_FACTOR
+            else:
+                cell_cost = costmap.cost(neighbour)
+            if corridor is not None:
+                cell_cost += corridor.penalty(neighbour)
+            tentative = travelled + step * cell_cost
+            if tentative < best.get(neighbour, math.inf):
+                best[neighbour] = tentative
+                came_from[neighbour] = current
+                heapq.heappush(open_heap, (tentative, neighbour))
+
+    if best_frontier is not None:
+        return ExplorePlan(_reconstruct(came_from, best_frontier[1]), False)
+    return ExplorePlan([], False)

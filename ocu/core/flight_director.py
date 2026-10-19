@@ -61,6 +61,7 @@ from ocu.core.constants import (
 from ocu.core.formation import clamp_to_tether
 from ocu.core.navigation import (
     LOOKAHEAD_M,
+    plan_toward,
     TIGHT_LOOKAHEAD_M,
     WAYPOINT_TOLERANCE_M,
     Corridor,
@@ -80,6 +81,12 @@ from ocu.core.recovery_sequencer import RecoveryStage
 #: changing so retrying is right, but a search that cannot succeed is the
 #: most expensive search there is.
 PLAN_RETRY_TICKS = 10
+
+#: While exploring toward a goal the route is only as long as what has been
+#: seen, so it is made again when the vehicle is this close to the end of it,
+#: or this often, whichever comes first.
+EXPLORE_REPLAN_NEAR_END_M = 5.0
+EXPLORE_REPLAN_TICKS = 20
 
 #: After this many consecutive failures the waypoint is called unreachable
 #: and the operator is told, rather than the vehicle holding in silence.
@@ -272,6 +279,15 @@ class FlightDirector:
         self._ticks_since_attempt = 0
         self.plan_failed = False
         self._replans = 0
+        #: Plan only over ground that has been seen. See `navigate_to`.
+        self.explore = True
+        #: Whether the route being driven reaches the goal over seen ground.
+        #: False while the vehicle is still working out the way: the path is
+        #: then only the part it knows, ending at the place it is going to look
+        #: from next.
+        self.route_known = False
+        self._explore_visited: list[tuple[float, float]] = []
+        self._explore_ticks = 0
 
     # --- ownership ---
 
@@ -392,6 +408,9 @@ class FlightDirector:
         self.goal = None
         self.hold_navigation = False
         self.lane_from = None
+        self.route_known = False
+        self._explore_visited = []
+        self._explore_ticks = 0
         self._replans = 0
         self._costmap = None
         self._plan_failures = 0
@@ -532,22 +551,46 @@ class FlightDirector:
         return self.commanded_speed_ms / self.rover_body.limits.max_speed_ms
 
     def navigate_to(
-        self, goal_x: float, goal_y: float, lane_from: tuple[float, float] | None = None
+        self,
+        goal_x: float,
+        goal_y: float,
+        lane_from: tuple[float, float] | None = None,
+        explore: bool = True,
     ) -> None:
         """Send the rover somewhere under its own navigation.
 
         With `lane_from`, the leg is treated as a lane to be held rather
         than two points to get between, and the planner is penalised for
         straying off it.
+
+        With `explore` (the default) the rover plans only over ground it has
+        seen: when the goal is not yet among that, it drives to the best place
+        to look from and decides again from there. With it off the planner
+        treats unseen ground as open, which draws a route to anywhere and is
+        kept only for callers that hand it a complete map.
         """
         self.goal = (goal_x, goal_y)
         self.lane_from = lane_from
+        self.explore = explore
+        self.route_known = False
+        self._explore_visited = []
+        self._explore_ticks = 0
         self.path = []
         self._path_cells = []
         self._plan_failures = 0
         self._ticks_since_attempt = 0
         self.plan_failed = False
         self.rover_mode = RoverMode.NAVIGATING
+
+    @property
+    def display_goal(self) -> tuple[float, float] | None:
+        """Where the drawn route ends: the goal if the way to it is known, and
+        otherwise the frontier the rover is driving to in order to find it."""
+        if self.goal is None:
+            return None
+        if self.explore and not self.route_known and self.path:
+            return self.path[-1]
+        return self.goal
 
     def replan(self, perception, cell_size_m: float) -> bool:
         """Plan, or replan, against what the rover currently knows.
@@ -569,6 +612,9 @@ class FlightDirector:
         else:
             update_costmap(self._costmap, perception)
         costmap = self._costmap
+
+        if self.explore:
+            return self._replan_explore(costmap, cell_size_m)
 
         here = (
             int(math.floor(self.rover_body.x / cell_size_m)),
@@ -658,6 +704,93 @@ class FlightDirector:
         self.path = smooth(world, costmap)
         self._replans += 1
         return True
+
+    def _replan_explore(self, costmap, cell_size_m: float) -> bool:
+        body = self.rover_body
+        here = (int(math.floor(body.x / cell_size_m)), int(math.floor(body.y / cell_size_m)))
+        self._explore_ticks += 1
+
+        end = self.path[-1] if self.path else None
+        near_end = (
+            end is not None
+            and not self.route_known
+            and math.hypot(end[0] - body.x, end[1] - body.y) < EXPLORE_REPLAN_NEAR_END_M
+        )
+        periodic = not self.route_known and self._explore_ticks >= EXPLORE_REPLAN_TICKS
+        escaping = costmap.is_blocked(here)
+        valid = (
+            bool(self._path_cells)
+            and (escaping or path_is_clear(costmap, self._path_cells))
+            and followed_line_is_clear(costmap, self.path, body.x, body.y)
+        )
+        if valid and not near_end and not periodic:
+            self._plan_failures = 0
+            return False
+
+        if not valid:
+            self.path = []
+            self._path_cells = []
+        if self._plan_failures:
+            self._ticks_since_attempt += 1
+            if self._ticks_since_attempt < PLAN_RETRY_TICKS:
+                return False
+        self._ticks_since_attempt = 0
+        self._explore_ticks = 0
+        if near_end and end is not None:
+            # It has stood where it meant to look from. If that edge is still
+            # an edge, it is a shadow it cannot see into from here.
+            self._explore_visited.append(end)
+
+        requested = (
+            int(math.floor(self.goal[0] / cell_size_m)),
+            int(math.floor(self.goal[1] / cell_size_m)),
+        )
+        goal_cell: tuple[int, int] | None = requested
+        if requested in costmap.base and costmap.is_blocked(requested):
+            goal_cell = reachable_goal(costmap, requested)
+        corridor = None
+        if self.lane_from is not None and goal_cell is not None:
+            corridor = Corridor(
+                ax=self.lane_from[0] / cell_size_m,
+                ay=self.lane_from[1] / cell_size_m,
+                bx=self.goal[0] / cell_size_m,
+                by=self.goal[1] / cell_size_m,
+            )
+        plan = (
+            plan_toward(costmap, here, goal_cell, self._explore_visited_for(cell_size_m), corridor=corridor)
+            if goal_cell is not None
+            else None
+        )
+        if plan is None or not plan.path:
+            self._plan_failures += 1
+            if self._plan_failures >= MAX_PLAN_FAILURES:
+                self.plan_failed = True
+            return False
+
+        if plan.reaches_goal and goal_cell != requested:
+            self.goal = (
+                goal_cell[0] * cell_size_m + cell_size_m / 2,
+                goal_cell[1] * cell_size_m + cell_size_m / 2,
+            )
+        self._plan_failures = 0
+        self.plan_failed = False
+        self._path_cells = plan.path
+        self.route_known = plan.reaches_goal
+        world = [
+            (cx * cell_size_m + cell_size_m / 2, cy * cell_size_m + cell_size_m / 2)
+            for cx, cy in plan.path
+        ]
+        world[0] = (body.x, body.y)
+        if plan.reaches_goal:
+            world[-1] = self.goal
+        self.path = smooth(world, costmap)
+        self._replans += 1
+        return True
+
+    def _explore_visited_for(self, cell_size_m: float) -> list[tuple[float, float]]:
+        return [
+            (x / cell_size_m, y / cell_size_m) for x, y in self._explore_visited
+        ]
 
     @property
     def replan_count(self) -> int:
