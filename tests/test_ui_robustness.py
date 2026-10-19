@@ -1218,3 +1218,35 @@ def test_the_alert_banner_keeps_both_decisions_whole_on_a_narrow_map(app):
     pump(app, 10)
     assert banner.confirm_btn.geometry().top() == banner.reject_btn.geometry().top()
     banner._timer.stop()
+
+
+# --- the console is one window ---------------------------------------------------------------
+
+
+def test_nothing_the_console_shows_ever_becomes_a_window_of_its_own(app):
+    """A widget with no parent that is shown is a native window. Each new threat
+    card used to be one for an instant: it took focus from the console, and on a
+    Mac sent the operator back to the terminal that had launched it."""
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QWidget
+
+    shown = []
+
+    class Watch(QObject):
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Show and isinstance(obj, QWidget) and obj.isWindow():
+                shown.append(type(obj).__name__)
+            return False
+
+    watch = Watch()
+    window = MainWindow()
+    app.installEventFilter(watch)
+    try:
+        window.show()
+        window._on_play_clicked()
+        assert _drive_until_something_is_found(window)
+        pump(app, 30)
+    finally:
+        app.removeEventFilter(watch)
+        window.close()
+    assert set(shown) <= {"MainWindow"}, shown

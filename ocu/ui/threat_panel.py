@@ -89,10 +89,19 @@ class ThreatCard(QWidget):
         # A contact arriving in the list is new information. Fading it in
         # over a few frames is what distinguishes it from the rows that were
         # already there; appearing instantly, it reads as having always been.
-        # Started last: revealing shows the widget, and showing it lays out
-        # the buttons above, which have to exist by then.
         self._arrival = Reveal(self, duration_ms=FAST_MS)
-        self._arrival.reveal()
+
+    def arrive(self) -> None:
+        """Fade in. Called once the card sits in the list.
+
+        Revealing shows the widget, and a widget with no parent that is shown
+        becomes a window of its own: every new contact flashed up as a
+        separate native window, took focus from the console, and on a Mac
+        under Stage Manager sent the operator back to the terminal that
+        launched it. It is revealed only when it has somewhere to live.
+        """
+        if self.parentWidget() is not None:
+            self._arrival.reveal()
 
     def _sync_actions(self) -> None:
         pending = self.threat.get("status") == "PENDING"
@@ -266,12 +275,13 @@ class ThreatPanel(QWidget):
                 "status": "PENDING",
             }
             self._threats[key] = threat
-            card = ThreatCard(threat)
+            card = ThreatCard(threat, self._list_layout.parentWidget())
             card.clicked.connect(self._on_card_clicked)
             card.confirmRequested.connect(self.confirmRequested.emit)
             card.rejectRequested.connect(self.rejectRequested.emit)
             self._cards[key] = card
             self._list_layout.insertWidget(self._list_layout.count() - 1, card)
+            card.arrive()
 
         reported = detection.get("sensors") or (
             [detection["sensor"]] if detection.get("sensor") else []
