@@ -508,8 +508,10 @@ def test_a_guided_launch_from_a_driving_rover_forms_on_the_pattern_the_operator_
     assert driven > 8.0, "the rover must have driven on during the launch"
     assert window.flight_director.launch_stage(TRICOPTERS) == "FORMED"
 
+    # The dial reads against the rover's nose, so the pattern it describes is
+    # wherever the nose is pointing now.
     want = compute_formation_targets(
-        rover.x, rover.y, bearing, pattern, spacing, rally, standoff_m=standoff
+        rover.x, rover.y, rover.heading + bearing, pattern, spacing, rally, standoff_m=standoff
     )
     for uid, target in zip(TRICOPTERS, want):
         pose = window.units[uid].pose
@@ -627,17 +629,59 @@ def test_the_launch_dial_opens_on_the_rovers_recommendation(app):
 
     window._on_bay_launch_requested()
     dial = window.context_panel.launch_console.bearing_spin.value()
-    assert abs((dial - recommended + 180.0) % 360.0 - 180.0) < 1.0
+    heading = window.units["rover"].pose.heading
+    # The dial is relative to the nose, so the recommendation arrives as the
+    # angle the operator would have to turn the formation to.
+    assert abs((heading + dial - recommended + 180.0) % 360.0 - 180.0) < 1.0
 
 
-def test_with_nothing_recommended_the_dial_opens_on_the_direction_of_travel(app):
+def test_with_nothing_recommended_the_dial_opens_straight_ahead(app):
+    """Zero is the rover's nose. Scouting along the line of travel is what
+    nearly every launch is for, and it stays true when the rover turns."""
     window = MainWindow()
     _deploy_and_drive(window, 3.0)  # too soon for the rover to have said anything
     assert window._recommended_bearing is None
     window._on_bay_launch_requested()
-    dial = window.context_panel.launch_console.bearing_spin.value()
-    heading = window.units["rover"].pose.heading
-    assert abs((dial - heading + 180.0) % 360.0 - 180.0) < 1.0
+    assert window.context_panel.launch_console.bearing_spin.value() == 0.0
+
+
+def test_the_formation_preview_turns_with_the_rover(app):
+    """A vee drawn ahead of a rover that has since turned is showing the
+    operator somewhere the aircraft will not be."""
+    import math
+
+    window = MainWindow()
+    _deploy_and_drive(window, 10.0)
+    window._on_bay_launch_requested()
+    console = window.context_panel.launch_console
+    rover = window.units["rover"].pose
+
+    def leader_bearing(heading):
+        console.set_rover_pose(rover.x, rover.y, heading)
+        lead = console._current_targets()[1]  # the slot on the formation's axis
+        return math.degrees(math.atan2(lead.x - rover.x, lead.y - rover.y))
+
+    before = leader_bearing(rover.heading)
+    after = leader_bearing(rover.heading + 90.0)
+    turned = (after - before + 180.0) % 360.0 - 180.0
+    assert abs(turned - 90.0) < 2.0, f"the preview turned {turned:.0f} with a 90 degree turn"
+
+
+def test_the_preview_is_redrawn_when_the_rover_turns(app):
+    window = MainWindow()
+    _deploy_and_drive(window, 10.0)
+    window._on_bay_launch_requested()
+    console = window.context_panel.launch_console
+    rover = window.units["rover"].pose
+    console.set_rover_pose(rover.x, rover.y, rover.heading)
+
+    seen = []
+    console.previewChanged.connect(lambda targets, origin: seen.append(targets))
+    console.set_rover_pose(rover.x, rover.y, rover.heading)
+    assert seen == [], "standing still is not a reason to redraw"
+
+    console.set_rover_pose(rover.x, rover.y, rover.heading + 30.0)
+    assert len(seen) == 1, "turning is"
 
 
 def test_a_launch_the_operator_commands_is_flown_to_the_end(app):

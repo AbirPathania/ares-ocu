@@ -24,21 +24,40 @@ def make_director(n=3, rover_x=0.0, rover_y=0.0):
 def test_station_keeping_follows_a_moving_rover():
     director = make_director(n=1)
     state = director.aircraft["tricopter-1"]
-    slot = (state.slot_dx, state.slot_dy)
+    forward, right = state.slot_forward, state.slot_right
 
     for i in range(200):
         director.tick(0.1, 0.0 + i * 0.3, 0.0, 0.0)
 
+    # The rover is driving east but still pointing north, so its own frame
+    # and the map's coincide: forward is +y, right is +x.
     rover_x = 0.0 + 199 * 0.3
-    assert abs(state.x - (rover_x + slot[0])) < 1.5
-    assert abs(state.y - slot[1]) < 1.5
+    assert abs(state.x - (rover_x + right)) < 1.5
+    assert abs(state.y - forward) < 1.5
+
+
+def test_station_keeping_follows_the_rover_round_a_turn():
+    """The slot is a place on the vehicle, so it has to swing with it. A test
+    that only ever drives a north-facing rover cannot tell the vehicle's
+    frame from the map's, because at a heading of zero they are the same."""
+    director = make_director(n=1)
+    state = director.aircraft["tricopter-1"]
+    forward, right = state.slot_forward, state.slot_right
+
+    for _ in range(300):  # same place, now facing east
+        director.tick(0.1, 0.0, 0.0, 90.0)
+
+    # Facing east, the rover's forward is +x and its right is -y.
+    assert abs(state.x - forward) < 1.5
+    assert abs(state.y + right) < 1.5
 
 
 def test_adopt_clamps_an_out_of_tether_slot():
     director = FlightDirector()
     director.adopt("tricopter-1", 500.0, 0.0, 20.0, 0.0, 0.0, 0.0)
     state = director.aircraft["tricopter-1"]
-    assert math.hypot(state.slot_dx, state.slot_dy) <= TETHER_LIMIT_M + 1e-6
+    # Frame-independent: how far out the slot is, whichever way it is held.
+    assert math.hypot(state.slot_forward, state.slot_right) <= TETHER_LIMIT_M + 1e-6
 
 
 def test_aircraft_never_commanded_outside_the_tether():
@@ -181,17 +200,24 @@ def test_manual_flight_cannot_break_the_tether():
 
 
 def test_releasing_manual_holds_the_new_position_as_a_slot():
+    """Where the operator left it, kept as a place on the rover rather than a
+    point on the map, so it travels with the vehicle like any other slot."""
+    from ocu.core.flight_director import to_body_frame
+
+    rover_heading = 55.0
     director = make_director(n=1)
-    director.take_manual("tricopter-1", 0.0, 0.0, 0.0)
+    director.take_manual("tricopter-1", 0.0, 0.0, rover_heading)
     director.set_manual_input("tricopter-1", forward=1.0, turn=0.0, vertical=0.0)
     for _ in range(40):
-        director.tick(0.1, 0.0, 0.0, 0.0)
+        director.tick(0.1, 0.0, 0.0, rover_heading)
     state = director.aircraft["tricopter-1"]
     flown_to = (state.x, state.y)
-    director.release_manual("tricopter-1", 0.0, 0.0)
+
+    director.release_manual("tricopter-1", 0.0, 0.0, rover_heading)
     assert state.mode == AircraftMode.STATION
-    assert abs(state.slot_dx - flown_to[0]) < 0.01
-    assert abs(state.slot_dy - flown_to[1]) < 0.01
+    forward, right = to_body_frame(flown_to[0], flown_to[1], rover_heading)
+    assert abs(state.slot_forward - forward) < 0.01
+    assert abs(state.slot_right - right) < 0.01
 
 
 def test_manual_rover_drives_and_turns_under_limits():

@@ -805,3 +805,51 @@ flight model's `KinematicBody`; I wrote the interface's animation tests over
 it and destroyed fourteen physics tests. The suite still reported a healthy
 number because the count happened to match what I had added. Restored from
 git, and the interface tests now live in `test_ui_motion.py`.
+
+## The map and the cameras show the same ground
+
+They had drifted a long way apart. Measured, the two agreed about *what* was
+where (96 to 98 percent of cells classified TREE, ROCK or SCRUB were drawn as
+such by the camera), so the geometry was never the problem. The colours were:
+open ground was blue on the map (hue 209) and tan in the camera (hue 37), rock
+was cold blue-grey against warm grey, and scrub was a vivid green against
+olive. An operator looking from the map to a feed was being asked to match a
+green patch to a different green and a tan hillside to a blue one.
+
+The map's classification colours are now derived from the colours the cameras
+render the same classes in, so the two cannot drift again. Hue and saturation
+come from the camera; only lightness is the map's own, and it ranks by what
+has to be found rather than by what the ground looks like: open ground is most
+of the view and stays quiet, a thing that stops the vehicle is the brightest
+mark on the display. Lifting every class equally was truer to the camera and
+turned the map into an even wash with no hierarchy in it, which is why ground
+sits well below scrub, and scrub below tree and rock.
+
+One class is deliberately not natural. A hole is a hazard rather than terrain
+and is coloured to be found rather than recognised; a test holds it well away
+from every other hue.
+
+## A formation belongs to the rover, not to the compass
+
+Slots were offsets on the map. That already held the formation on the rover as
+it drove, but not as it *turned*: measured, a rover that formed up facing north
+and then turned east left its aircraft at the same compass bearings, which put
+them off its left-hand side. A screen flown for a vehicle belongs ahead of that
+vehicle, and a vehicle that turns takes its screen with it.
+
+A slot is now a place on the rover -- so far forward of its nose, so far across
+it -- and the world position is worked out from the rover's current heading
+every tick (`to_body_frame` / `to_map_frame`). The aircraft's facing is held the
+same way, so the group's sensors keep pointing where the vehicle is going.
+
+**The dial changed meaning, so it changed label.** It reads "Off nose" and
+ranges from -180 to +180, where zero is straight ahead. An absolute compass
+bearing would have been correct at the moment it was set and wrong a lane
+later, which is a worse kind of wrong than being relative. The formation
+preview on the map turns live as the rover turns, because a vee drawn ahead of
+a rover that has since turned is showing the operator somewhere the aircraft
+will not be.
+
+Three existing tests had been passing for the wrong reason: they only ever
+drove a rover at a heading of zero, where the vehicle's frame and the map's
+are identical. They now turn the rover.

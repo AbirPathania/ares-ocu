@@ -20,6 +20,7 @@ from ocu.core.constants import MIN_AIRCRAFT_SEPARATION_M
 from ocu.core.flight_director import (
     AircraftMode,
     FlightDirector,
+    to_body_frame,
     tricopter_limits,
 )
 from ocu.core.formation import compute_formation_targets
@@ -44,8 +45,11 @@ def launch_formation(director, rover, bearing=0.0, pattern="vee", spacing=6.0, r
         rover.x, rover.y, bearing, pattern, spacing, rally, standoff_m=standoff
     )[: len(ids)]
     for i, (uid, t) in enumerate(zip(ids, targets)):
+        # Slots are places on the rover, so a map offset is converted into
+        # the vehicle's frame before it is handed over.
+        forward, right = to_body_frame(t.x - rover.x, t.y - rover.y, rover.heading)
         director.launch(
-            uid, t.x - rover.x, t.y - rover.y, t.z, bearing,
+            uid, forward, right, t.z, bearing - rover.heading,
             rover.x, rover.y, rover.heading, liftoff_in_s=i * 1.5,
         )
     return targets
@@ -380,3 +384,95 @@ def test_a_single_huge_step_is_still_the_same_motion():
 
     fine, huge = drive(0.1), drive(20.0)
     assert math.hypot(huge[0] - fine[0], huge[1] - fine[1]) < 0.05
+
+
+# --- the formation belongs to the rover, not to the compass -----------------------
+
+
+def bearing_off_nose(director, rover, uid) -> float:
+    state = director.aircraft[uid]
+    to_slot = math.degrees(math.atan2(state.x - rover.x, state.y - rover.y))
+    return (to_slot - rover.heading + 180.0) % 360.0 - 180.0
+
+
+def range_from_rover(director, rover, uid) -> float:
+    state = director.aircraft[uid]
+    return math.hypot(state.x - rover.x, state.y - rover.y)
+
+
+def test_the_formation_turns_with_the_rover():
+    """A screen flown for a vehicle belongs ahead of that vehicle. Held as a
+    map offset the formation stays pinned to a compass bearing, and the first
+    time the rover turns a corner the aircraft are off to one side of it."""
+    director, rover = FlightDirector(), MovingRover(vy=1.5, heading=0.0)
+    launch_formation(director, rover, bearing=0.0)
+    fly(director, rover, 45.0)
+    settled = {uid: bearing_off_nose(director, rover, uid) for uid in IDS}
+    assert abs(settled["tricopter-2"]) < 2.0, "the leader sits ahead of the rover"
+
+    for heading, vx, vy in ((90.0, 1.5, 0.0), (180.0, 0.0, -1.5), (270.0, -1.5, 0.0)):
+        rover.heading, rover.vx, rover.vy = heading, vx, vy
+        fly(director, rover, 45.0)
+        for uid in IDS:
+            assert abs(bearing_off_nose(director, rover, uid) - settled[uid]) < 3.0, (
+                f"{uid} drifted off the nose after turning to {heading:.0f}"
+            )
+
+
+def test_the_shape_is_kept_through_a_turn():
+    director, rover = FlightDirector(), MovingRover(vy=1.5, heading=0.0)
+    launch_formation(director, rover, bearing=0.0, pattern="line", spacing=8.0)
+    fly(director, rover, 45.0)
+    before = [range_from_rover(director, rover, uid) for uid in IDS]
+
+    rover.heading, rover.vx, rover.vy = 225.0, -1.1, -1.1
+    fly(director, rover, 45.0)
+    after = [range_from_rover(director, rover, uid) for uid in IDS]
+    for was, now in zip(before, after):
+        assert abs(now - was) < 1.0, "the formation changed size going round a corner"
+
+
+def test_the_aircraft_keep_facing_where_the_vehicle_is_going():
+    """The group presents one sensor direction, and that direction is the
+    vehicle's, not a compass bearing it was launched on."""
+    director, rover = FlightDirector(), MovingRover(vy=1.5, heading=0.0)
+    launch_formation(director, rover, bearing=0.0)
+    fly(director, rover, 45.0)
+
+    rover.heading, rover.vx, rover.vy = 120.0, 1.3, -0.75
+    fly(director, rover, 45.0)
+    for uid in IDS:
+        off = (director.aircraft[uid].heading - rover.heading + 180.0) % 360.0 - 180.0
+        assert abs(off) < 5.0, f"{uid} still facing where it launched"
+
+
+def test_a_slot_off_the_nose_stays_off_the_nose():
+    """A formation set forty degrees to one side holds forty degrees to that
+    side, whichever way the vehicle is pointing."""
+    director, rover = FlightDirector(), MovingRover(vy=1.2, heading=0.0)
+    launch_formation(director, rover, bearing=40.0)
+    fly(director, rover, 45.0)
+    assert abs(bearing_off_nose(director, rover, "tricopter-2") - 40.0) < 3.0
+
+    rover.heading, rover.vx, rover.vy = 300.0, -1.0, 0.6
+    fly(director, rover, 45.0)
+    assert abs(bearing_off_nose(director, rover, "tricopter-2") - 40.0) < 3.0
+
+
+def test_the_body_frame_conversions_are_inverses():
+    from ocu.core.flight_director import to_map_frame
+
+    for heading in (0.0, 37.0, 90.0, 180.0, 275.0):
+        for dx, dy in ((10.0, 0.0), (0.0, -7.5), (3.0, 4.0)):
+            forward, right = to_body_frame(dx, dy, heading)
+            back_x, back_y = to_map_frame(forward, right, heading)
+            assert abs(back_x - dx) < 1e-9 and abs(back_y - dy) < 1e-9
+
+
+def test_forward_is_along_the_nose_and_right_is_across_it():
+    """The frame formation.py builds slots in, so the two cannot disagree."""
+    forward, right = to_body_frame(0.0, 10.0, 0.0)  # due north, rover facing north
+    assert abs(forward - 10.0) < 1e-9 and abs(right) < 1e-9
+
+    forward, right = to_body_frame(10.0, 0.0, 0.0)  # due east of a north-facing rover
+    assert abs(forward) < 1e-9 and abs(right - 10.0) < 1e-9

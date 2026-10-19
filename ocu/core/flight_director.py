@@ -88,6 +88,26 @@ MAX_PLAN_FAILURES = 3
 #: when you watch rather than about what the vehicles do.
 MAX_INTEGRATION_STEP_S = 0.1
 
+def to_body_frame(dx: float, dy: float, heading_deg: float) -> tuple[float, float]:
+    """A map offset, expressed in the vehicle's own frame.
+
+    Compass convention: forward is (sin h, cos h) and right is 90 degrees
+    clockwise of it, which is the same frame formation.py builds slots in.
+    """
+    heading = math.radians(heading_deg)
+    forward = dx * math.sin(heading) + dy * math.cos(heading)
+    right = dx * math.cos(heading) - dy * math.sin(heading)
+    return forward, right
+
+
+def to_map_frame(forward: float, right: float, heading_deg: float) -> tuple[float, float]:
+    """The inverse: where a place on the vehicle currently is on the map."""
+    heading = math.radians(heading_deg)
+    dx = forward * math.sin(heading) + right * math.cos(heading)
+    dy = forward * math.cos(heading) - right * math.sin(heading)
+    return dx, dy
+
+
 TOUCHDOWN_ALTITUDE_M = 0.06
 
 #: An aircraft counts as on its slot when it is this close to it, this close
@@ -176,12 +196,21 @@ class AircraftState:
     unit_id: str
     body: KinematicBody
     mode: AircraftMode = AircraftMode.STATION
-    slot_dx: float = 0.0
-    slot_dy: float = 0.0
+    #: Where this aircraft sits relative to the rover, in the rover's own
+    #: frame: forward along its nose, right across it. Held this way rather
+    #: than as a map offset because a screen flown for a vehicle belongs
+    #: ahead of that vehicle, and a vehicle that turns takes its screen with
+    #: it. Held as a map offset, the formation stays pinned to a compass
+    #: bearing and ends up beside or behind the rover the moment it turns.
+    slot_forward: float = 0.0
+    slot_right: float = 0.0
     commanded_altitude_m: float = 20.0
     #: Compass heading the aircraft faces while holding its slot. Every
     #: aircraft in a formation faces the same way, so the group presents one
     #: sensor direction rather than three.
+    #: Which way the aircraft faces while holding station, relative to the
+    #: rover's nose. Same reason: the group's sensors point where the vehicle
+    #: is going, not at a fixed compass bearing.
     bearing_deg: float = 0.0
     #: Seconds until lift-off, while waiting in the bay.
     liftoff_in_s: float = 0.0
@@ -237,24 +266,36 @@ class FlightDirector:
     # --- ownership ---
 
     def adopt(
-        self, unit_id: str, x: float, y: float, z: float, heading: float, rover_x: float, rover_y: float
+        self,
+        unit_id: str,
+        x: float,
+        y: float,
+        z: float,
+        heading: float,
+        rover_x: float,
+        rover_y: float,
+        rover_heading: float = 0.0,
     ) -> None:
         slot_x, slot_y = clamp_to_tether(x, y, rover_x, rover_y)
         self.aircraft[unit_id] = AircraftState(
             unit_id=unit_id,
             body=KinematicBody(x=x, y=y, z=z, heading=heading, limits=tricopter_limits()),
             mode=AircraftMode.STATION,
-            slot_dx=slot_x - rover_x,
-            slot_dy=slot_y - rover_y,
+            **dict(
+                zip(
+                    ("slot_forward", "slot_right"),
+                    to_body_frame(slot_x - rover_x, slot_y - rover_y, rover_heading),
+                )
+            ),
             commanded_altitude_m=max(z, 1.0),
-            bearing_deg=heading % 360.0,
+            bearing_deg=(heading - rover_heading) % 360.0,
         )
 
     def launch(
         self,
         unit_id: str,
-        slot_dx: float,
-        slot_dy: float,
+        slot_forward: float,
+        slot_right: float,
         altitude_m: float,
         bearing_deg: float,
         rover_x: float,
@@ -275,13 +316,17 @@ class FlightDirector:
         All of it through the same acceleration limits as everything else
         that flies here.
         """
-        slot_x, slot_y = clamp_to_tether(rover_x + slot_dx, rover_y + slot_dy, rover_x, rover_y)
+        dx, dy = to_map_frame(slot_forward, slot_right, rover_heading)
+        slot_x, slot_y = clamp_to_tether(rover_x + dx, rover_y + dy, rover_x, rover_y)
+        held_forward, held_right = to_body_frame(
+            slot_x - rover_x, slot_y - rover_y, rover_heading
+        )
         self.aircraft[unit_id] = AircraftState(
             unit_id=unit_id,
             body=KinematicBody(x=rover_x, y=rover_y, z=0.0, heading=rover_heading, limits=tricopter_limits()),
             mode=AircraftMode.PREFLIGHT,
-            slot_dx=slot_x - rover_x,
-            slot_dy=slot_y - rover_y,
+            slot_forward=held_forward,
+            slot_right=held_right,
             commanded_altitude_m=max(altitude_m, 1.0),
             bearing_deg=bearing_deg % 360.0,
             liftoff_in_s=max(liftoff_in_s, 0.0),
@@ -383,7 +428,9 @@ class FlightDirector:
         state.mode = AircraftMode.MANUAL
         return True
 
-    def release_manual(self, unit_id: str, rover_x: float, rover_y: float) -> None:
+    def release_manual(
+        self, unit_id: str, rover_x: float, rover_y: float, rover_heading: float = 0.0
+    ) -> None:
         if unit_id == "rover":
             if self.rover_mode == RoverMode.MANUAL:
                 self.rover_mode = RoverMode.NORMAL
@@ -393,7 +440,9 @@ class FlightDirector:
         if state is not None and state.mode == AircraftMode.MANUAL:
             # Hold wherever the operator left it, as a fresh slot on the rover.
             slot_x, slot_y = clamp_to_tether(state.x, state.y, rover_x, rover_y)
-            state.slot_dx, state.slot_dy = slot_x - rover_x, slot_y - rover_y
+            state.slot_forward, state.slot_right = to_body_frame(
+                slot_x - rover_x, slot_y - rover_y, rover_heading
+            )
             state.commanded_altitude_m = max(state.z, 1.0)
             state.mode = AircraftMode.STATION
             state.manual = ManualInput()
@@ -612,13 +661,17 @@ class FlightDirector:
             return poses, rover_pose, events
 
         rover_pose = self._update_rover(dt_s, rover_x, rover_y, rover_heading, events)
-        effective_x, effective_y = (rover_pose[0], rover_pose[1]) if rover_pose else (rover_x, rover_y)
+        effective_x, effective_y, effective_heading = (
+            rover_pose if rover_pose else (rover_x, rover_y, rover_heading)
+        )
 
         poses: dict[str, tuple[float, float, float, float]] = {}
         for state in self.aircraft.values():
             if state.mode == AircraftMode.DOCKED:
                 continue
-            self._tick_aircraft(state, dt_s, effective_x, effective_y, events)
+            self._tick_aircraft(
+                state, dt_s, effective_x, effective_y, effective_heading, events
+            )
             if state.mode == AircraftMode.PREFLIGHT:
                 continue  # still in the bay: the roster shows it docked
             poses[state.unit_id] = (state.x, state.y, state.z, state.heading)
@@ -730,7 +783,13 @@ class FlightDirector:
         return None
 
     def _tick_aircraft(
-        self, state: AircraftState, dt_s: float, rover_x: float, rover_y: float, events: list
+        self,
+        state: AircraftState,
+        dt_s: float,
+        rover_x: float,
+        rover_y: float,
+        rover_heading: float,
+        events: list,
     ) -> None:
         body = state.body
 
@@ -778,8 +837,9 @@ class FlightDirector:
             return
 
         if state.mode in (AircraftMode.TRANSITING, AircraftMode.STATION):
+            dx, dy = to_map_frame(state.slot_forward, state.slot_right, rover_heading)
             target_x, target_y = clamp_to_tether(
-                rover_x + state.slot_dx, rover_y + state.slot_dy, rover_x, rover_y
+                rover_x + dx, rover_y + dy, rover_x, rover_y
             )
             body.step_toward(target_x, target_y, dt_s, feedforward=self._rover_velocity)
             body.step_altitude(state.commanded_altitude_m, dt_s)
@@ -791,7 +851,7 @@ class FlightDirector:
             if math.hypot(rel_vx, rel_vy) > COURSE_FACING_SPEED_MS:
                 body.step_heading(math.degrees(math.atan2(rel_vx, rel_vy)) % 360.0, dt_s)
             else:
-                body.step_heading(state.bearing_deg, dt_s)
+                body.step_heading((rover_heading + state.bearing_deg) % 360.0, dt_s)
 
             if state.mode == AircraftMode.TRANSITING:
                 on_slot = (

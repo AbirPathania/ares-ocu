@@ -442,9 +442,14 @@ class MainWindow(QMainWindow):
         # The formation faces the way the rover is heading unless the
         # operator turns the dial: scouting along the line of travel is what
         # nearly every launch is for, and a default of north is arbitrary.
-        self.context_panel.launch_console.bearing_from_map(
-            self._recommended_bearing if self._recommended_bearing is not None else rover.pose.heading
-        )
+        # The dial is relative to the rover's nose, so straight ahead is
+        # zero. A recommendation arrives as a compass bearing and is turned
+        # into one the operator can read against the vehicle.
+        if self._recommended_bearing is not None:
+            relative = (self._recommended_bearing - rover.pose.heading + 180.0) % 360.0 - 180.0
+        else:
+            relative = 0.0
+        self.context_panel.launch_console.bearing_from_map(relative)
         self.context_panel.launch_console.set_available_tricopters(available, origin)
         self.context_panel.show_formation()
         self.map_view.set_compass_active(True, (origin[0], origin[1]))
@@ -538,7 +543,9 @@ class MainWindow(QMainWindow):
         holder = self.control_authority.manual_holder
         if holder is not None:
             rover = self.units["rover"]
-            self.flight_director.release_manual(holder, rover.pose.x, rover.pose.y)
+            self.flight_director.release_manual(
+                holder, rover.pose.x, rover.pose.y, rover.pose.heading
+            )
         self.control_authority.release_manual()
         if holder:
             self.event_log.log(self.mission_clock.clock_s, f"MANUAL control released: {holder}")
@@ -620,6 +627,9 @@ class MainWindow(QMainWindow):
         for unit_id, event in events:
             self._handle_director_event(unit_id, event)
         self._tick_launches()
+        self.context_panel.launch_console.set_rover_pose(
+            rover.pose.x, rover.pose.y, rover.pose.heading
+        )
         self._check_geofence()
         self._refresh_status()
 
@@ -1147,14 +1157,15 @@ class MainWindow(QMainWindow):
     def _start_launch(self, aircraft: list[dict], bearing: float) -> None:
         """Hand a launch to the flight director.
 
-        Each aircraft's slot is an offset from the rover, so the formation
-        is held on the vehicle as it drives instead of aimed at a point on
-        the map that the vehicle has already left.
+        Each slot is a place on the rover -- so far forward of it, so far
+        across it -- rather than an offset on the map, so the formation
+        turns with the vehicle instead of staying pinned to a compass
+        bearing while the rover drives out from under it.
         """
         rover = self.units["rover"].pose
         for craft in aircraft:
             self.flight_director.launch(
-                craft["id"], craft["dx"], craft["dy"], craft["altitude"], bearing,
+                craft["id"], craft["forward"], craft["right"], craft["altitude"], bearing,
                 rover.x, rover.y, rover.heading, liftoff_in_s=craft["delay"],
             )
         self._launches.append({"ids": [c["id"] for c in aircraft], "stage": "LAUNCHING"})
@@ -1200,7 +1211,7 @@ class MainWindow(QMainWindow):
         rover = self.units["rover"]
         self.flight_director.adopt(
             unit_id, unit.pose.x, unit.pose.y, unit.pose.z, unit.pose.heading,
-            rover.pose.x, rover.pose.y,
+            rover.pose.x, rover.pose.y, rover.pose.heading,
         )
         return True
 

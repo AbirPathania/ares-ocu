@@ -38,6 +38,7 @@ from ocu.core.constants import (
     MIN_AIRCRAFT_SEPARATION_M,
     TETHER_LIMIT_M,
 )
+from ocu.core.flight_director import to_body_frame
 from ocu.core.formation import Target, compute_formation_targets
 from ocu.core.launch_sequencer import LaunchSequencer, LaunchStage
 from ocu.ui.labels import short_label
@@ -72,6 +73,7 @@ class LaunchConsole(QWidget):
         super().__init__(parent)
         self._sequencer = LaunchSequencer()
         self._origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._rover_heading = 0.0
         self._available_ids: list[str] = []
 
         self._build_ui()
@@ -113,11 +115,19 @@ class LaunchConsole(QWidget):
         form = QFormLayout()
         form.setSpacing(4)
 
+        # Relative to the rover's nose, not to north: the formation is flown
+        # for the vehicle, so zero is straight ahead and the setting stays
+        # true when the rover turns. An absolute compass bearing would read
+        # correctly at the moment it was set and be wrong a lane later.
         self.bearing_spin = QDoubleSpinBox()
-        self.bearing_spin.setRange(0.0, 359.9)
-        self.bearing_spin.setSuffix("°")
+        self.bearing_spin.setRange(-180.0, 180.0)
+        self.bearing_spin.setSuffix("\u00b0")
+        self.bearing_spin.setToolTip(
+            "Where the formation sits relative to the rover's nose.\n"
+            "0 is straight ahead; it turns with the vehicle."
+        )
         self.bearing_spin.valueChanged.connect(self._on_params_changed)
-        form.addRow("Bearing", self.bearing_spin)
+        form.addRow("Off nose", self.bearing_spin)
 
         self.pattern_combo = QComboBox()
         # A plain QListView takes the stylesheet; the native popup ignores it,
@@ -202,7 +212,7 @@ class LaunchConsole(QWidget):
             self.stage_label.setText(LaunchStage.ARMED.value)
             self.stageChanged.emit(LaunchStage.ARMED.value)
 
-        self.bearingChanged.emit(self.bearing_spin.value())
+        self.bearingChanged.emit(self._compass_bearing())
         if tricopter_ids:
             self._emit_preview()
         else:
@@ -244,10 +254,31 @@ class LaunchConsole(QWidget):
             if box.isChecked() and box.isEnabled()
         ]
 
+    def set_rover_pose(self, x: float, y: float, heading_deg: float) -> None:
+        """Where the rover is and which way it faces.
+
+        The formation is defined against the vehicle, so the preview has to
+        turn with it: a vee drawn ahead of a rover that has since turned is
+        showing the operator somewhere the aircraft will not be.
+        """
+        turned = abs((heading_deg - self._rover_heading + 180.0) % 360.0 - 180.0) > 0.5
+        moved = abs(x - self._origin[0]) > 0.05 or abs(y - self._origin[1]) > 0.05
+        self._origin = (x, y, self._origin[2])
+        self._rover_heading = heading_deg
+        if (turned or moved) and self._sequencer.stage in (LaunchStage.ARMED, LaunchStage.STAGED):
+            self._emit_preview()
+            self.bearingChanged.emit(self._compass_bearing())
+
+    def _compass_bearing(self) -> float:
+        """The dial reads against the rover's nose; the map works in compass
+        bearings, so this is where the two meet."""
+        return (self._rover_heading + self.bearing_spin.value()) % 360.0
+
     def bearing_from_map(self, bearing_deg: float) -> None:
         self.bearing_spin.blockSignals(True)
         self.bearing_spin.setValue(bearing_deg)
         self.bearing_spin.blockSignals(False)
+        self.bearingChanged.emit(self._compass_bearing())
         self._emit_preview()
 
     def is_active(self) -> bool:
@@ -259,7 +290,7 @@ class LaunchConsole(QWidget):
         targets = compute_formation_targets(
             self._origin[0],
             self._origin[1],
-            self.bearing_spin.value(),
+            self._compass_bearing(),
             self.current_pattern(),
             self.spacing_spin.value(),
             self.rally_altitude_spin.value(),
@@ -268,7 +299,7 @@ class LaunchConsole(QWidget):
         return targets[: max(len(self.selected_ids()), 1)]
 
     def _on_params_changed(self, *_args) -> None:
-        self.bearingChanged.emit(self.bearing_spin.value())
+        self.bearingChanged.emit(self._compass_bearing())
         self._emit_preview()
         self._update_button_states()
 
@@ -297,7 +328,7 @@ class LaunchConsole(QWidget):
         self.stageChanged.emit(self._sequencer.stage.value)
         self.eventLogged.emit(
             f"Formation staged: {len(selected)} aircraft, {self.current_pattern()} "
-            f"at bearing {self.bearing_spin.value():.0f}°, spacing {self.spacing_spin.value():.1f} m, "
+            f"at bearing {self.bearing_spin.value():+.0f}° off the nose, spacing {self.spacing_spin.value():.1f} m, "
             f"rally {self.rally_altitude_spin.value():.0f} m"
         )
         self._update_button_states()
@@ -311,14 +342,17 @@ class LaunchConsole(QWidget):
         self.stageChanged.emit(self._sequencer.stage.value)
         launched = [plan.tricopter_id for plan in self._sequencer.plans]
         self.eventLogged.emit(f"Launch commanded: {', '.join(short_label(i) for i in launched)}")
+        heading = self._rover_heading
         self.launchRequested.emit(
             {
+                # Relative to the rover's nose, which is what the dial reads.
                 "bearing": self.bearing_spin.value(),
                 "aircraft": [
                     {
                         "id": plan.tricopter_id,
-                        "dx": plan.slot_offset[0],
-                        "dy": plan.slot_offset[1],
+                        **dict(
+                            zip(("forward", "right"), to_body_frame(*plan.slot_offset, heading))
+                        ),
                         "altitude": plan.target.z,
                         "delay": plan.liftoff_offset_s,
                     }

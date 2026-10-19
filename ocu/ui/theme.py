@@ -32,6 +32,15 @@ from __future__ import annotations
 
 from PySide6.QtGui import QColor
 
+from ocu.core.camera import CANOPY_RGB, GROUND_RGB, ROCK_RGB, SCRUB_RGB
+from ocu.core.terrain import Terrain
+
+_CAM_GROUND = GROUND_RGB[Terrain.GROUND]
+_CAM_TRACK = GROUND_RGB[Terrain.TRACK]
+_CAM_SCRUB = SCRUB_RGB
+_CAM_CANOPY = CANOPY_RGB
+_CAM_ROCK = ROCK_RGB
+
 # --- spacing --------------------------------------------------------------
 #
 # A four pixel baseline. Every gap in the interface is a multiple of one
@@ -123,15 +132,32 @@ def hex_of(color: QColor) -> str:
 # that carries status, and must never compete with red, amber or blue. It
 # answers "what is the ground", not "what should I worry about".
 
+# The map's classification colours are derived from the colours the cameras
+# render the same ground in, lifted for a dark display. They used to be
+# chosen separately and had drifted a long way apart: open ground was blue on
+# the map and tan in the camera, rock cold grey against warm. An operator
+# looking from one to the other was being asked to match a green patch to a
+# different green, and a tan hillside to a blue one.
+#
+# Hue and saturation come from the camera; only lightness is raised, because
+# a map is a sensor display read at a glance and the camera is a window. One
+# class is deliberately not natural: a hole is a hazard rather than terrain,
+# and is coloured to be found rather than to be recognised.
+
+
+def _mapped(rgb: tuple[int, int, int], lift: int) -> QColor:
+    """The camera's colour for a class, raised to map brightness."""
+    return QColor(*rgb).lighter(lift)
+
+
 TERRAIN_COLORS = {
-    # Open ground sits barely above the background: it reads as "swept" and
-    # nothing more. Anything a driver has to care about is lifted out of it.
-    "GROUND": QColor("#141A22"),
-    "TRACK": QColor("#4A4639"),   # the easiest going, so the brightest
-    "SCRUB": QColor("#1E2E1C"),   # low vegetation, passable
-    "TREE": QColor("#2C4A2E"),    # canopy: impassable, and it blocks the beam
-    "ROCK": QColor("#66727E"),    # impassable, and it blocks the beam
-    "POTHOLE": QColor("#2A1F2C"),  # a hole: darker than anything around it
+    # The dim tone a return starts from before its intensity lifts it.
+    "GROUND": _mapped(_CAM_GROUND, 34),
+    "TRACK": _mapped(_CAM_TRACK, 58),
+    "SCRUB": _mapped(_CAM_SCRUB, 62),
+    "TREE": _mapped(_CAM_CANOPY, 72),
+    "ROCK": _mapped(_CAM_ROCK, 68),
+    "POTHOLE": QColor("#2A1F2C"),
 }
 
 TERRAIN_LABELS = {
@@ -143,16 +169,20 @@ TERRAIN_LABELS = {
     "POTHOLE": "hole",
 }
 
-
-#: The colour of a strong return off each surface. A painted point is a
 #: blend from the dim TERRAIN_COLORS tone toward this, weighted by the
 #: measured intensity, so a hard rock face reads bright and grazed ground
 #: stays dim without either changing hue.
+# Hue comes from the camera; brightness is the map's own decision, and it
+# ranks by what the operator needs to find. Open ground is most of the view
+# and stays quiet; a thing that stops the vehicle is the brightest mark on
+# the display. Lifting every class equally would be truer to the camera and
+# would turn the map into an even wash with no hierarchy in it at all.
 RETURN_COLORS = {
-    "GROUND": QColor("#5E7489"),
-    "TRACK": QColor("#A79A74"),
-    "SCRUB": QColor("#6E9B5A"),
-    "TREE": QColor("#7FD08C"),
-    "ROCK": QColor("#D5DEE6"),   # cold pale grey: nothing else on the map is
-    "POTHOLE": QColor("#9B6BA8"),  # a hole reads as a hazard, not as terrain
+    "GROUND": _mapped(_CAM_GROUND, 72),
+    "TRACK": _mapped(_CAM_TRACK, 112),
+    "SCRUB": _mapped(_CAM_SCRUB, 150),
+    "TREE": _mapped(_CAM_CANOPY, 270),
+    "ROCK": _mapped(_CAM_ROCK, 185),
+    # Not a terrain colour: a hole is a hazard, and is coloured to be found.
+    "POTHOLE": QColor("#B07ABE"),
 }

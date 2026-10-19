@@ -77,3 +77,56 @@ def test_a_threat_card_can_be_built_and_shown(tmp_path):
     panel.set_status(4.0, -8.0, "CONFIRMED")
     app.processEvents()
     panel.repaint()
+
+
+# --- the map and the cameras agree about what the ground looks like ---------------
+
+def test_the_maps_classes_share_the_cameras_hues():
+    """An operator looking from the map to a feed should not have to match a
+    green patch to a different green. Open ground used to be blue on the map
+    and tan in the camera."""
+    from PySide6.QtGui import QColor
+
+    from ocu.core.camera import CANOPY_RGB, GROUND_RGB, ROCK_RGB, SCRUB_RGB
+    from ocu.core.terrain import Terrain
+    from ocu.ui.theme import RETURN_COLORS, TERRAIN_COLORS
+
+    pairs = {
+        "GROUND": GROUND_RGB[Terrain.GROUND],
+        "TRACK": GROUND_RGB[Terrain.TRACK],
+        "SCRUB": SCRUB_RGB,
+        "TREE": CANOPY_RGB,
+        "ROCK": ROCK_RGB,
+    }
+    for name, rgb in pairs.items():
+        camera = QColor(*rgb)
+        for palette in (RETURN_COLORS, TERRAIN_COLORS):
+            drawn = palette[name]
+            spread = abs(drawn.hslHue() - camera.hslHue())
+            assert min(spread, 360 - spread) <= 6, f"{name}: {drawn.name()} vs {camera.name()}"
+
+
+def test_the_map_ranks_brightness_by_what_has_to_be_found():
+    """Hue is the camera's; brightness is the map's own decision. Open ground
+    is most of the view and stays quiet; a thing that stops the vehicle is
+    the brightest mark on the display."""
+    from ocu.ui.theme import RETURN_COLORS
+
+    def lum(colour):
+        return 0.2126 * colour.redF() + 0.7152 * colour.greenF() + 0.0722 * colour.blueF()
+
+    ground = lum(RETURN_COLORS["GROUND"])
+    assert ground < lum(RETURN_COLORS["SCRUB"]) < lum(RETURN_COLORS["TREE"])
+    assert lum(RETURN_COLORS["TREE"]) < lum(RETURN_COLORS["ROCK"])
+    assert ground < lum(RETURN_COLORS["TRACK"])
+
+
+def test_a_hole_is_coloured_to_be_found_rather_than_recognised():
+    """The one class that is deliberately not natural: it is a hazard, not
+    terrain, and nothing else on the map is that colour."""
+    from ocu.ui.theme import RETURN_COLORS
+
+    hole = RETURN_COLORS["POTHOLE"]
+    for name in ("GROUND", "TRACK", "SCRUB", "TREE", "ROCK"):
+        spread = abs(hole.hslHue() - RETURN_COLORS[name].hslHue())
+        assert min(spread, 360 - spread) > 60, name
