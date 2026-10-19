@@ -47,3 +47,33 @@ def test_the_threat_list_and_the_log_use_the_same_table():
 
     assert panel.sensor_list is sensor_list
     assert window.sensor_list is sensor_list
+
+
+# --- the panels survive being shown -----------------------------------------------
+
+def test_a_threat_card_can_be_built_and_shown(tmp_path):
+    """Built and laid out for real. A card that only works while its panel is
+    hidden passes every test and crashes the moment the window is on screen."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    from ocu.ui.threat_panel import ThreatPanel
+
+    panel = ThreatPanel()
+    panel.resize(360, 400)
+    panel.show()
+    app.processEvents()
+
+    panel.add_detection(
+        {"x": 4.0, "y": -8.0, "type": "mine", "confidence": 0.97, "sensors": ["gpr", "saw_voc"]}
+    )
+    app.processEvents()
+    panel.repaint()
+    assert len(panel._threats) == 1
+
+    panel.set_status(4.0, -8.0, "CONFIRMED")
+    app.processEvents()
+    panel.repaint()

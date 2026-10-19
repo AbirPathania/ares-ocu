@@ -16,10 +16,18 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD, DEFAULT_ALERT_CONFIRM_TIMEOUT_S
 from ocu.ui.icons import draw_threat_glyph
+from ocu.ui.motion import Reveal
 
 TICK_MS = 100
 BADGE_SIZE = 44
@@ -74,6 +82,15 @@ class AlertBanner(QWidget):
         self._detection: dict | None = None
         self._remaining_s = DEFAULT_ALERT_CONFIRM_TIMEOUT_S
 
+        # Arriving and leaving rather than appearing and vanishing. A banner
+        # that blinks out between two glances leaves a doubt about whether it
+        # was answered or missed. It opens downward from the edge it belongs
+        # to, which is the top of the map it is reporting about.
+        self._fade = QGraphicsOpacityEffect(self)
+        self._fade.setOpacity(0.0)
+        self.setGraphicsEffect(self._fade)
+        self._reveal = Reveal(self, on_value=self._apply_reveal)
+
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
         self._timer.timeout.connect(self._on_tick)
@@ -111,6 +128,11 @@ class AlertBanner(QWidget):
 
         self.hide()
 
+    def _apply_reveal(self, progress: float) -> None:
+        self._fade.setOpacity(progress)
+        full = max(self.sizeHint().height(), 1)
+        self.setMaximumHeight(max(int(full * progress), 1))
+
     def show_alert(self, detection: dict) -> None:
         self._detection = detection
         self._remaining_s = DEFAULT_ALERT_CONFIRM_TIMEOUT_S
@@ -132,7 +154,8 @@ class AlertBanner(QWidget):
             f"   ({x:.0f}, {y:.0f}) m   SRC {source}"
         )
         self._update_countdown_label()
-        self.show()
+        self.setMaximumHeight(16777215)  # let it measure itself before revealing
+        self._reveal.reveal()
         self._timer.start()
 
     def dismiss_for(self, detection: dict) -> None:
@@ -148,7 +171,7 @@ class AlertBanner(QWidget):
         if (current.get("x"), current.get("y")) == (detection.get("x"), detection.get("y")):
             self._timer.stop()
             self._detection = None
-            self.hide()
+            self._reveal.dismiss()
 
     def _on_tick(self) -> None:
         self._remaining_s -= TICK_MS / 1000.0
@@ -168,7 +191,7 @@ class AlertBanner(QWidget):
     def _resolve(self, signal: Signal) -> None:
         self._timer.stop()
         detection = self._detection
-        self.hide()
+        self._reveal.dismiss()
         self._detection = None
         if detection is not None:
             signal.emit(detection)

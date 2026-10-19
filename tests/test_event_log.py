@@ -99,3 +99,66 @@ def test_clearing_empties_it(app):
     assert lines(log) == []
     log.log(2.0, "after", key="k")
     assert len(lines(log)) == 1, "and the subject does not survive the clear"
+
+
+# --- the link strip ---------------------------------------------------------------
+
+
+def test_only_an_interruption_is_coloured(app):
+    """A strip that paints ninety-five percent of its area solid to say
+    nothing happened spends all its contrast on the usual case."""
+    from ocu.ui.event_log import OUTAGE_COLORS
+
+    assert "CONNECTED" not in OUTAGE_COLORS
+    assert set(OUTAGE_COLORS) == {"DEGRADED", "LOST", "SILENT"}
+
+
+def test_the_strip_records_what_it_was_told(app):
+    from ocu.ui.event_log import HISTORY_SAMPLES, EventLog
+
+    log = EventLog()
+    strip = log.link_strip
+    strip.set_link("tricopter-1", "LOST")
+    for _ in range(4):
+        strip._sample()
+    assert strip._history["tricopter-1"][-4:] == ["LOST"] * 4
+    assert strip._history["rover"][-1] == "CONNECTED", "the others are untouched"
+    assert len(strip._history["tricopter-1"]) == HISTORY_SAMPLES, "the window is fixed"
+
+
+def test_restoring_a_link_leaves_the_outage_in_the_history(app):
+    """What an operator cannot get anywhere else is when it dropped and for
+    how long. A strip that only showed the present would duplicate the dot on
+    the roster card."""
+    from ocu.ui.event_log import EventLog
+
+    log = EventLog()
+    strip = log.link_strip
+    strip.set_link("tricopter-2", "LOST")
+    for _ in range(3):
+        strip._sample()
+    strip.set_link("tricopter-2", "CONNECTED")
+    for _ in range(3):
+        strip._sample()
+
+    assert strip._states["tricopter-2"] == "CONNECTED"
+    assert "LOST" in strip._history["tricopter-2"], "the outage is still on the record"
+
+
+def test_clearing_forgets_the_outage(app):
+    from ocu.ui.event_log import EventLog
+
+    log = EventLog()
+    strip = log.link_strip
+    strip.set_link("rover", "LOST")
+    strip._sample()
+    log.clear()
+    assert set(strip._history["rover"]) == {"CONNECTED"}
+
+
+def test_an_unknown_unit_is_ignored_rather_than_added(app):
+    from ocu.ui.event_log import EventLog, ROW_ORDER
+
+    log = EventLog()
+    log.set_link("not-a-unit", "LOST")
+    assert set(log.link_strip._states) == set(ROW_ORDER)

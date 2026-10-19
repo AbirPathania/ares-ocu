@@ -20,23 +20,44 @@ from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWi
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD
 from ocu.core.mesh_state import voxel_key
+from ocu.ui.theme import (
+    BACKGROUND,
+    CAUTION,
+    FONT_LABEL,
+    FRIENDLY,
+    HAIRLINE,
+    INERT,
+    PANEL_RAISED,
+    TEXT,
+    TEXT_DIM,
+    TEXT_FAINT,
+    THREAT,
+)
 from ocu.ui.icons import draw_threat_glyph
 from ocu.ui.labels import sensor_list
+from ocu.ui.motion import FAST_MS, Reveal
 
 CARD_HEIGHT = 64
 
 STATUS_COLORS = {
-    "PENDING": QColor("#C9952F"),
-    "CONFIRMED": QColor("#C04438"),
-    "CLEARED": QColor("#4F5B68"),
+    "PENDING": CAUTION,
+    "CONFIRMED": THREAT,
+    "CLEARED": INERT,
 }
+
+#: One title size and one small size. Four sizes in a row this small is what
+#: makes a list read as a form rather than as a register.
+TITLE_PT = 14
+SMALL_PT = 11
+
+SELECTED_ROW = PANEL_RAISED
 
 def confidence_color(confidence: float) -> QColor:
     if confidence >= ALERT_CONFIDENCE_THRESHOLD:
-        return QColor("#C04438")
+        return THREAT
     if confidence >= 0.60:
-        return QColor("#C9952F")
-    return QColor("#4A9FD4")
+        return CAUTION
+    return FRIENDLY
 
 
 class ThreatCard(QWidget):
@@ -62,13 +83,21 @@ class ThreatCard(QWidget):
         self.reject_btn.clicked.connect(lambda: self.rejectRequested.emit(self.threat))
         self._sync_actions()
 
+        # A contact arriving in the list is new information. Fading it in
+        # over a few frames is what distinguishes it from the rows that were
+        # already there; appearing instantly, it reads as having always been.
+        # Started last: revealing shows the widget, and showing it lays out
+        # the buttons above, which have to exist by then.
+        self._arrival = Reveal(self, duration_ms=FAST_MS)
+        self._arrival.reveal()
+
     def _sync_actions(self) -> None:
         pending = self.threat.get("status") == "PENDING"
         for button in (self.confirm_btn, self.reject_btn):
             button.setVisible(pending)
         if pending:
-            self.confirm_btn.setGeometry(self.width() - 132, CARD_HEIGHT - 24, 62, 18)
-            self.reject_btn.setGeometry(self.width() - 66, CARD_HEIGHT - 24, 58, 18)
+            self.confirm_btn.setGeometry(self.width() - 134, CARD_HEIGHT - 23, 62, 17)
+            self.reject_btn.setGeometry(self.width() - 68, CARD_HEIGHT - 23, 58, 17)
 
     def resizeEvent(self, event) -> None:
         self._sync_actions()
@@ -84,66 +113,86 @@ class ThreatCard(QWidget):
         self.clicked.emit(self.threat)
 
     def paintEvent(self, event) -> None:
+        """One row, drawn as little as it can be and still be read.
+
+        A card used to carry a full border, a filled background, a ring
+        around its glyph and four type sizes. That is four enclosures for one
+        row of information, and when a dozen of them stack up the operator is
+        reading boxes rather than contacts. What is left is the status spine,
+        the glyph, the line that names the contact, the confidence against
+        its threshold, and a hairline to the next row.
+        """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0, 0, -1, -1)
+        painter.setOpacity(max(self._arrival.value, 0.0))
+        rect = QRectF(self.rect())
 
         status = self.threat.get("status", "PENDING")
-        status_color = STATUS_COLORS.get(status, QColor("#4F5B68"))
+        status_color = STATUS_COLORS.get(status, INERT)
         confidence = self.threat.get("confidence", 0.0)
 
-        painter.fillRect(rect, QColor("#121820") if not self._selected else QColor("#182029"))
-        painter.setPen(QPen(QColor("#283340")))
-        painter.drawRect(rect)
-        painter.fillRect(QRectF(rect.left(), rect.top(), 3, rect.height()), status_color)
+        # The row owns its background. Without this the widget shows Qt's
+        # default, which is white: removing the card's fill as "chrome" is
+        # what put a light panel in the middle of a dark console.
+        painter.fillRect(rect, SELECTED_ROW if self._selected else BACKGROUND)
+        # The spine is the only enclosure: it says status by colour and
+        # separates one row from the next by being there at all.
+        painter.fillRect(QRectF(rect.left(), rect.top(), 2, rect.height()), status_color)
+        painter.setPen(QPen(HAIRLINE))
+        painter.drawLine(
+            QPointF(rect.left(), rect.bottom() - 0.5), QPointF(rect.right(), rect.bottom() - 0.5)
+        )
 
-        glyph_center = QPointF(rect.left() + 26, rect.top() + 24)
-        painter.setPen(QPen(status_color, 1.6))
+        glyph_center = QPointF(rect.left() + 22, rect.top() + CARD_HEIGHT / 2)
+        painter.setPen(QPen(status_color, 1.4))
         painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(glyph_center, 13, 13)
-        draw_threat_glyph(painter, glyph_center, 13, self.threat.get("type", "unknown"))
+        draw_threat_glyph(painter, glyph_center, 11, self.threat.get("type", "unknown"))
 
-        painter.setPen(QPen(QColor("#C6D0DA")))
-        painter.setFont(QFont("DIN Condensed", 11 + 3, QFont.Bold))
+        text_left = rect.left() + 42
+        painter.setPen(QPen(TEXT))
+        painter.setFont(QFont(FONT_LABEL, TITLE_PT, QFont.Bold))
         painter.drawText(
-            QRectF(rect.left() + 46, rect.top() + 6, rect.width() - 110, 16),
+            QRectF(text_left, rect.top() + 7, rect.width() - text_left - 96, 15),
             Qt.AlignLeft | Qt.AlignVCenter,
-            f'{str(self.threat.get("type", "unknown")).upper()}'
+            f'{str(self.threat.get("type", "unknown")).replace("_", " ").upper()}'
             f'   {self.threat["x"]:.0f}, {self.threat["y"]:.0f} m',
         )
 
         painter.setPen(QPen(status_color))
-        painter.setFont(QFont("DIN Condensed", 8 + 3, QFont.Bold))
+        painter.setFont(QFont(FONT_LABEL, SMALL_PT, QFont.Bold))
         painter.drawText(
-            QRectF(rect.right() - 92, rect.top() + 6, 86, 16), Qt.AlignRight | Qt.AlignVCenter, status
+            QRectF(rect.right() - 92, rect.top() + 7, 86, 15), Qt.AlignRight | Qt.AlignVCenter, status
         )
 
-        bar_rect = QRectF(rect.left() + 46, rect.top() + 26, rect.width() - 140, 5)
+        bar_rect = QRectF(text_left, rect.top() + 27, rect.width() - text_left - 100, 4)
         painter.setPen(Qt.NoPen)
-        painter.fillRect(bar_rect, QColor("#283340"))
+        painter.fillRect(bar_rect, HAIRLINE)
         fill = QRectF(bar_rect)
         fill.setWidth(bar_rect.width() * min(max(confidence, 0.0), 1.0))
         painter.fillRect(fill, confidence_color(confidence))
 
+        # Where the decision threshold sits, so a bar can be read against it
+        # rather than against a number somewhere else.
         threshold_x = bar_rect.left() + bar_rect.width() * ALERT_CONFIDENCE_THRESHOLD
-        painter.setPen(QPen(QColor("#8c9a9f"), 1, Qt.DotLine))
-        painter.drawLine(QPointF(threshold_x, bar_rect.top() - 2), QPointF(threshold_x, bar_rect.bottom() + 2))
+        painter.setPen(QPen(TEXT_FAINT, 1))
+        painter.drawLine(
+            QPointF(threshold_x, bar_rect.top() - 2), QPointF(threshold_x, bar_rect.bottom() + 2)
+        )
 
-        painter.setPen(QPen(QColor("#C6D0DA")))
-        painter.setFont(QFont("DIN Condensed", 9 + 3, QFont.Bold))
+        painter.setPen(QPen(TEXT))
+        painter.setFont(QFont("Menlo", SMALL_PT))
         painter.drawText(
-            QRectF(rect.right() - 92, rect.top() + 22, 86, 14),
+            QRectF(rect.right() - 92, rect.top() + 24, 86, 13),
             Qt.AlignRight | Qt.AlignVCenter,
             f"{confidence:.2f}",
         )
 
-        sensors = sensor_list(self.threat.get("sensors", []))
-        painter.setPen(QPen(QColor("#7B8794")))
-        painter.setFont(QFont("Menlo", 8))
+        painter.setPen(QPen(TEXT_DIM))
+        painter.setFont(QFont("Menlo", SMALL_PT))
         painter.drawText(
-            QRectF(rect.left() + 46, rect.top() + 40, rect.width() - 190, 14),
+            QRectF(text_left, rect.top() + 38, rect.width() - text_left - 100, 13),
             Qt.AlignLeft | Qt.AlignVCenter,
-            sensors,
+            sensor_list(self.threat.get("sensors", [])),
         )
         painter.end()
 

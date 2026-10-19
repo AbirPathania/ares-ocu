@@ -747,3 +747,61 @@ threat panel and the call signs in the launch console, which is how an
 abbreviation comes to mean one thing in one place and another elsewhere: the
 log was cutting raw sensor names to three letters and showing PUL for the
 pulse induction array.
+
+## Arriving and leaving
+
+**Motion is continuity, not decoration** (`ui/motion.py`). A panel that
+appears instantly asks the operator to re-find the layout and work out what
+changed; one that eases in keeps the eye where it already was. A banner that
+blinks out between two glances leaves a doubt about whether it was answered
+or missed, so it stays visible for the whole of its exit and hides only once
+it has gone. Reversing mid-flight is scaled to the distance left, so a banner
+dismissed while still arriving leaves at the speed it was arriving at.
+
+Durations are 110 ms for a change to something already on screen and 180 ms
+for arriving or leaving. An operator who has decided to press something
+should never wait for an animation first, so nothing that would delay a
+decision is animated at all, and a reset takes everything away with no frames
+in between.
+
+The alert banner opens downward from the edge it belongs to, which is the top
+of the map it is reporting about. It is a composite of child widgets rather
+than something painted, so it fades through an opacity effect and slides by
+its own height rather than through a painter.
+
+## The threat list reads as a register
+
+A card carried a full border, a filled background, a ring around its glyph
+and four type sizes: four enclosures for one row, and a dozen of them stacked
+up meant reading boxes rather than contacts. What is left is the status
+spine, the glyph, the line naming the contact, the confidence against its
+threshold, and a hairline to the next row. One title size and one small size.
+
+Removing the card's background fill put Qt's default **white** behind every
+row, which the full-size screenshot made look merely dim. The row owns its
+background explicitly now. Found by sampling the rendered pixels rather than
+by looking: every one came back `#efefef`.
+
+## The link strip shows the exception
+
+It painted ninety-five percent of its area solid green to say nothing had
+happened, spending all its contrast on the usual case and leaving none for
+the one thing worth seeing. A connected link is now a dim rule and only a
+degraded or lost one is given colour and height, with a -60s/-30s/now scale
+so "how long was it out" can be read rather than guessed, and a live dot at
+the right edge for the current state.
+
+## Two mistakes worth recording
+
+**My render scripts never loaded the application stylesheet.** `ocu/main.py`
+applies `ui/style.qss` to the QApplication; the scripts I was taking
+screenshots with created the window directly, so every visual judgement I
+made from them was of an unstyled interface -- buttons in Qt's default white,
+and none of the panel styling. Fixed in the scripts; worth remembering that a
+screenshot of a widget is not a screenshot of the app.
+
+**I overwrote `tests/test_motion.py`.** It already existed and tested the
+flight model's `KinematicBody`; I wrote the interface's animation tests over
+it and destroyed fourteen physics tests. The suite still reported a healthy
+number because the count happened to match what I had added. Restored from
+git, and the interface tests now live in `test_ui_motion.py`.

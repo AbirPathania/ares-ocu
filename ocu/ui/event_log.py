@@ -17,8 +17,8 @@ visibly drifts into the past after the restore.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from ocu.ui.labels import short_label
+from ocu.ui.theme import FONT_LABEL, HAIRLINE, TEXT_DIM, TEXT_FAINT
 
 #: Severity, and the only reason a log line is ever coloured. An operator
 #: scanning the log under pressure finds the alert by colour or not at all.
@@ -48,6 +49,14 @@ HISTORY_SAMPLES = 120
 SAMPLE_MS = 500
 LANE_H = 13
 
+#: Only an interruption is coloured. CONNECTED is deliberately absent: the
+#: dim rule under each lane already says the link was up.
+OUTAGE_COLORS = {
+    "DEGRADED": QColor("#C9952F"),
+    "LOST": QColor("#C04438"),
+    "SILENT": QColor("#3A4756"),
+}
+
 LINK_COLORS = {
     "SILENT": QColor("#1E2630"),
     "CONNECTED": QColor("#4F9D69"),
@@ -59,8 +68,8 @@ LINK_COLORS = {
 class LinkHistoryStrip(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(LANE_H * len(ROW_ORDER) + 18)
-        self.setMinimumWidth(240)
+        self.setFixedHeight(LANE_H * len(ROW_ORDER) + 26)
+        self.setMinimumWidth(300)
         self._states: dict[str, str] = {uid: "CONNECTED" for uid in ROW_ORDER}
         self._history: dict[str, list[str]] = {
             uid: ["CONNECTED"] * HISTORY_SAMPLES for uid in ROW_ORDER
@@ -90,32 +99,76 @@ class LinkHistoryStrip(QWidget):
         self.update()
 
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setPen(QPen(QColor("#7B8794")))
-        painter.setFont(QFont("Menlo", 8))
-        painter.drawText(QRectF(0, 0, self.width(), 14), Qt.AlignLeft, "LINK HISTORY  ← 60s")
+        """Sixty seconds of link state per unit.
 
-        label_w = 54
-        track_x = label_w + 4
-        track_w = max(self.width() - track_x - 4, 10)
+        Drawn as exception rather than as state: a connected link is a dim
+        rule, and only a degraded or lost one is given colour and height. A
+        strip that paints ninety-five percent of its area solid green to say
+        "nothing happened" spends all its contrast on the usual case, and the
+        one thing worth seeing -- the moment a link dropped, and for how long
+        -- has none left to stand out in.
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+
+        label_w = 46
+        track_x = label_w + 6
+
+        painter.setPen(QPen(TEXT_DIM))
+        painter.setFont(QFont(FONT_LABEL, 11, QFont.Bold))
+        # The scale below already states the span, so the title does not.
+        painter.drawText(QRectF(0, 0, label_w, 13), Qt.AlignLeft, "LINK")
+        track_w = max(self.width() - track_x - 10, 10)
         sample_w = track_w / HISTORY_SAMPLES
 
-        for i, uid in enumerate(ROW_ORDER):
-            y = 16 + i * LANE_H
-            painter.setPen(QPen(QColor("#7B8794")))
-            painter.setFont(QFont("Menlo", 8))
+        # A scale, so "how long was it out" is readable rather than guessed.
+        painter.setPen(QPen(HAIRLINE))
+        painter.setFont(QFont("Menlo", 7))
+        for fraction, caption, align in (
+            (0.0, "-60s", Qt.AlignLeft),
+            (0.5, "-30s", Qt.AlignHCenter),
+            (1.0, "now", Qt.AlignRight),
+        ):
+            x = track_x + track_w * fraction
+            painter.drawLine(QPointF(x, 15), QPointF(x, 18))
+            painter.setPen(QPen(TEXT_FAINT))
+            # Anchored to its own end of the scale rather than centred on it,
+            # so the first and last captions stay inside the strip.
+            box = QRectF(x - 34, 4, 34, 10) if align == Qt.AlignRight else QRectF(x, 4, 34, 10)
+            if align == Qt.AlignHCenter:
+                box = QRectF(x - 17, 4, 34, 10)
+            painter.drawText(box, align | Qt.AlignVCenter, caption)
+            painter.setPen(QPen(HAIRLINE))
+
+        for row, uid in enumerate(ROW_ORDER):
+            y = 22 + row * LANE_H
+            mid = y + LANE_H / 2
+
+            painter.setPen(QPen(TEXT_DIM))
+            painter.setFont(QFont(FONT_LABEL, 11, QFont.Bold))
             painter.drawText(
-                QRectF(0, y, label_w, LANE_H),
-                Qt.AlignLeft | Qt.AlignVCenter,
-                short_label(uid),
+                QRectF(0, y, label_w, LANE_H), Qt.AlignLeft | Qt.AlignVCenter, short_label(uid)
             )
 
+            # The baseline: present, and quiet.
+            painter.setPen(QPen(HAIRLINE))
+            painter.drawLine(QPointF(track_x, mid), QPointF(track_x + track_w, mid))
+
             painter.setPen(Qt.NoPen)
-            for j, state in enumerate(self._history[uid]):
+            for index, state in enumerate(self._history[uid]):
+                colour = OUTAGE_COLORS.get(state)
+                if colour is None:
+                    continue  # connected: the rule already says so
                 painter.fillRect(
-                    QRectF(track_x + j * sample_w, y + 3, sample_w + 0.6, LANE_H - 6),
-                    LINK_COLORS.get(state, QColor("#3A4756")),
+                    QRectF(track_x + index * sample_w, y + 2, sample_w + 0.6, LANE_H - 4),
+                    colour,
                 )
+
+            # Where it stands now, at the live edge.
+            current = self._states.get(uid, "CONNECTED")
+            painter.setBrush(QBrush(LINK_COLORS.get(current, HAIRLINE)))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(QPointF(track_x + track_w + 5, mid), 2.5, 2.5)
         painter.end()
 
 
