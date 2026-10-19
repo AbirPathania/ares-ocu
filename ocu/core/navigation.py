@@ -49,10 +49,21 @@ ROVER_RADIUS_M = 0.9
 #: the planner prefers the middle of a gap rather than grazing the edge.
 INFLATION_MARGIN_M = 1.1
 
+#: A vehicle that finds itself inside an obstacle's clearance, because the
+#: obstacle was not visible until it was close, may route through that band to
+#: get out of it, but only this far from where it stands, and at a heavy cost,
+#: so it leaves by the shortest way and does not use the band as a road.
+ESCAPE_RADIUS_M = 2.0
+ESCAPE_COST_FACTOR = 10.0
+
 #: How far ahead on the path the follower aims. Shorter oscillates, longer
 #: understeers and cuts corners. At this vehicle's speeds a little under two
 #: metres tracks a lane to within a sensor swath without hunting.
 LOOKAHEAD_M = 1.8
+
+#: The lookahead used while inside an obstacle's clearance band, where the
+#: line is bent tightly round something and a long chord would cut through it.
+TIGHT_LOOKAHEAD_M = 0.6
 
 #: Close enough to call a waypoint reached. A lane point is a point on a
 #: line the vehicle is supposed to be driving along, so this is tight; the
@@ -68,7 +79,15 @@ GOAL_RELOCATION_M = 2.5
 #: Expansion ceiling for one search. On a 0.5 m grid this is a radius well
 #: past anything in a local sweep. The ceiling exists so a search that
 #: cannot succeed fails in milliseconds instead of stalling the tick.
-MAX_PLAN_EXPANSIONS = 20_000
+MAX_PLAN_EXPANSIONS = 60_000
+
+#: Weight on the distance-to-go estimate. Crossing a cell costs between 1.0 and
+#: several times its length, so an unweighted estimate is far too hopeful and
+#: the search fans out over the whole neighbourhood before committing to a
+#: direction; on a leg of a hundred metres that is the ceiling above. Leaning
+#: on the estimate a little makes it commit, at the price of a route that can
+#: be a few percent longer than the best one, which nobody driving it can tell.
+HEURISTIC_WEIGHT = 1.5
 
 
 @dataclass
@@ -92,6 +111,10 @@ class Costmap:
     base: dict[tuple[int, int], float] = field(default_factory=dict)
     inflation: dict[tuple[int, int], float] = field(default_factory=dict)
     blocked: set[tuple[int, int]] = field(default_factory=set)
+    #: The obstacles themselves, without the vehicle's clearance around them.
+    #: The planner keeps off everything in `blocked`; nothing may ever be
+    #: driven onto a cell in `hard`.
+    hard: set[tuple[int, int]] = field(default_factory=set)
 
     #: How far into the perception map's journal this costmap has consumed,
     #: and which mission that journal belonged to.
@@ -126,7 +149,9 @@ class Costmap:
         for cell, kind in changes:
             self.base[cell] = TRAVERSE_COST.get(kind, TRAVERSE_COST[Terrain.UNKNOWN])
             if kind not in IMPASSABLE:
+                self.hard.discard(cell)
                 continue
+            self.hard.add(cell)
             cx, cy = cell
             for dx in range(-reach, reach + 1):
                 for dy in range(-reach, reach + 1):
@@ -289,7 +314,10 @@ def plan_path(
         # Octile distance: admissible on an eight-connected grid, and
         # tighter than Euclidean, so fewer cells get expanded.
         dx, dy = abs(cell[0] - goal[0]), abs(cell[1] - goal[1])
-        return (dx + dy) + (math.sqrt(2) - 2) * min(dx, dy)
+        return HEURISTIC_WEIGHT * ((dx + dy) + (math.sqrt(2) - 2) * min(dx, dy))
+
+    escaping = costmap.is_blocked(start)
+    escape_cells = ESCAPE_RADIUS_M / costmap.cell_size_m
 
     open_heap = [(heuristic(start), 0.0, start)]
     came_from: dict[tuple[int, int], tuple[int, int]] = {}
@@ -310,8 +338,17 @@ def plan_path(
         for dx, dy, step in _NEIGHBOURS:
             neighbour = (current[0] + dx, current[1] + dy)
             if costmap.is_blocked(neighbour):
-                continue
-            cell_cost = costmap.cost(neighbour)
+                # Inside the clearance band of something: only a way out, only
+                # nearby, and never onto the obstacle itself.
+                if (
+                    not escaping
+                    or neighbour in costmap.hard
+                    or math.hypot(neighbour[0] - start[0], neighbour[1] - start[1]) > escape_cells
+                ):
+                    continue
+                cell_cost = costmap.base.get(neighbour, TRAVERSE_COST[Terrain.UNKNOWN]) * ESCAPE_COST_FACTOR
+            else:
+                cell_cost = costmap.cost(neighbour)
             if corridor is not None:
                 cell_cost += corridor.penalty(neighbour)
             tentative = travelled + step * cell_cost
@@ -411,6 +448,51 @@ def smooth(
 def path_is_clear(costmap: Costmap, path: list[tuple[int, int]]) -> bool:
     """Whether a plan is still valid against what is now known."""
     return not any(costmap.is_blocked(cell) for cell in path)
+
+
+def _escape_exempt(costmap: Costmap, cell: tuple[int, int], x: float, y: float) -> bool:
+    """A cell in the clearance band that the vehicle is already standing in.
+
+    A plan made from inside the band has to start in it, so its first few
+    metres are blocked by definition. Reading that as an invalid plan makes
+    the vehicle replan every tick for as long as it is leaving.
+    """
+    size = costmap.cell_size_m
+    here = (int(math.floor(x / size)), int(math.floor(y / size)))
+    if not costmap.is_blocked(here) or cell in costmap.hard:
+        return False
+    return math.hypot((cell[0] + 0.5) * size - x, (cell[1] + 0.5) * size - y) <= ESCAPE_RADIUS_M + size
+
+
+def followed_line_is_clear(
+    costmap: Costmap, path_world: list[tuple[float, float]], x: float, y: float
+) -> bool:
+    """Whether the line the vehicle is actually steering along is still clear.
+
+    `path_is_clear` asks about the cells the planner searched through. The
+    vehicle does not drive those: it drives the smoothed line pulled taut
+    off them, which cuts across cells the search went round. A tree mapped
+    beside the search path but on the smoothed one passes the first test and
+    is driven into, so this walks the line itself, from where the vehicle is
+    to the end of it, at a fraction of a cell at a time.
+    """
+    if len(path_world) < 2:
+        return True
+    start = min(
+        range(len(path_world)),
+        key=lambda i: math.hypot(path_world[i][0] - x, path_world[i][1] - y),
+    )
+    step = costmap.cell_size_m * 0.25
+    size = costmap.cell_size_m
+    for (ax, ay), (bx, by) in zip(path_world[start:], path_world[start + 1 :]):
+        length = math.hypot(bx - ax, by - ay)
+        samples = max(int(length / step), 1)
+        for k in range(samples + 1):
+            t = k / samples
+            cell = (int(math.floor((ax + (bx - ax) * t) / size)), int(math.floor((ay + (by - ay) * t) / size)))
+            if costmap.is_blocked(cell) and not _escape_exempt(costmap, cell, x, y):
+                return False
+    return True
 
 
 def pure_pursuit_target(

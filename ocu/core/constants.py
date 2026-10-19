@@ -74,28 +74,18 @@ HOLD_ALTITUDE_M = 12.0  # altitude aircraft settle to while queued for docking
 
 # Docking requires a stationary rover: the funnel pad and the ArUco fiducial
 # in section 7 are both fixed to the deck, so the deck has to stop moving.
-#: The demonstrator runs the rover at half its real pace.
-#:
-#: The platform's 15 km/h is what it can do. On a screen a few hundred pixels
-#: across, 2 to 4 m/s is a vehicle that crosses the map in the time it takes
-#: to read what it is doing, which at a demonstration is the wrong way round.
-#: Halving it keeps every figure that matters to a real platform (the power
-#: model stays calibrated to the published 15 km/h, 143 W and 3.0 h) and
-#: changes only how quickly the picture moves. An operator's decision, not the
-#: baseline's; see DECISIONS.md.
-ROVER_PACE_FACTOR = 0.5
-
-#: The pace the demonstrator actually drives at when it is not sweeping.
-ROVER_OPERATING_SPEED_MS = ROVER_TOP_SPEED_MS * ROVER_PACE_FACTOR
-ROVER_OPERATING_SPEED_KMH = ROVER_TOP_SPEED_KMH * ROVER_PACE_FACTOR
-
-#: How fast the rover drives while sweeping a lane, at the same half pace.
+#: How fast the rover drives when the operator has not asked for anything else.
 #: A detection pass is limited by the sensors, not the wheels: the pulse
 #: induction array is 40 cm wide, so at this speed an object stays inside the
 #: swath for about a second, and the ground-penetrating radar gets the dense
 #: trace spacing a subsurface picture needs. Not a figure from the technical
 #: baseline, which gives only the transit top speed.
 ROVER_SURVEY_SPEED_MS = 0.4
+
+#: The operator's speed control runs from a crawl to the platform's published
+#: top speed. The power model stays calibrated to the published 15 km/h whatever
+#: the operator chooses; this only decides how fast the picture moves.
+ROVER_MIN_COMMAND_SPEED_MS = 0.1
 
 ROVER_STATIONARY_SPEED_MS = 0.15
 

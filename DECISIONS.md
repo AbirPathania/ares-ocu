@@ -891,3 +891,60 @@ formation panel scrolls rather than being cut off; the threat list keeps its
 share. Fleet cards and threat cards derive their layout from their width and
 elide text instead of overprinting it. The alert banner keeps both decisions
 whole by reflowing to two rows below 600 px.
+
+## The operator sets the rover's speed
+
+The half-pace decision above is replaced by a control. A slider in the top bar
+sets `commanded_speed_ms` on the flight director, a ceiling on every way the
+rover drives (sweep, route to a destination, the way home, the sticks), from
+0.1 m/s to the published 15 km/h top speed. It starts at the 0.4 m/s survey
+crawl and keeps the operator's setting through a reset. The scale is
+quadratic because the speeds that matter for clearance are all in its first
+third.
+
+The playback-speed dropdown (½× to 4×) is gone from the top bar; the mission
+clock still has a speed, it just is not offered. Sweeping faster than the
+survey crawl means the 40 cm induction swath passes over objects faster than the
+sensor model resolves them, which is the sensor behaving, not a bug.
+
+## Going somewhere on purpose
+
+GO TO on the map, then a click, sends the rover to a point. It is the existing
+navigation, not a second one: the destination becomes a one-point waypoint
+list in place of the lanes, with no lane corridor on the planner, and the
+sweep's progress is parked so CLEAR DESTINATION resumes it. Refused when the
+rover is under manual control, outside the operating area, or outside a
+configured geofence. Aircraft keep station on the rover as they always do, so
+the whole formation arrives together.
+
+Going cross-country exposed four faults that lane sweeps on clear ground never
+could, all fixed and each with a test:
+
+- **The route checked was not the route driven.** Validity was tested against
+  the cells the search crossed; the rover drives the smoothed line pulled taut
+  off them, which cuts across cells the search went round. A tree mapped beside
+  the search path but on the driven line was driven into. The driven line is
+  now checked.
+- **Late-seen obstacles.** A tree behind another tree is not seen until the
+  rover is close, so it can find itself inside an obstacle's clearance. The
+  planner now lets a vehicle in that position route out of it, only nearby and
+  at a heavy cost, and the follower aims close while there, because a long
+  lookahead chords across the corner the route was bent round.
+- **A last line of defence.** Whatever the planner does, the rover will not move
+  onto a cell it has mapped as an obstacle; it stops at the edge and replans.
+- **Long routes failed outright.** The search ceiling ran out on a leg of a
+  hundred metres. The distance estimate is weighted 1.5 and the ceiling raised;
+  routes can be a few percent longer than optimal, which cannot be seen.
+
+The map follows the rover when it nears an edge (and leaves the view alone for
+four seconds after the operator drags it), and a destination off the edge of
+the view is marked on that edge with its distance.
+
+## Fewer contacts
+
+The buried-object field is five objects, down from thirteen: the shallow
+ferrous one, the deep low-metal one, the scrap, the one just outside the swath
+and one on the surface for a scout to find. Nothing is scattered at random. A
+dozen contacts buried the one the operator had to decide about.
+
+The classification key and scanner statistics were taken off the map.

@@ -24,6 +24,7 @@ No Qt import belongs in this file.
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 from enum import Enum
@@ -42,8 +43,9 @@ from ocu.core.constants import (
     ROVER_ACCEL_MS2,
     ROVER_DECEL_MS2,
     ROVER_STATIONARY_SPEED_MS,
+    ROVER_MIN_COMMAND_SPEED_MS,
     ROVER_SURVEY_SPEED_MS,
-    ROVER_OPERATING_SPEED_MS,
+    ROVER_TOP_SPEED_MS,
     ROVER_TURN_ACCEL_DEG_S2,
     ROVER_TURN_RATE_DEG_S,
     TETHER_LIMIT_M,
@@ -58,9 +60,12 @@ from ocu.core.constants import (
 )
 from ocu.core.formation import clamp_to_tether
 from ocu.core.navigation import (
+    LOOKAHEAD_M,
+    TIGHT_LOOKAHEAD_M,
     WAYPOINT_TOLERANCE_M,
     Corridor,
     build_costmap,
+    followed_line_is_clear,
     path_is_clear,
     plan_path,
     pure_pursuit_target,
@@ -147,7 +152,7 @@ def tricopter_limits() -> MotionLimits:
 
 def rover_limits() -> MotionLimits:
     return MotionLimits(
-        max_speed_ms=ROVER_OPERATING_SPEED_MS,
+        max_speed_ms=ROVER_TOP_SPEED_MS,
         max_accel_ms2=ROVER_ACCEL_MS2,
         max_decel_ms2=ROVER_DECEL_MS2,
         max_yaw_rate_deg_s=ROVER_TURN_RATE_DEG_S,
@@ -240,6 +245,11 @@ class FlightDirector:
         self.rover_mode = RoverMode.NORMAL
         self.rover_body = KinematicBody(limits=rover_limits())
         self.rover_manual = ManualInput()
+        #: How fast the operator has told the rover to drive. A ceiling on
+        #: every mode: the sweep, a route to a destination, the way home and
+        #: the sticks all go no faster than this. It is the operator's
+        #: setting, so a reset leaves it where they put it.
+        self.commanded_speed_ms = ROVER_SURVEY_SPEED_MS
         self._base: tuple[float, float] = (0.0, 0.0)
         self._dock_queue: list[str] = []
         self._rover_speed_ms = 0.0
@@ -506,6 +516,21 @@ class FlightDirector:
         self.rover_manual = ManualInput()
         return self.recall()
 
+    def _cell_of(self, body: KinematicBody) -> tuple[int, int]:
+        size = self._costmap.cell_size_m
+        return (int(math.floor(body.x / size)), int(math.floor(body.y / size)))
+
+    def set_commanded_speed(self, speed_ms: float) -> float:
+        """Set the rover's speed ceiling, held between a crawl and its top speed."""
+        self.commanded_speed_ms = max(
+            ROVER_MIN_COMMAND_SPEED_MS, min(float(speed_ms), self.rover_body.limits.max_speed_ms)
+        )
+        return self.commanded_speed_ms
+
+    @property
+    def _pace_scale(self) -> float:
+        return self.commanded_speed_ms / self.rover_body.limits.max_speed_ms
+
     def navigate_to(
         self, goal_x: float, goal_y: float, lane_from: tuple[float, float] | None = None
     ) -> None:
@@ -545,7 +570,19 @@ class FlightDirector:
             update_costmap(self._costmap, perception)
         costmap = self._costmap
 
-        if self._path_cells and path_is_clear(costmap, self._path_cells):
+        here = (
+            int(math.floor(self.rover_body.x / cell_size_m)),
+            int(math.floor(self.rover_body.y / cell_size_m)),
+        )
+        # Leaving the clearance band of something is a plan that starts inside
+        # it; only the line the vehicle is following can say whether that plan
+        # still holds.
+        search_path_clear = costmap.is_blocked(here) or path_is_clear(costmap, self._path_cells)
+        if (
+            self._path_cells
+            and search_path_clear
+            and followed_line_is_clear(costmap, self.path, self.rover_body.x, self.rover_body.y)
+        ):
             self._plan_failures = 0
             return False
 
@@ -687,7 +724,7 @@ class FlightDirector:
         if self.rover_mode == RoverMode.MANUAL:
             body.apply_yaw_command(self.rover_manual.turn * body.limits.max_yaw_rate_deg_s, dt_s)
             heading_rad = math.radians(body.heading)
-            demand = self.rover_manual.forward * body.limits.max_speed_ms
+            demand = self.rover_manual.forward * self.commanded_speed_ms
             body.apply_horizontal_command(
                 demand * math.sin(heading_rad), demand * math.cos(heading_rad), dt_s
             )
@@ -727,17 +764,32 @@ class FlightDirector:
             # Pure pursuit: steer at a point a fixed distance ahead on the
             # planned line. A wheeled vehicle also cannot drive sideways, so
             # it turns onto the bearing before it can build speed.
-            target = pure_pursuit_target(self.path, body.x, body.y)
+            # Close to something, follow the line closely: a long lookahead
+            # chords across the corner the route was bent to go round.
+            tight = self._costmap is not None and self._cell_of(body) in self._costmap.blocked
+            target = pure_pursuit_target(
+                self.path, body.x, body.y, lookahead_m=TIGHT_LOOKAHEAD_M if tight else LOOKAHEAD_M
+            )
+            before = copy.copy(body)
             if target is not None:
                 dx, dy = target[0] - body.x, target[1] - body.y
                 if math.hypot(dx, dy) > 0.2:
                     body.step_heading(math.degrees(math.atan2(dx, dy)) % 360.0, dt_s)
-                # Sweeping, not transiting: the pace is set by what the
-                # detection array can resolve, not by what the wheels can do.
-                body.step_toward(
-                    target[0], target[1], dt_s,
-                    speed_scale=ROVER_SURVEY_SPEED_MS / body.limits.max_speed_ms,
-                )
+                # The pace is the operator's: a sweep is usually driven at the
+                # survey crawl and a transit faster, but that is theirs to say.
+                body.step_toward(target[0], target[1], dt_s, speed_scale=self._pace_scale)
+
+            # Nothing the rover has mapped as an obstacle is ever driven onto.
+            # The planner keeps a margin from it, and a vehicle that cuts a
+            # corner or starts inside that margin can still end up at its
+            # edge; at the edge it stops, and the route is made again from
+            # there, which is a sensible thing for a vehicle to do and driving
+            # through a tree is not.
+            if self._costmap is not None and self._cell_of(body) in self._costmap.hard:
+                body.__dict__.update(before.__dict__)
+                body.vx = body.vy = 0.0
+                self.path = []
+                self._path_cells = []
 
             if math.hypot(self.goal[0] - body.x, self.goal[1] - body.y) < WAYPOINT_TOLERANCE_M:
                 self.goal = None
@@ -755,7 +807,7 @@ class FlightDirector:
             dx, dy = target_x - body.x, target_y - body.y
             if math.hypot(dx, dy) > 0.2:
                 body.step_heading(math.degrees(math.atan2(dx, dy)) % 360.0, dt_s)
-            arrived = body.step_toward(target_x, target_y, dt_s)
+            arrived = body.step_toward(target_x, target_y, dt_s, speed_scale=self._pace_scale)
             self._rover_velocity = (body.vx, body.vy)
             self._rover_speed_ms = body.speed_ms
             if arrived:

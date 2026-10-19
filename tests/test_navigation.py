@@ -620,3 +620,92 @@ def test_smoothing_pulls_taut_around_an_obstacle_rather_than_through_it():
     straightened = smooth(detour, costmap)
     assert path_is_clear(costmap, cells(straightened)), "smoothing must not cut through the rock"
     assert max(y for _, y in straightened) < max(y for _, y in detour), "it should still pull taut"
+
+
+# --- the line that is driven, and starting inside a clearance band --------
+
+
+def test_a_tree_beside_the_search_path_but_on_the_smoothed_line_invalidates_the_route():
+    """The vehicle drives the smoothed line, not the cells the search crossed.
+    Measured: a rover followed a plan straight into a tree mapped after the
+    plan was made, because only the search cells were checked."""
+    from ocu.core.navigation import followed_line_is_clear
+
+    perception = open_ground()
+    costmap = build_costmap(perception, CELL_SIZE_M)
+    line = [(0.0, 0.0), (5.0, 0.0), (10.0, 0.0)]
+    assert followed_line_is_clear(costmap, line, 0.0, 0.0)
+    costmap.integrate([((int(5.0 / CELL_SIZE_M), 0), Terrain.TREE)])
+    assert not followed_line_is_clear(costmap, line, 0.0, 0.0)
+    # What the vehicle has already driven past is not its concern.
+    assert followed_line_is_clear(costmap, line, 8.0, 0.0)
+
+
+def test_a_vehicle_inside_a_clearance_band_can_plan_its_way_out_but_never_onto_the_obstacle():
+    perception = open_ground()
+    perception.observe((0, 0), Terrain.ROCK)
+    costmap = build_costmap(perception, CELL_SIZE_M)
+    start = (1, 0)  # half a metre from the rock, well inside its clearance band
+    assert costmap.is_blocked(start) and (0, 0) in costmap.hard
+    path = plan_path(costmap, start, (10, 0))
+    assert path, "it can get out"
+    assert (0, 0) not in path
+    assert not costmap.is_blocked(path[-1])
+
+
+def test_the_obstacle_cells_are_tracked_apart_from_their_clearance():
+    perception = open_ground()
+    perception.observe((0, 0), Terrain.TREE)
+    costmap = build_costmap(perception, CELL_SIZE_M)
+    assert costmap.hard == {(0, 0)}
+    assert len(costmap.blocked) > 1
+    costmap.integrate([((0, 0), Terrain.GROUND)])
+    assert costmap.hard == set(), "a cell reclassified as ground is no longer an obstacle"
+
+
+def test_a_hundred_metre_route_across_open_ground_is_found():
+    """The search ceiling used to make a long leg fail the moment it was asked for."""
+    perception = open_ground(extent=130)
+    costmap = build_costmap(perception, CELL_SIZE_M)
+    path = plan_path(costmap, (0, 0), (120, 100))
+    assert path and path[-1] == (120, 100)
+
+
+def test_the_rover_never_drives_onto_a_mapped_obstacle():
+    from ocu.core.flight_director import FlightDirector
+
+    perception = open_ground()
+    director = FlightDirector()
+    director.rover_body.x = director.rover_body.y = 0.0
+    director.rover_body.heading = 90.0
+    director.navigate_to(20.0, 0.0)
+    director.replan(perception, CELL_SIZE_M)
+    # A tree the rover learns of only when it is already almost on it.
+    for step in range(400):
+        if step == 40:
+            cx = int(director.rover_body.x / CELL_SIZE_M) + 1
+            perception.observe((cx, 0), Terrain.TREE)
+        director.tick(0.1, director.rover_body.x, director.rover_body.y, director.rover_body.heading)
+        director.replan(perception, CELL_SIZE_M)
+        cell = (math.floor(director.rover_body.x / CELL_SIZE_M), math.floor(director.rover_body.y / CELL_SIZE_M))
+        assert perception.at(cell) != Terrain.TREE, f"drove onto the tree at step {step}"
+
+
+def test_the_last_line_of_defence_stops_the_rover_at_the_edge_of_a_mapped_obstacle():
+    """Whatever the planner does, the vehicle itself refuses to move onto a cell it
+    has mapped as an obstacle. The route is left stale on purpose, so only the guard
+    stands between the rover and the tree."""
+    from ocu.core.flight_director import FlightDirector
+    from ocu.core.navigation import update_costmap
+
+    perception = open_ground()
+    director = FlightDirector()
+    director.rover_body.heading = 90.0
+    director.navigate_to(20.0, 0.0)
+    director.replan(perception, CELL_SIZE_M)
+    perception.observe((10, 0), Terrain.TREE)
+    update_costmap(director._costmap, perception)  # known, but the route is never remade
+
+    for _ in range(600):
+        director.tick(0.1, director.rover_body.x, director.rover_body.y, director.rover_body.heading)
+        assert math.floor(director.rover_body.x / CELL_SIZE_M) != 10, "drove onto the tree"

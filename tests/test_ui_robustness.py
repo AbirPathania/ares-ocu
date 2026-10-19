@@ -549,33 +549,73 @@ def test_a_formation_staged_before_the_rover_turns_is_still_off_the_nose_when_la
         ahead.append(forward)
     # A vee pushed forward: every aircraft is in front of the vehicle it flies on.
     assert min(ahead) > 5.0, ahead
-    centroid = [
-        to_body_frame(window.units[u].pose.x - rover.x, window.units[u].pose.y - rover.y, rover.heading)
-        for u in TRICOPTERS
-    ]
-    mean_right = sum(r for _f, r in centroid) / len(centroid)
-    assert abs(mean_right) < 3.0, "a dead-ahead dial puts the group's centre on the nose line"
+    # Read off the slots rather than where the aircraft are this instant: the
+    # rover turns as it sweeps and an aircraft trails its slot by a few metres
+    # through a turn, which is true of aircraft and not what is under test.
+    rights = [window.flight_director.aircraft[uid].slot_right for uid in TRICOPTERS]
+    assert abs(sum(rights) / len(rights)) < 3.0, "a dead-ahead dial puts the group's centre on the nose line"
     assert all(math.isfinite(f) for f in ahead)
 
 
-def test_the_rovers_pace_is_half_its_published_top_speed(app):
-    from ocu.core.constants import (
-        ROVER_OPERATING_SPEED_MS,
-        ROVER_PACE_FACTOR,
-        ROVER_TOP_SPEED_MS,
-        ROVER_SURVEY_SPEED_MS,
-    )
+def test_the_speed_slider_sets_how_fast_the_rover_may_drive(app):
+    from ocu.core.constants import ROVER_MIN_COMMAND_SPEED_MS, ROVER_TOP_SPEED_MS
+    from ocu.ui.main_window import slider_to_pace
 
-    assert ROVER_PACE_FACTOR == 0.5
-    assert ROVER_OPERATING_SPEED_MS == pytest.approx(ROVER_TOP_SPEED_MS / 2)
-    assert ROVER_SURVEY_SPEED_MS <= ROVER_OPERATING_SPEED_MS
     window = MainWindow()
+    assert window.flight_director.commanded_speed_ms == pytest.approx(ROVER_SURVEY_SPEED_MS, abs=0.05)
+
+    def peak(window, seconds=40.0):
+        fastest = 0.0
+        for _ in range(int(seconds / 0.1)):
+            window.mission_clock._tick()
+            window._on_director_tick()
+            fastest = max(fastest, window.flight_director.rover_body.speed_ms)
+        return fastest
+
     window._on_play_clicked()
-    fastest = 0.0
-    for _ in range(600):
+    crawl = peak(window)
+    window.pace_slider.setValue(window.pace_slider.maximum())
+    assert window.flight_director.commanded_speed_ms == pytest.approx(ROVER_TOP_SPEED_MS)
+    fast = peak(window)
+    assert crawl <= ROVER_SURVEY_SPEED_MS + 0.05
+    assert fast > crawl * 3, "the slider is a real control, not a label"
+    assert fast <= ROVER_TOP_SPEED_MS + 1e-6, "and never more than the platform can do"
+    window.pace_slider.setValue(0)
+    assert window.flight_director.commanded_speed_ms == pytest.approx(ROVER_MIN_COMMAND_SPEED_MS)
+    assert slider_to_pace(0) < slider_to_pace(50) < slider_to_pace(100)
+
+
+def test_the_speed_slider_is_finer_where_a_sweep_is_driven(app):
+    """Quadratic: the survey crawl sits well inside the slider, not in its first pixel."""
+    from ocu.ui.main_window import PACE_SLIDER_STEPS, pace_to_slider, slider_to_pace
+
+    position = pace_to_slider(ROVER_SURVEY_SPEED_MS)
+    assert 0.15 * PACE_SLIDER_STEPS < position < 0.45 * PACE_SLIDER_STEPS
+    assert slider_to_pace(position) == pytest.approx(ROVER_SURVEY_SPEED_MS, abs=0.05)
+
+
+def test_a_reset_leaves_the_speed_where_the_operator_put_it(app):
+    window = MainWindow()
+    window.pace_slider.setValue(60)
+    chosen = window.flight_director.commanded_speed_ms
+    window._on_reset_clicked()
+    assert window.flight_director.commanded_speed_ms == chosen
+    assert window.pace_slider.value() == 60
+
+
+def test_the_slider_speed_caps_every_way_the_rover_drives(app):
+    """Sweep, a route to a destination and the way home all go no faster than it."""
+    window = MainWindow()
+    window.pace_slider.setValue(20)
+    ceiling = window.flight_director.commanded_speed_ms
+    window._on_play_clicked()
+    _drive(window, 15.0)
+    assert window.flight_director.rover_body.speed_ms <= ceiling + 1e-6
+    window._on_destination_placed(20.0, 20.0)
+    for _ in range(150):
+        window.mission_clock._tick()
         window._on_director_tick()
-        fastest = max(fastest, window.flight_director.rover_body.speed_ms)
-    assert fastest <= ROVER_OPERATING_SPEED_MS + 1e-6
+        assert window.flight_director.rover_body.speed_ms <= ceiling + 1e-6
 
 
 def test_aircraft_ride_in_the_bay_with_the_rover_until_they_lift_off(app):
@@ -944,11 +984,27 @@ def _form_up(window, seconds_after_launch=45.0):
     assert window.flight_director.launch_stage(TRICOPTERS) == "FORMED"
 
 
+def _settle_heading(window, uid, limit_s=60.0):
+    """Drive on until the aircraft is pointing steadily. "Ahead of it" only
+    means something while it is not in the middle of a turn, and where the
+    rover happens to be turning depends on the ground it is crossing."""
+    scout = window.flight_director.aircraft[uid]
+    history = []
+    for _ in range(int(limit_s / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        history.append(scout.heading)
+        recent = history[-20:]
+        if len(recent) == 20 and max(recent) - min(recent) < 0.5:
+            return
+
+
 def _plant_surface_object_ahead_of(window, uid, distance_m=40.0):
     import math
 
     from ocu.core.targets import BuriedTarget
 
+    _settle_heading(window, uid)
     scout = window.flight_director.aircraft[uid]
     heading = math.radians(scout.heading)
     target = BuriedTarget(
@@ -1055,14 +1111,15 @@ def test_the_rover_sweeps_at_survey_speed_not_transit_speed(app):
     assert ROVER_SURVEY_SPEED_MS < ROVER_TOP_SPEED_MS / 3, "a survey crawl, not a slightly slower drive"
 
 
-def test_driving_home_is_transit_and_is_not_held_to_survey_speed(app):
-    """Nothing is being cleared on the way back, so nothing holds it to a
-    crawl. The distinction is the point: the crawl is the sensors' doing."""
+def test_driving_home_goes_as_fast_as_the_operator_allows(app):
+    """Nothing is being cleared on the way back, so nothing but the operator's
+    speed setting holds it to a crawl."""
     from ocu.core.constants import ROVER_SURVEY_SPEED_MS
 
     window = MainWindow()
     window._on_play_clicked()
     _drive(window, 25.0)
+    window.pace_slider.setValue(60)
     window._on_return_to_base()
     assert _peak_speed_over(window, 25.0) > ROVER_SURVEY_SPEED_MS * 1.5
 
@@ -1080,11 +1137,10 @@ def test_playback_speed_changes_when_you_see_the_mission_not_what_happens(app):
     """
     import math
 
-    def after(speed_index, mission_seconds):
+    def after(speed, mission_seconds):
         window = MainWindow()
-        window.speed_combo.setCurrentIndex(speed_index)
+        window.mission_clock.set_speed(speed)
         window._on_play_clicked()
-        speed = float(window.speed_combo.currentData())
         for _ in range(int(mission_seconds / (0.1 * speed))):
             window.mission_clock._tick()
             window._on_director_tick()
@@ -1093,33 +1149,18 @@ def test_playback_speed_changes_when_you_see_the_mission_not_what_happens(app):
 
     seconds = 30.0
     driven = ROVER_SURVEY_SPEED_MS * seconds  # upper bound on distance covered
-    real_time, clock = after(1, seconds)
-    for index in (0, 2, 3):
-        moved, other_clock = after(index, seconds)
+    real_time, clock = after(1.0, seconds)
+    for speed in (0.5, 2.0, 4.0):
+        moved, other_clock = after(speed, seconds)
         assert abs(other_clock - clock) < 0.5, "the same mission time elapsed"
         drift = math.hypot(moved[0] - real_time[0], moved[1] - real_time[1])
-        assert drift < driven * 0.05, f"speed index {index} flew a different mission: {drift:.2f} m apart"
-
-
-def test_the_speed_control_drives_the_clock(app):
-    window = MainWindow()
-    window._on_play_clicked()
-    for index in range(window.speed_combo.count()):
-        window.speed_combo.setCurrentIndex(index)
-        assert window.mission_clock.speed == float(window.speed_combo.currentData())
-
-
-def test_a_reset_keeps_the_speed_the_operator_chose(app):
-    window = MainWindow()
-    window.speed_combo.setCurrentIndex(0)
-    window._on_reset_clicked()
-    assert window.mission_clock.speed == 0.5
+        assert drift < driven * 0.05, f"playback {speed}x flew a different mission: {drift:.2f} m apart"
 
 
 def test_the_batteries_burn_on_mission_time_at_any_playback_speed(app):
     slow, fast = MainWindow(), MainWindow()
-    slow.speed_combo.setCurrentIndex(1)  # 1x
-    fast.speed_combo.setCurrentIndex(3)  # 4x
+    slow.mission_clock.set_speed(1.0)
+    fast.mission_clock.set_speed(4.0)
     slow._on_play_clicked()
     fast._on_play_clicked()
 
@@ -1250,3 +1291,243 @@ def test_nothing_the_console_shows_ever_becomes_a_window_of_its_own(app):
         app.removeEventFilter(watch)
         window.close()
     assert set(shown) <= {"MainWindow"}, shown
+
+
+# --- a destination the operator sets --------------------------------------------------------
+
+
+def _drive_until_settled(window, limit_s=240.0):
+    for _ in range(int(limit_s / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        if window._destination_state != "enroute":
+            return window._destination_state
+    return window._destination_state
+
+
+def test_the_rover_drives_to_a_destination_the_operator_sets_and_stops_there(app):
+    import math
+
+    window = MainWindow()
+    window.pace_slider.setValue(60)  # a transit, not a survey crawl
+    window._on_play_clicked()
+    window._on_destination_placed(25.0, -18.0)
+    assert window.phase_label.text() == "GOING TO DESTINATION"
+    assert _drive_until_settled(window) == "reached"
+    rover = window.units["rover"].pose
+    assert math.hypot(rover.x - 25.0, rover.y + 18.0) < 1.5
+    assert window.phase_label.text() == "AT DESTINATION"
+    _drive(window, 5.0)
+    assert window.flight_director.rover_body.speed_ms < 0.05, "it stays put once it is there"
+
+
+def test_the_rover_goes_round_what_is_in_the_way_to_a_destination(app):
+    """The ground truth is checked tick by tick: the rover's own position is
+    never on a rock, a tree or a pothole on the way."""
+    from ocu.core.terrain import IMPASSABLE
+
+    window = MainWindow()
+    window.pace_slider.setValue(70)
+    window._on_play_clicked()
+    window._on_destination_placed(-45.0, -30.0)
+    for _ in range(int(240.0 / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        rover = window.units["rover"].pose
+        assert window.terrain.classify(rover.x, rover.y) not in IMPASSABLE, (rover.x, rover.y)
+        if window._destination_state != "enroute":
+            break
+    assert window._destination_state == "reached"
+
+
+def test_a_destination_set_before_deploying_is_the_job_the_rover_starts_on(app):
+    window = MainWindow()
+    messages = _capture_log(window)
+    window._on_destination_placed(15.0, 15.0)
+    assert window.phase_label.text() == "STANDBY"
+    window._on_play_clicked()
+    assert window.phase_label.text() == "GOING TO DESTINATION"
+    assert window.flight_director.goal is not None
+    assert not any("Sweeping" in m for m in messages)
+
+
+def test_clearing_a_destination_picks_the_lane_sweep_up_again(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    _drive(window, 10.0)
+    lane = window._current_lane
+    waypoint = window._waypoint_index
+    window._on_destination_placed(30.0, 30.0)
+    assert window._current_lane == "DESTINATION" and window._destination is not None
+    _drive(window, 5.0)
+    window._on_destination_cleared()
+    assert window._destination is None
+    assert window._waypoint_index == waypoint
+    assert window._current_lane == lane
+    assert window.phase_label.text().startswith("SWEEPING")
+    assert window.map_view._destination is None
+
+
+def test_a_destination_outside_the_operating_area_is_refused(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    window._on_destination_placed(500.0, 0.0)
+    assert window._destination is None
+    assert window.map_view._destination is None
+
+
+def test_a_destination_is_refused_while_the_rover_is_under_manual_control(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    _drive(window, 2.0)
+    window._on_take_manual("rover")
+    window._on_destination_placed(20.0, 20.0)
+    assert window._destination is None
+
+
+def test_a_destination_can_be_set_while_the_mission_is_on_hold(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    _drive(window, 5.0)
+    window._on_play_clicked()  # hold
+    window._on_destination_placed(20.0, 20.0)
+    before = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+    for _ in range(30):
+        window._on_director_tick()
+    assert (window.units["rover"].pose.x, window.units["rover"].pose.y) == pytest.approx(before, abs=0.05)
+    assert window.phase_label.text() == "HOLDING"
+    window._on_play_clicked()  # resume
+    assert window.phase_label.text() == "GOING TO DESTINATION"
+
+
+def test_a_reset_forgets_the_destination_and_restores_the_sweep(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    window._on_destination_placed(20.0, 20.0)
+    window._on_reset_clicked()
+    assert window._destination is None and window.map_view._destination is None
+    assert window._mission_waypoints is window.sweep.points
+
+
+def test_the_goto_button_arms_places_and_clears(app):
+    window = MainWindow()
+    view = window.map_view
+    assert "GO TO" in view.destination_btn.text()
+    view.destination_btn.click()
+    assert view._placing_destination and "CLICK" in view.destination_btn.text()
+    view.destination_btn.click()
+    assert not view._placing_destination, "a second press cancels"
+    view.destination_btn.click()
+    placed = []
+    view.destinationPlaced.connect(lambda x, y: placed.append((x, y)))
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    view.resize(900, 700)
+    point = QPointF(300.0, 200.0)
+    for kind in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
+        event = QMouseEvent(kind, point, point, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        (view.mousePressEvent if kind == QEvent.MouseButtonPress else view.mouseReleaseEvent)(event)
+    assert len(placed) == 1
+    window._on_destination_placed(*placed[0])
+    assert "CLEAR" in view.destination_btn.text()
+    view.destination_btn.click()
+    assert window._destination is None
+
+
+def test_dragging_the_map_does_not_set_a_destination(app):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    window = MainWindow()
+    view = window.map_view
+    view.resize(900, 700)
+    view.set_placing_destination(True)
+    placed = []
+    view.destinationPlaced.connect(lambda x, y: placed.append((x, y)))
+    down, up = QPointF(300.0, 200.0), QPointF(380.0, 260.0)
+    view.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress, down, down, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    view.mouseReleaseEvent(QMouseEvent(QEvent.MouseButtonRelease, up, up, Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+    assert placed == []
+
+
+def test_the_link_chip_text_sits_in_the_middle_of_its_box(app):
+    from PySide6.QtCore import Qt
+
+    window = MainWindow()
+    assert window.link_chip.alignment() & Qt.AlignHCenter
+    from ocu.ui.main_window import LINK_CHIP_MIN_WIDTH
+
+    assert window.link_chip.minimumWidth() == LINK_CHIP_MIN_WIDTH
+
+
+def test_there_are_few_contacts_to_deal_with(app):
+    """A dozen contacts buried the one that mattered."""
+    window = MainWindow()
+    assert len(window.target_field) <= 6
+    window._on_play_clicked()
+    window.pace_slider.setValue(100)
+    _drive(window, 200.0)
+    assert len(window.threat_panel._threats) <= 5
+
+
+# --- the map keeps the rover in view --------------------------------------------------------
+
+
+def test_the_map_follows_a_rover_that_nears_its_edge(app):
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.resize(900, 700)
+    view.set_unit_pose("rover", 0.0, 0.0, 0.0, 0.0)
+    view._advance_shown_poses(1.0)
+    view._follow_rover(0.016)
+    assert view._pan.x() == 0.0 and view._pan.y() == 0.0, "comfortably inside: the view stays put"
+
+    view.set_unit_pose("rover", 0.0, 60.0, 0.0, 0.0)  # far off the top of the view
+    view._advance_shown_poses(1.0)
+    for _ in range(300):
+        view._follow_rover(0.016)
+    point = view._to_screen(0.0, 60.0)
+    assert 0.0 < point.y() < view.height(), "the rover is back on the map"
+
+
+def test_the_map_leaves_the_view_alone_for_a_while_after_the_operator_drags_it(app):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    from ocu.ui.map_view import FOLLOW_QUIET_S, MapView
+
+    view = MapView()
+    view.resize(900, 700)
+    down, up = QPointF(300.0, 300.0), QPointF(380.0, 340.0)
+    view.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress, down, down, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    view.mouseReleaseEvent(QMouseEvent(QEvent.MouseButtonRelease, up, up, Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+    view.set_unit_pose("rover", 0.0, 90.0, 0.0, 0.0)
+    view._advance_shown_poses(1.0)
+    before = QPointF(view._pan)
+    view._follow_rover(0.016)
+    assert view._pan == before, "the operator said where to look"
+    for _ in range(int(FOLLOW_QUIET_S / 0.016) + 5):
+        view._follow_rover(0.016)
+    assert view._pan != before, "and then it goes back to the rover"
+
+
+def test_a_destination_off_the_edge_of_the_view_is_marked_on_the_edge(app):
+    from PySide6.QtGui import QImage, QPainter
+
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.resize(900, 700)
+    view.set_unit_pose("rover", 0.0, 0.0, 0.0, 0.0)
+    view.set_destination((0.0, 400.0))
+    image = QImage(900, 700, QImage.Format_ARGB32)
+    image.fill(0)
+    painter = QPainter(image)
+    view._draw_destination(painter)
+    painter.end()
+    # Something amber on the top edge, nothing at the centre.
+    top_rows = [image.pixelColor(x, y) for x in range(0, 900) for y in range(0, 60)]
+    assert any(c.alpha() > 0 for c in top_rows)
+    assert image.pixelColor(450, 350).alpha() == 0

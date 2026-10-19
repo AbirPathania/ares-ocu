@@ -24,7 +24,6 @@ No Qt import belongs in this file.
 from __future__ import annotations
 
 import math
-import random
 
 from ocu.core.sweep import LaneSweep, sweep_from_first_scan
 from ocu.core.terrain import TerrainWorld
@@ -84,13 +83,19 @@ def default_field(seed: int = 20261016, sweep: LaneSweep | None = None) -> Targe
         demonstration where everything is found teaches nothing about lane
         width
 
+    Five objects, not thirteen. A field with a dozen contacts buried the one
+    the operator had to decide about under the ones they did not, so the
+    list is what a clearance lane actually shows an operator: a few, each
+    different, each one a decision or a lesson. Nothing is scattered at
+    random any more; there is no way for a detection to appear that was
+    not placed on purpose.
+
     They are positioned relative to the sweep rather than in absolute
     coordinates, because the sweep's axis is chosen from the terrain. An
     object buried at a fixed coordinate would end up wherever the lanes
     did not go the moment the ground changed, and the demonstration would
     silently become one where the vehicle sweeps empty dirt.
     """
-    rng = random.Random(seed)
     sweep = sweep if sweep is not None else sweep_from_first_scan(TerrainWorld(seed=seed))
 
     # (lane, metres along it, metres across it, then the object itself)
@@ -102,9 +107,6 @@ def default_field(seed: int = 20261016, sweep: LaneSweep | None = None) -> Targe
         (0, 13.2, -0.09, 0.27, 11.0, False, 0.34, "low_metal_deep"),
         # Scrap: strong metal return, no vapour at all.
         (0, 16.1, 0.11, 0.13, 255.0, True, 0.0, "inert_scrap"),
-        # On the second lane, ferrous and deep: the gradiometer leads here
-        # because it reaches past the induction array.
-        (1, 18.6, 0.05, 0.36, 95.0, True, 0.12, "ferrous_deep"),
         # Between the lanes, clear of every swath including the 2 m the
         # vapour sensor reaches, so the sweep genuinely misses it.
         (0, 6.5, 2.0, 0.06, 140.0, True, 0.5, "outside_swath"),
@@ -113,22 +115,9 @@ def default_field(seed: int = 20261016, sweep: LaneSweep | None = None) -> Targe
         # map cannot contain them until it gets there, or until the link
         # carries what the scout saw.
         (2, 19.5, 0.9, 0.02, 120.0, True, 0.3, "surface_ahead"),
-        (3, 21.5, -1.4, 0.03, 85.0, True, 0.2, "surface_far"),
     ]
     targets = []
     for lane, along, offset, depth, mass, ferrous, voc, truth in placements:
         x, y = sweep.at(lane, along, offset)
         targets.append(BuriedTarget(x, y, depth, mass, ferrous, voc, truth))
-    for _ in range(6):
-        targets.append(
-            BuriedTarget(
-                x=rng.uniform(-70, 70),
-                y=rng.uniform(-70, 70),
-                depth_m=rng.uniform(0.05, 0.35),
-                metal_mass_g=rng.uniform(3.0, 200.0),
-                ferrous=rng.random() < 0.6,
-                voc_emission=rng.uniform(0.0, 0.6),
-                truth_class="dispersed",
-            )
-        )
     return TargetField(targets=targets)

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -37,11 +38,13 @@ from PySide6.QtWidgets import (
 
 from ocu.core.constants import (
     ALERT_CONFIDENCE_THRESHOLD,
+    ROVER_MIN_COMMAND_SPEED_MS,
     ROVER_SURVEY_SPEED_MS,
+    ROVER_TOP_SPEED_MS,
 )
 from ocu.core.comms import GHOST, LCA, STANDARD, profile_for
 from ocu.core.control_authority import ControlAuthority
-from ocu.core.flight_director import AircraftMode, FlightDirector
+from ocu.core.flight_director import AircraftMode, FlightDirector, RoverMode
 from ocu.core.geofence import Geofence
 from ocu.core.detection import REPORT_FLOOR, classify, fuse, sweep
 from ocu.core.lidar import LIDAR_RANGE_M, LIDAR_SCAN_HZ, cast_scan
@@ -59,7 +62,7 @@ from ocu.core.power import (
 )
 from ocu.core.sweep import cut_washouts_on_lanes, plan_lane_sweep, sweep_from_first_scan
 from ocu.core.targets import default_field
-from ocu.core.terrain import CELL_SIZE_M, PerceptionMap, TerrainWorld
+from ocu.core.terrain import CELL_SIZE_M, WORLD_HALF_EXTENT_M, PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
 from ocu.sim.mission_clock import MissionClock
 from ocu.ui.alert_banner import AlertBanner
@@ -96,6 +99,31 @@ DETECTION_REPORT_STEP = 0.05
 #: clear of a standstill, and still met by a rover that is sweeping, which is
 #: when it has most to say about the ground ahead.
 MIN_SPEED_FOR_ADVICE_MS = ROVER_SURVEY_SPEED_MS / 2
+
+#: The speed control. Quadratic, so the slow end where a sweep is driven has
+#: room on the slider and the top speed is still at the far end of it.
+PACE_SLIDER_STEPS = 100
+PACE_SLIDER_WIDTH = 104
+PACE_VALUE_WIDTH = 64
+LINK_CHIP_MIN_WIDTH = 136
+
+#: The name the single leg to an operator-set destination goes by where a lane
+#: name would be.
+DESTINATION_LANE = "DESTINATION"
+
+
+def slider_to_pace(position: int) -> float:
+    """Slider position to the rover's speed ceiling in m/s."""
+    t = max(0, min(position, PACE_SLIDER_STEPS)) / PACE_SLIDER_STEPS
+    return ROVER_MIN_COMMAND_SPEED_MS + (ROVER_TOP_SPEED_MS - ROVER_MIN_COMMAND_SPEED_MS) * t * t
+
+
+def pace_to_slider(speed_ms: float) -> int:
+    """The inverse, to the nearest position."""
+    span = ROVER_TOP_SPEED_MS - ROVER_MIN_COMMAND_SPEED_MS
+    t = math.sqrt(max(0.0, min((speed_ms - ROVER_MIN_COMMAND_SPEED_MS) / span, 1.0)))
+    return round(t * PACE_SLIDER_STEPS)
+
 
 #: What each aircraft mode is called on the roster.
 AIRCRAFT_TASK = {
@@ -209,6 +237,13 @@ class MainWindow(QMainWindow):
         self._mission_waypoints = self.sweep.points
         self._waypoint_index = 0
         self._current_lane: str | None = None
+        # A destination the operator has set takes the place of the sweep for
+        # as long as it stands. The sweep's progress is kept aside rather than
+        # discarded, so clearing the destination picks the lanes up where they
+        # were left.
+        self._destination: tuple[float, float] | None = None
+        self._destination_state = ""  # "enroute", "reached" or "unreachable"
+        self._parked_sweep: tuple[list, int, str | None] | None = None
         self._last_replan_s = -1e9
         self._last_replan_waypoint = -1
         self._last_downlink_s = 0.0
@@ -357,18 +392,20 @@ class MainWindow(QMainWindow):
 
         self.phase_label = QLabel("STANDBY")
         self.phase_label.setObjectName("phaseLabel")
-        layout.addWidget(self.phase_label)
-
-        layout.addStretch(1)
+        # What the rover is doing can be a long phrase; on a narrow window it
+        # is the part that gives way, not the controls beside it.
+        self.phase_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.phase_label.setMinimumWidth(80)
+        layout.addWidget(self.phase_label, stretch=1)
 
         # Mission mode is real doctrine (section 4.1) with real consequences,
         # so it is a control rather than a caption. LCA is not offered here:
         # it is entered automatically on total loss of contact, never chosen.
         self.mode_combo = make_styled_combo(
             [
-                ("STANDARD · full RF, live video", "STANDARD"),
-                ("AUTONOMOUS · status pings only", "AUTONOMOUS"),
-                ("GHOST · zero emissions", "GHOST"),
+                ("STANDARD · RF + video", "STANDARD"),
+                ("AUTONOMOUS · pings only", "AUTONOMOUS"),
+                ("GHOST · silent", "GHOST"),
             ]
         )
         self.mode_combo.setObjectName("modeCombo")
@@ -387,30 +424,36 @@ class MainWindow(QMainWindow):
         self.manual_chip = QLabel()
         for chip in (self.link_chip, self.battery_chip, self.manual_chip):
             chip.setObjectName("statusChip")
+            chip.setAlignment(Qt.AlignCenter)
             layout.addWidget(chip)
+        # Wide enough for the longest thing it says, so the text sits in the
+        # middle of its box instead of the box growing and shrinking around it.
+        self.link_chip.setMinimumWidth(LINK_CHIP_MIN_WIDTH)
         self.manual_chip.setVisible(False)  # only shown when somebody holds the sticks
 
-        # How fast mission time runs against the clock on the wall. The
-        # vehicles move at their own speeds; this only decides how long the
-        # operator waits to watch them do it, which on a small screen is the
-        # difference between following the sweep and missing it.
-        self.speed_combo = make_styled_combo(
-            [
-                ("\u00bd\u00d7 · half speed", 0.5),
-                ("1\u00d7 · real time", 1.0),
-                ("2\u00d7", 2.0),
-                ("4\u00d7", 4.0),
-            ]
+        # How fast the rover drives. A ceiling on every mode, set by the
+        # operator, from a crawl to the platform's top speed. The scale is
+        # not linear: the useful speeds for a clearance lane are all in the
+        # first few tenths of a metre per second, and a linear slider would
+        # put them in the first few pixels.
+        self.pace_slider = QSlider(Qt.Horizontal)
+        self.pace_slider.setObjectName("paceSlider")
+        self.pace_slider.setRange(0, PACE_SLIDER_STEPS)
+        self.pace_slider.setValue(pace_to_slider(ROVER_SURVEY_SPEED_MS))
+        self.pace_slider.setFixedWidth(PACE_SLIDER_WIDTH)
+        self.pace_slider.setToolTip(
+            "Speed.\n"
+            "The most the rover will drive at, in any mode: sweeping, going to a\n"
+            "destination, returning to base or under the sticks."
         )
-        self.speed_combo.setObjectName("speedCombo")
-        self.speed_combo.setCurrentIndex(1)
-        self.speed_combo.setToolTip(
-            "Playback speed.\n"
-            "How fast mission time runs, not how fast the vehicles drive:\n"
-            "the rover sweeps at its survey speed either way."
-        )
-        self.speed_combo.currentIndexChanged.connect(self._on_speed_changed)
-        layout.addWidget(self.speed_combo)
+        self.pace_slider.valueChanged.connect(self._on_pace_changed)
+        layout.addWidget(self.pace_slider)
+        self.pace_value = QLabel()
+        self.pace_value.setObjectName("paceValue")
+        self.pace_value.setFixedWidth(PACE_VALUE_WIDTH)
+        self.pace_value.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.pace_value)
+        self._on_pace_changed()
 
         self.play_btn = QPushButton("▶ DEPLOY")
         self.play_btn.setObjectName("playButton")
@@ -432,6 +475,8 @@ class MainWindow(QMainWindow):
         self.map_view.restoreLinkRequested.connect(self._on_restore_link)
         self.map_view.bearingDragged.connect(self.context_panel.launch_console.bearing_from_map)
         self.map_view.bayLaunchRequested.connect(self._on_bay_launch_requested)
+        self.map_view.destinationPlaced.connect(self._on_destination_placed)
+        self.map_view.destinationCleared.connect(self._on_destination_cleared)
 
         self.threat_panel.threatSelected.connect(self._on_threat_selected)
         self.threat_panel.confirmRequested.connect(self._on_alert_confirmed)
@@ -712,6 +757,11 @@ class MainWindow(QMainWindow):
             rover_task = "STANDBY"
         elif not self.mission_clock.playing:
             rover_task = "HOLDING"
+        elif self._destination is not None:
+            rover_task = {
+                "reached": "AT DESTINATION",
+                "unreachable": "DESTINATION BLOCKED",
+            }.get(self._destination_state, "GOING TO DESTINATION")
         elif self._waypoint_index >= len(self._mission_waypoints):
             rover_task = "SWEEP COMPLETE"
         elif self._current_lane is None:
@@ -841,6 +891,79 @@ class MainWindow(QMainWindow):
             f"{self.sweep.clear_fraction:.0%} of the footprint clear",
         )
 
+    # --- destination: the operator says where, the rover works out how ---
+
+    def _on_destination_placed(self, x: float, y: float) -> None:
+        self.map_view.set_placing_destination(False)
+        now = self.mission_clock.clock_s
+        if self.flight_director.rover_mode == RoverMode.MANUAL:
+            self.event_log.log(
+                now, "Destination refused: the rover is under manual control", level="caution"
+            )
+            return
+        if abs(x) > WORLD_HALF_EXTENT_M or abs(y) > WORLD_HALF_EXTENT_M:
+            self.event_log.log(
+                now, "Destination refused: outside the mapped operating area", level="caution"
+            )
+            return
+        if self.geofence.configured and not self.geofence.contains(x, y):
+            self.event_log.log(now, "Destination refused: outside the geofence", level="caution")
+            return
+
+        if self._destination is None:
+            self._parked_sweep = (self._mission_waypoints, self._waypoint_index, self._current_lane)
+        self._destination = (x, y)
+        self._destination_state = "enroute"
+        self._mission_waypoints = [(x, y, DESTINATION_LANE)]
+        self._waypoint_index = 0
+        self._current_lane = None
+        self.map_view.set_destination((x, y))
+
+        rover = self.units["rover"].pose
+        distance = math.hypot(x - rover.x, y - rover.y)
+        self.event_log.log(
+            now, f"Destination set: ({x:.0f}, {y:.0f}) m, {distance:.0f} m away, routing around obstacles"
+        )
+        if self._mission_started():
+            if self.flight_director.rover_mode == RoverMode.RETURNING:
+                self.flight_director.cancel_return()
+            self._begin_autonomous_sweep()
+        self._refresh_status()
+
+    def _on_destination_cleared(self) -> None:
+        if self._destination is None:
+            return
+        now = self.mission_clock.clock_s
+        self._destination = None
+        self._destination_state = ""
+        self.map_view.set_destination(None)
+        parked, self._parked_sweep = self._parked_sweep, None
+        if parked is not None:
+            self._mission_waypoints, self._waypoint_index, self._current_lane = parked
+        if self._mission_started() and self._waypoint_index < len(self._mission_waypoints):
+            self.event_log.log(now, "Destination cleared, resuming the lane sweep")
+            self._begin_autonomous_sweep()
+        else:
+            self.event_log.log(now, "Destination cleared")
+            self.flight_director.goal = None
+            self.flight_director.path = []
+            self.map_view.set_planned_path([], None)
+        self._refresh_status()
+
+    def _on_destination_event(self, event: str) -> None:
+        now = self.mission_clock.clock_s
+        self._waypoint_index = len(self._mission_waypoints)
+        self.map_view.set_planned_path([], None)
+        if event == "WAYPOINT_REACHED":
+            self._destination_state = "reached"
+            self.event_log.log(now, "Destination reached", level="good")
+        else:
+            self._destination_state = "unreachable"
+            self.event_log.log(
+                now, "Destination unreachable: no clear route to it from here", level="caution"
+            )
+        self._refresh_status()
+
     def _begin_autonomous_sweep(self) -> None:
         """Hand the rover its next lane point and let it drive itself."""
         if self._waypoint_index >= len(self._mission_waypoints):
@@ -856,7 +979,11 @@ class MainWindow(QMainWindow):
         # The leg is a lane to be held, not two points to get between, so
         # the planner is told where it starts.
         lane_from = (rover.pose.x, rover.pose.y)
-        if self._waypoint_index > 0:
+        if lane == DESTINATION_LANE:
+            # Not a lane: there is no line to hold, only somewhere to get to by
+            # whatever clear way the planner finds.
+            lane_from = None
+        elif self._waypoint_index > 0:
             previous = self._mission_waypoints[self._waypoint_index - 1]
             if previous[2] == lane:
                 lane_from = (previous[0], previous[1])
@@ -867,7 +994,8 @@ class MainWindow(QMainWindow):
         # entries that matter.
         if lane != self._current_lane:
             self._current_lane = lane
-            self.event_log.log(self.mission_clock.clock_s, f"Sweeping {lane}")
+            if lane != DESTINATION_LANE:
+                self.event_log.log(self.mission_clock.clock_s, f"Sweeping {lane}")
 
         # Plan immediately. The next director tick runs before the next
         # navigation tick, and a NAVIGATING rover with no path halts, so
@@ -895,6 +1023,7 @@ class MainWindow(QMainWindow):
                 self.event_log.log(
                     self.mission_clock.clock_s,
                     "Route blocked by newly mapped terrain, rerouted",
+                    key="reroute",
                     level="caution",
                 )
             self._last_replan_waypoint = self._waypoint_index
@@ -1165,6 +1294,8 @@ class MainWindow(QMainWindow):
             )
         elif event == "DOCKING":
             self.event_log.log(self.mission_clock.clock_s, f"{short_label(unit_id)} cleared to dock")
+        elif event in ("WAYPOINT_UNREACHABLE", "WAYPOINT_REACHED") and self._destination is not None:
+            self._on_destination_event(event)
         elif event == "WAYPOINT_UNREACHABLE":
             _, _, lane = self._mission_waypoints[
                 min(self._waypoint_index, len(self._mission_waypoints) - 1)
@@ -1454,7 +1585,13 @@ class MainWindow(QMainWindow):
             self.flight_director.hold_navigation = False
             self.play_btn.setText("\u23f8 HOLD")
             if first_time and self.flight_director.goal is None and self._waypoint_index == 0:
-                self._plan_sweep_from_first_scan()
+                if self._destination is not None:
+                    # Sent somewhere before it was even deployed: that is the
+                    # job. It still takes its first scan before it plans.
+                    self._last_scan_s = -1e9
+                    self._tick_lidar()
+                else:
+                    self._plan_sweep_from_first_scan()
                 self._begin_autonomous_sweep()
         self._refresh_status()
 
@@ -1466,15 +1603,15 @@ class MainWindow(QMainWindow):
         if self.event_log.height() != target:
             self.event_log.setFixedHeight(target)
 
-    def _on_speed_changed(self) -> None:
-        speed = self.speed_combo.currentData()
-        if speed is None:
-            return
-        self.mission_clock.set_speed(float(speed))
+    def _on_pace_changed(self, *_args) -> None:
+        speed = self.flight_director.set_commanded_speed(slider_to_pace(self.pace_slider.value()))
+        self.pace_value.setText(f"{speed:.1f} m/s" if speed < 10 else f"{speed:.0f} m/s")
+        # Sweeping at a crawl and driving across the map are different jobs;
+        # name which one the slider is sitting at.
+        self.pace_value.setToolTip(f"{speed * 3.6:.1f} km/h")
 
     def _on_reset_clicked(self) -> None:
         self.mission_clock.reset()
-        self.mission_clock.set_speed(float(self.speed_combo.currentData() or 1.0))
         self._status_key = None
         self.map_view.clear()
         self.perception.clear()
@@ -1492,6 +1629,11 @@ class MainWindow(QMainWindow):
         self._escalated.clear()
         self._waypoint_index = 0
         self._current_lane = None
+        self._mission_waypoints = self.sweep.points
+        self._destination = None
+        self._destination_state = ""
+        self._parked_sweep = None
+        self.map_view.set_destination(None)
         self._last_replan_s = -1e9
         self._last_replan_waypoint = -1
         self.map_view.set_planned_path([], None)

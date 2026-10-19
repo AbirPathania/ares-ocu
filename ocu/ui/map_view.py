@@ -46,7 +46,6 @@ from ocu.ui.theme import (
     GRID_MAJOR,
     RETURN_COLORS,
     TERRAIN_COLORS,
-    TERRAIN_LABELS,
     UNIT_TINTS,
 )
 from ocu.core.mesh_state import voxel_key
@@ -111,12 +110,24 @@ TETHER_COLOR = QColor(94, 201, 194, 46)
 TETHER_LABEL_COLOR = QColor(94, 201, 194, 110)
 
 
+#: How far the pointer may move between press and release and still be a click.
+CLICK_SLOP_PX = 4.0
+
+#: The view follows the rover once it is within this fraction of the map's size
+#: from an edge, easing over about this long.
+FOLLOW_MARGIN = 0.22
+FOLLOW_SMOOTHING_S = 0.5
+FOLLOW_QUIET_S = 4.0
+
+
 class MapView(QWidget):
     cutLinkRequested = Signal()
     restoreLinkRequested = Signal()
     bearingDragged = Signal(float)
     unitClicked = Signal(str)
     bayLaunchRequested = Signal()  # operator clicked a docked slot in the rover's bay
+    destinationPlaced = Signal(float, float)  # operator clicked a point on the map to go to
+    destinationCleared = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -187,6 +198,12 @@ class MapView(QWidget):
         self._bearing_deg = 0.0
         self._dragging_compass = False
         self._cursor_world: tuple[float, float] | None = None
+        # Where the operator has sent the rover, and whether the next click on
+        # the map is going to set it.
+        self._destination: tuple[float, float] | None = None
+        self._placing_destination = False
+        self._press_pos: QPointF | None = None
+        self._quiet_until_s = 0.0  # seconds the view is left alone after a drag
 
         self._pan = QPointF(0.0, 0.0)
         self._panning = False
@@ -252,7 +269,47 @@ class MapView(QWidget):
         self.cut_link_btn.clicked.connect(self._on_cut_clicked)
         toolbar.addWidget(self.cut_link_btn)
 
+        self.destination_btn = QPushButton()
+        self.destination_btn.setObjectName("destinationButton")
+        self.destination_btn.clicked.connect(self._on_destination_clicked)
+        toolbar.addWidget(self.destination_btn)
+        self._refresh_destination_button()
+
         layout.addLayout(toolbar)
+
+    # --- destination: where the operator sends the rover ---
+
+    def _on_destination_clicked(self) -> None:
+        if self._destination is not None:
+            self.destinationCleared.emit()
+        else:
+            self.set_placing_destination(not self._placing_destination)
+
+    def set_placing_destination(self, placing: bool) -> None:
+        """Arm or disarm the map: while armed, the next click is a destination."""
+        self._placing_destination = placing
+        self.setCursor(Qt.CrossCursor if placing else Qt.ArrowCursor)
+        self._refresh_destination_button()
+        self.update()
+
+    def set_destination(self, destination: tuple[float, float] | None) -> None:
+        self._destination = destination
+        self._placing_destination = False
+        self.setCursor(Qt.ArrowCursor)
+        self._refresh_destination_button()
+        self.update()
+
+    def _refresh_destination_button(self) -> None:
+        if self._destination is not None:
+            text, state = "\u2715 CLEAR DESTINATION", "set"
+        elif self._placing_destination:
+            text, state = "\u25ce CLICK THE MAP", "placing"
+        else:
+            text, state = "\u25ce GO TO", "idle"
+        self.destination_btn.setText(text)
+        self.destination_btn.setProperty("state", state)
+        self.destination_btn.style().unpolish(self.destination_btn)
+        self.destination_btn.style().polish(self.destination_btn)
 
     def _on_cut_clicked(self) -> None:
         if self._link_cut:
@@ -267,7 +324,33 @@ class MapView(QWidget):
             self._reconciled_flash = max(0.0, self._reconciled_flash - dt)
         self._radar_angle = (self._radar_angle + 0.64) % 360.0
         self._advance_shown_poses(dt)
+        self._follow_rover(dt)
         self.update()
+
+    def _follow_rover(self, dt_s: float) -> None:
+        """Keep the rover on the map.
+
+        A rover sent across the ground drives off the edge of a fixed view,
+        and the operator is then watching empty map. The view stays where it
+        is while the rover is comfortably inside it and moves only when the
+        rover nears the edge, and only as far as it has to, so the picture is
+        not forever sliding under the pointer. Left alone for a few seconds
+        after the operator has dragged the map, which is them saying where
+        they want to look.
+        """
+        if self._panning or self._quiet_until_s > 0.0:
+            self._quiet_until_s = max(0.0, self._quiet_until_s - dt_s)
+            return
+        if "rover" not in self._units or self.width() < 100:
+            return
+        point = self._to_screen(self._drawn_pose("rover")["x"], self._drawn_pose("rover")["y"])
+        margin_x, margin_y = self.width() * FOLLOW_MARGIN, self.height() * FOLLOW_MARGIN
+        shift_x = max(margin_x - point.x(), 0.0) - max(point.x() - (self.width() - margin_x), 0.0)
+        shift_y = max(margin_y - point.y(), 0.0) - max(point.y() - (self.height() - margin_y), 0.0)
+        if shift_x == 0.0 and shift_y == 0.0:
+            return
+        alpha = 1.0 - math.exp(-dt_s / FOLLOW_SMOOTHING_S)
+        self._pan = QPointF(self._pan.x() + shift_x * alpha, self._pan.y() + shift_y * alpha)
 
     def _advance_shown_poses(self, dt_s: float) -> None:
         """Ease each drawn icon toward where the simulation last put it.
@@ -576,6 +659,7 @@ class MapView(QWidget):
         self._draw_tether_ring(painter)
         self._draw_swept(painter)
         self._draw_planned_path(painter)
+        self._draw_destination(painter)
         self._draw_trails(painter)
         self._draw_formation_preview(painter)
         self._draw_detections(painter)
@@ -585,7 +669,6 @@ class MapView(QWidget):
             self._draw_bearing_compass(painter)
         self._draw_deploy_point(painter)
         self._draw_north_indicator(painter)
-        self._draw_legend(painter)
         self._draw_scale_bar(painter)
         self._draw_mesh_banner(painter)
         if self._stale:
@@ -742,6 +825,71 @@ class MapView(QWidget):
             painter.drawLine(goal + QPointF(-9, 0), goal + QPointF(9, 0))
             painter.drawLine(goal + QPointF(0, -9), goal + QPointF(0, 9))
 
+    def _draw_destination(self, painter: QPainter) -> None:
+        """The place the operator sent the rover, and how far off it still is.
+
+        Drawn apart from the planned route: that is where the rover has
+        decided to go and changes as it learns the ground, this is where it was
+        told to end up and does not.
+        """
+        colour = QColor("#E8B04A")
+        if self._placing_destination and self._cursor_world is not None:
+            ghost = self._to_screen(*self._cursor_world)
+            pen = QPen(QColor(232, 176, 74, 150))
+            pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(ghost, 9, 9)
+            painter.drawLine(ghost + QPointF(-14, 0), ghost + QPointF(14, 0))
+            painter.drawLine(ghost + QPointF(0, -14), ghost + QPointF(0, 14))
+        if self._destination is None:
+            return
+        point = self._to_screen(*self._destination)
+        rover = self._rover_pose()
+        remaining = math.hypot(self._destination[0] - rover["x"], self._destination[1] - rover["y"])
+        inset = QRectF(self.rect()).adjusted(22, 22, -22, -22)
+        if not inset.contains(point):
+            self._draw_destination_edge_marker(painter, point, inset, remaining, colour)
+            return
+        painter.setBrush(Qt.NoBrush)
+        pen = QPen(colour)
+        pen.setWidthF(1.6)
+        painter.setPen(pen)
+        painter.drawEllipse(point, 10, 10)
+        painter.drawEllipse(point, 3, 3)
+        painter.drawLine(point + QPointF(-16, 0), point + QPointF(-10, 0))
+        painter.drawLine(point + QPointF(10, 0), point + QPointF(16, 0))
+        painter.drawLine(point + QPointF(0, -16), point + QPointF(0, -10))
+        painter.drawLine(point + QPointF(0, 10), point + QPointF(0, 16))
+        painter.setFont(QFont("Menlo", 8))
+        painter.drawText(point + QPointF(16, -10), f"DEST  {remaining:,.0f} m")
+
+    def _draw_destination_edge_marker(
+        self, painter: QPainter, point: QPointF, inset: QRectF, remaining: float, colour: QColor
+    ) -> None:
+        """A destination off the edge of the view: an arrow on the edge it lies
+        past, with how far away it is, so it is never simply lost."""
+        centre = inset.center()
+        dx, dy = point.x() - centre.x(), point.y() - centre.y()
+        scale = min(
+            (inset.width() / 2.0) / abs(dx) if dx else math.inf,
+            (inset.height() / 2.0) / abs(dy) if dy else math.inf,
+        )
+        edge = QPointF(centre.x() + dx * scale, centre.y() + dy * scale)
+        angle = math.atan2(dy, dx)
+        tip = edge + QPointF(math.cos(angle), math.sin(angle)) * 9.0
+        left = edge + QPointF(math.cos(angle + 2.5), math.sin(angle + 2.5)) * 11.0
+        right = edge + QPointF(math.cos(angle - 2.5), math.sin(angle - 2.5)) * 11.0
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(colour))
+        painter.drawPolygon([tip, left, right])
+        painter.setPen(QPen(colour))
+        painter.setFont(QFont("Menlo", 8))
+        label = f"DEST  {remaining:,.0f} m"
+        anchor_x = edge.x() - 78.0 if edge.x() > centre.x() else edge.x() + 14.0
+        anchor_y = edge.y() + 14.0 if edge.y() < centre.y() else edge.y() - 6.0
+        painter.drawText(QPointF(max(8.0, min(anchor_x, self.width() - 90.0)), anchor_y), label)
+
     def _draw_sensor_range(self, painter: QPainter) -> None:
         """Where the scanner stops. A range ring is standard on any sensor
         display and it is the honest version of showing the beam: it marks
@@ -768,57 +916,6 @@ class MapView(QWidget):
         painter.drawLine(centre + QPointF(0, -11), centre + QPointF(0, 11))
         painter.setFont(QFont("Menlo", 8))
         painter.drawText(centre + QPointF(14, 4), "DEPLOY")
-
-    def _draw_legend(self, painter: QPainter) -> None:
-        """Classification key and the scanner's own numbers.
-
-        An operator judging a map needs to know how much of it is measured
-        and how recently, not only what colour means what.
-        """
-        keys = ("TRACK", "GROUND", "SCRUB", "TREE", "ROCK", "POTHOLE")
-        row_height = 13.0
-        stats_gap = 16.0
-        x = 16.0
-        # Laid out from the bottom up, above the scale bar, so adding a class
-        # to the key pushes the block up rather than printing the numbers
-        # through the scale or off the map.
-        y = (
-            self.height()
-            - SCALE_BAR_RESERVED_PX
-            - 5 * 12.0
-            - stats_gap
-            - len(keys) * row_height
-        )
-
-        painter.setFont(QFont("DIN Condensed", 13, QFont.Bold))
-        painter.setPen(QPen(QColor("#8FC9E8")))
-        painter.drawText(QRectF(x, y - 16, 240, 14), Qt.AlignLeft, "LIDAR \u00b7 SLAM")
-
-        painter.setFont(QFont("Menlo", 8))
-        for i, key in enumerate(keys):
-            row = y + i * row_height
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(RETURN_COLORS[key]))
-            painter.drawRect(QRectF(x, row, 9, 9))
-            painter.setPen(QPen(QColor(150, 164, 178, 210)))
-            painter.drawText(QRectF(x + 14, row - 2, 92, 13), Qt.AlignLeft, TERRAIN_LABELS[key])
-
-        stats = self._lidar_stats
-        lines = [
-            f"points    {self._cloud_points:,}",
-            f"mapped    {self._mapped_m2:,.0f} m\u00b2",
-            f"returns/s {stats.get('returns_per_s', 0):,.0f}",
-            f"obstacles {stats.get('obstacles', 0):,.0f}",
-            f"range     {stats.get('range_m', 0):.0f} m @ {stats.get('scan_hz', 0):.0f} Hz",
-        ]
-        painter.setPen(QPen(QColor(150, 164, 178, 210)))
-        painter.setFont(QFont("Menlo", 8))
-        for i, line in enumerate(lines):
-            painter.drawText(
-                QRectF(x, y + len(keys) * row_height + stats_gap + i * 12, 240, 13),
-                Qt.AlignLeft,
-                line,
-            )
 
     def _draw_grid(self, painter: QPainter) -> None:
         """A 10 m grid with coordinates on the majors, so distances on this
@@ -1310,6 +1407,10 @@ class MapView(QWidget):
                 self.unitClicked.emit(unit_id)
                 return
 
+        if event.button() == Qt.RightButton and self._placing_destination:
+            self.set_placing_destination(False)
+            return
+        self._press_pos = QPointF(event.position())
         self._panning = True
         self._pan_start = event.position()
         self._pan_origin = QPointF(self._pan)
@@ -1327,7 +1428,20 @@ class MapView(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         self._dragging_compass = False
+        if self._panning and self._press_pos is not None and _dist(self._press_pos, event.position()) >= CLICK_SLOP_PX:
+            self._quiet_until_s = FOLLOW_QUIET_S
         self._panning = False
+        # A click, not the end of a pan: placing a destination on a map the
+        # operator is dragging around would otherwise set one at every pan.
+        press, self._press_pos = self._press_pos, None
+        if (
+            self._placing_destination
+            and press is not None
+            and event.button() == Qt.LeftButton
+            and _dist(press, event.position()) < CLICK_SLOP_PX
+        ):
+            x, y = self._to_world(event.position())
+            self.destinationPlaced.emit(x, y)
 
     def leaveEvent(self, event) -> None:
         self._cursor_world = None

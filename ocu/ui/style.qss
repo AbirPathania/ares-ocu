@@ -373,3 +373,33 @@ QPushButton#cardReject {
     border: 1px solid #3A4756;
     color: #7B8794;
 }
+
+QLabel#paceValue {
+    font-family: "DIN Condensed"; font-size: 14px; letter-spacing: 1px;
+    font-weight: bold; color: #8FC9E8;
+    background-color: #12181c; border: 1px solid #283340; padding: 4px 0px;
+}
+
+QSlider#paceSlider { min-height: 22px; }
+QSlider#paceSlider::groove:horizontal {
+    height: 4px; background: #283340; border-radius: 2px;
+}
+QSlider#paceSlider::sub-page:horizontal {
+    background: #2E5F80; border-radius: 2px;
+}
+QSlider#paceSlider::handle:horizontal {
+    width: 12px; height: 12px; margin: -5px 0;
+    background: #8FC9E8; border: 1px solid #17344A; border-radius: 7px;
+}
+QSlider#paceSlider::handle:horizontal:hover { background: #BFE3F5; }
+
+QPushButton#destinationButton {
+    background-color: #2A2314; border-color: #6B5A2A; color: #E8B04A;
+}
+QPushButton#destinationButton:hover { background-color: #3A3019; }
+QPushButton#destinationButton[state="placing"] {
+    background-color: #4A3B14; border-color: #E8B04A; color: #FFD98A;
+}
+QPushButton#destinationButton[state="set"] {
+    background-color: #1A1F24; border-color: #3A4652; color: #B8C4CF;
+}

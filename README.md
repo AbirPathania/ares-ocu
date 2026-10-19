@@ -116,7 +116,8 @@ real decision from the team, not this build's placeholder.
 
 | Element | Status |
 |---|---|
-| Playback speed | A control, not a cheat: ½× to 4× decides how fast mission time runs, and the vehicles drive at their own speeds either way. A long tick is split before it is integrated, so the same mission plays out at every speed |
+| Rover speed | The operator's. A slider in the top bar sets the most the rover will drive at, from a crawl to the platform's published 15 km/h, in every mode: sweeping, going to a destination, returning to base. The default is the survey crawl the sensors need |
+| Destination | Press GO TO on the map and click anywhere on it. The rover plans its own way there around everything it has mapped, replans as it maps more, and the formation keeps station on it. CLEAR DESTINATION puts the lane sweep back where it was left |
 | Unit positions | Simulated. The rover plans and follows its own route (`core/navigation.py`); aircraft are flown by the flight director under the baseline's speed and acceleration limits, with slots held as offsets from the rover |
 | Buried objects and detections | Real. Physical objects in `core/targets.py` with depth, metal mass, ferrous state and vapour; four sensor response models in `core/detection.py` built from the baseline's own reach figures. What is found depends on where the rover drives |
 | Battery and endurance | Real, integrated from the power budget in `core/power.py`. Reproduces the baseline: 430 Wh at 143 W gives 3.0 h, ARES-A cruise gives 11 min, a 30 W pad charges in 9 min |

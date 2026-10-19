@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 from ocu.core.constants import (
     ARES_A_CEILING_M,
     ROVER_COMPUTE_LOAD_W,
-    ROVER_OPERATING_SPEED_KMH,
+    ROVER_TOP_SPEED_KMH,
     TETHER_LIMIT_M,
 )
 from ocu.ui.launch_console import LaunchConsole
@@ -161,7 +161,7 @@ class RoverPanel(QWidget):
         title.setObjectName("panelTitle")
         layout.addWidget(title)
 
-        self.speed = Readout("SPEED", "0.0", f"/ {ROVER_OPERATING_SPEED_KMH:.1f} km/h")
+        self.speed = Readout("SPEED", "0.0", f"/ {ROVER_TOP_SPEED_KMH:.1f} km/h")
         self.heading = Readout("HEADING", "0°")
         self.power = Readout("POWER DRAW", f"{ROVER_COMPUTE_LOAD_W:.0f}", "W")
         self.endurance = Readout("ENDURANCE", "\u2014")
