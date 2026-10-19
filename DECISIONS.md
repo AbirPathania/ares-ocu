@@ -853,3 +853,41 @@ will not be.
 Three existing tests had been passing for the wrong reason: they only ever
 drove a rover at a heading of zero, where the vehicle's frame and the map's
 are identical. They now turn the rover.
+
+## Staging is a place on the rover, not a place on the map
+
+The body-frame change above still left one hole: staging computed the
+formation from the rover's pose *at the moment of staging*, and launch read it
+back at the moment of launch. Stage facing 127 degrees, let the rover reach the
+end of its lane and turn to 247, press Launch: the aircraft finished 146
+degrees off the nose, behind the vehicle, with the dial reading -26.
+
+The console now works the formation out with the rover at the origin facing
++y (`_body_targets`), so a staged slot is "this far ahead, this far across"
+and nothing about the world is baked in. Launch hands the flight director the
+dial's bearing relative to the nose. A regression test stages, turns the rover
+by 120 degrees, launches, and checks the aircraft finish ahead of the vehicle;
+it fails if the staged bearing is wrong.
+
+## The rover's pace is half its published top speed
+
+Operator decision: the demonstrator drives at `ROVER_PACE_FACTOR = 0.5` of the
+baseline top speed (operating 2.08 m/s, sweeping 0.4 m/s), because the map
+moved too fast to read on a laptop screen. The baseline figure is unchanged
+and still what the platform is rated for; only the picture's pace changed.
+The readout shows the operating ceiling, not the rated one.
+
+Two things that were quietly tied to the old pace had to follow it. The
+"rover is moving" threshold for scout advice was 0.5 m/s, above the new
+sweep speed, so the rover stopped recommending anything; it is now half the
+survey pace. And tests that waited a fixed number of seconds for a detection
+now wait for the event.
+
+## Small screens
+
+The window opens at 92% of the screen up to 1600x960 and cannot be sized below
+the sum of its columns (left 176, map 380, right 322 px). The right column's
+formation panel scrolls rather than being cut off; the threat list keeps its
+share. Fleet cards and threat cards derive their layout from their width and
+elide text instead of overprinting it. The alert banner keeps both decisions
+whole by reflowing to two rows below 600 px.

@@ -23,10 +23,13 @@ import math
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -34,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from ocu.core.constants import (
     ALERT_CONFIDENCE_THRESHOLD,
+    ROVER_SURVEY_SPEED_MS,
 )
 from ocu.core.comms import GHOST, LCA, STANDARD, profile_for
 from ocu.core.control_authority import ControlAuthority
@@ -88,8 +92,10 @@ SCOUT_RECOMMEND_HIDDEN_FRACTION = 0.30
 DETECTION_REPORT_STEP = 0.05
 
 #: The rover has to be moving at least this fast for "ahead" to be where it is
-#: going, before it recommends anything about it.
-MIN_SPEED_FOR_ADVICE_MS = 0.5
+#: going, before it recommends anything about it. Half the survey pace: well
+#: clear of a standstill, and still met by a rover that is sweeping, which is
+#: when it has most to say about the ground ahead.
+MIN_SPEED_FOR_ADVICE_MS = ROVER_SURVEY_SPEED_MS / 2
 
 #: What each aircraft mode is called on the roster.
 AIRCRAFT_TASK = {
@@ -102,6 +108,25 @@ AIRCRAFT_TASK = {
     "HOLDING": "HOLDING",
     "DOCKING": "DOCKING",
 }
+
+#: Column widths below which a column's contents stop making sense. The
+#: right-hand one is set by the formation form, which needs about 300.
+LEFT_COLUMN_MIN_WIDTH = 176
+MAP_MIN_WIDTH = 380
+RIGHT_COLUMN_MIN_WIDTH = 322
+
+#: Smallest the right-hand context panel is allowed to be before it scrolls.
+CONTEXT_MIN_HEIGHT = 150
+
+#: The log takes a sixth of the window, within these limits. A fixed height
+#: is the right amount on a large screen and most of the window on a small one.
+EVENT_LOG_MIN_HEIGHT = 72
+EVENT_LOG_MAX_HEIGHT = 130
+
+#: What the window can be made, and what it opens at on a screen that cannot
+#: take the preferred size. Set from the layout actually shrinking, which the
+#: tests hold, rather than from a number that happens to fit one machine.
+WINDOW_MIN_SIZE = (LEFT_COLUMN_MIN_WIDTH + MAP_MIN_WIDTH + RIGHT_COLUMN_MIN_WIDTH + 12, 560)
 
 #: Interval between camera frames. One tile is rendered per tick, because a
 #: frame costs about 20 ms and rendering four of them together would stall
@@ -189,6 +214,7 @@ class MainWindow(QMainWindow):
         self._last_downlink_s = 0.0
         self._silence_began_s: float | None = None
         self.setFocusPolicy(Qt.StrongFocus)
+        self.setMinimumSize(*WINDOW_MIN_SIZE)
 
         # The flight director owns every unit it has been handed, on its own
         # wall clock, independently of whether the scripted mission is playing.
@@ -243,11 +269,20 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([288, 900, 312])
+        splitter.setChildrenCollapsible(False)
+        splitter.setSizes([288, 900, 330])
+        # Each column has a width below which its contents stop making sense,
+        # and the splitter is not allowed to take it past that. Without
+        # these the right-hand column was shrunk to 240 px on a small window
+        # and the formation form was cut off at its right edge.
+        splitter.widget(0).setMinimumWidth(LEFT_COLUMN_MIN_WIDTH)
+        splitter.widget(1).setMinimumWidth(MAP_MIN_WIDTH)
+        splitter.widget(2).setMinimumWidth(RIGHT_COLUMN_MIN_WIDTH)
         root.addWidget(splitter, stretch=1)
 
         self.event_log = EventLog()
-        self.event_log.setFixedHeight(118)
+        self.event_log.setMinimumHeight(EVENT_LOG_MIN_HEIGHT)
+        self.event_log.setFixedHeight(EVENT_LOG_MAX_HEIGHT)
         root.addWidget(self.event_log)
 
     def _build_left_column(self) -> QWidget:
@@ -288,11 +323,25 @@ class MainWindow(QMainWindow):
         layout.setSpacing(GUTTER)
 
         self.threat_panel = ThreatPanel()
-        layout.addWidget(self.threat_panel, stretch=1)
+        layout.addWidget(self.threat_panel, stretch=3)
 
+        # The context panel is as tall as its tallest page, and on a short
+        # window that is more than there is. Left to the layout it was
+        # squeezed below its own contents and drew over the threat list.
+        # Inside a scroll area it keeps its natural size and scrolls instead,
+        # so nothing is ever drawn on top of anything.
         self.context_panel = ContextPanel()
-        self.context_panel.setMinimumHeight(330)
-        layout.addWidget(self.context_panel)
+        self.context_scroll = QScrollArea()
+        self.context_scroll.setWidget(self.context_panel)
+        self.context_scroll.setWidgetResizable(True)
+        self.context_scroll.setFrameShape(QFrame.NoFrame)
+        self.context_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.context_scroll.setMinimumHeight(CONTEXT_MIN_HEIGHT)
+        # Height is shared by stretch, not by what each panel would like: the
+        # threat list is what the operator acts on and takes the larger share,
+        # and the context panel scrolls for the remainder.
+        self.context_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        layout.addWidget(self.context_scroll, stretch=2)
         return container
 
     def _build_top_bar(self) -> QWidget:
@@ -1408,6 +1457,14 @@ class MainWindow(QMainWindow):
                 self._plan_sweep_from_first_scan()
                 self._begin_autonomous_sweep()
         self._refresh_status()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # A fixed log height is the right amount on a large screen and most
+        # of a small one, so it follows the window instead.
+        target = max(EVENT_LOG_MIN_HEIGHT, min(EVENT_LOG_MAX_HEIGHT, int(self.height() * 0.17)))
+        if self.event_log.height() != target:
+            self.event_log.setFixedHeight(target)
 
     def _on_speed_changed(self) -> None:
         speed = self.speed_combo.currentData()

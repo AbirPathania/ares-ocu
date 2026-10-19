@@ -42,7 +42,12 @@ class SimulatedCameraFeed(QWidget):
         # A 16:9 feed wants height, and the left column has it: the roster
         # below is a fixed stack of four cards, so whatever is left belongs
         # to the feeds rather than to empty background.
-        self.setMinimumHeight(104)
+        # Low floor, generous ceiling. Four tiles with a 104 px floor each
+        # demanded 723 px of the left column on their own, which is more
+        # than a small screen has for the whole window. They give way before
+        # anything else does, because a feed is still legible at a third of
+        # its preferred size and a roster card is not.
+        self.setMinimumHeight(44)
         self.setMaximumHeight(220)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 

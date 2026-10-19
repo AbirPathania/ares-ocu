@@ -519,6 +519,65 @@ def test_a_guided_launch_from_a_driving_rover_forms_on_the_pattern_the_operator_
         assert abs(pose.z - target.z) < 0.7, uid
 
 
+def test_a_formation_staged_before_the_rover_turns_is_still_off_the_nose_when_launched(app):
+    """Stage facing one way, let the rover turn, launch: the aircraft belong
+    where the dial says relative to the nose *now*. Measured before the fix:
+    staged facing 127, launched facing 247, the aircraft finished 146 degrees
+    off the nose, behind the vehicle."""
+    import math
+
+    from ocu.core.flight_director import to_body_frame
+
+    window = MainWindow()
+    _deploy_and_drive(window, 12.0)
+    console = window.context_panel.launch_console
+    window._on_bay_launch_requested()
+    console.bearing_spin.setValue(0.0)
+    console._on_stage_clicked()
+
+    # The lane turns while the operator is deciding.
+    window.flight_director.rover_body.heading = (window.units["rover"].pose.heading + 120.0) % 360.0
+    console._on_launch_confirmed()
+    _drive(window, 45.0)
+
+    assert window.flight_director.launch_stage(TRICOPTERS) == "FORMED"
+    rover = window.units["rover"].pose
+    ahead = []
+    for uid in TRICOPTERS:
+        pose = window.units[uid].pose
+        forward, _right = to_body_frame(pose.x - rover.x, pose.y - rover.y, rover.heading)
+        ahead.append(forward)
+    # A vee pushed forward: every aircraft is in front of the vehicle it flies on.
+    assert min(ahead) > 5.0, ahead
+    centroid = [
+        to_body_frame(window.units[u].pose.x - rover.x, window.units[u].pose.y - rover.y, rover.heading)
+        for u in TRICOPTERS
+    ]
+    mean_right = sum(r for _f, r in centroid) / len(centroid)
+    assert abs(mean_right) < 3.0, "a dead-ahead dial puts the group's centre on the nose line"
+    assert all(math.isfinite(f) for f in ahead)
+
+
+def test_the_rovers_pace_is_half_its_published_top_speed(app):
+    from ocu.core.constants import (
+        ROVER_OPERATING_SPEED_MS,
+        ROVER_PACE_FACTOR,
+        ROVER_TOP_SPEED_MS,
+        ROVER_SURVEY_SPEED_MS,
+    )
+
+    assert ROVER_PACE_FACTOR == 0.5
+    assert ROVER_OPERATING_SPEED_MS == pytest.approx(ROVER_TOP_SPEED_MS / 2)
+    assert ROVER_SURVEY_SPEED_MS <= ROVER_OPERATING_SPEED_MS
+    window = MainWindow()
+    window._on_play_clicked()
+    fastest = 0.0
+    for _ in range(600):
+        window._on_director_tick()
+        fastest = max(fastest, window.flight_director.rover_body.speed_ms)
+    assert fastest <= ROVER_OPERATING_SPEED_MS + 1e-6
+
+
 def test_aircraft_ride_in_the_bay_with_the_rover_until_they_lift_off(app):
     import math
 
@@ -950,15 +1009,27 @@ def test_the_rover_side_diverges_too_when_it_finds_something_during_a_cut(app):
     assert window.mesh_link.divergence() == 0
 
 
+def _drive_until_something_is_found(window, limit_s=90.0):
+    """Drive until the threat list has an entry. How long that takes depends on
+    the rover's pace and the ground, so the test waits for the event rather than
+    for a number of seconds that would have to be re-measured at every pace."""
+    for _ in range(int(limit_s / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        if window.threat_panel._threats:
+            return True
+    return False
+
+
 def test_a_reset_forgets_what_was_found_so_it_can_be_found_again(app):
     window = MainWindow()
-    _deploy_and_drive(window, 15.0)
-    assert window.threat_panel._threats
+    window._on_play_clicked()
+    assert _drive_until_something_is_found(window)
     window._on_reset_clicked()
     assert not window._target_evidence and not window._aerial_evidence and not window._escalated
 
-    _deploy_and_drive(window, 15.0)
-    assert window.threat_panel._threats, "the rover can find the same objects again"
+    window._on_play_clicked()
+    assert _drive_until_something_is_found(window), "the rover can find the same objects again"
 
 
 # --- how fast things move, and how fast you watch them ------------------------------
@@ -1105,3 +1176,45 @@ def test_only_live_units_are_rendered(app):
     window._select_unit("rover")
     seen = _count_frames(window)
     assert set(seen) == {"rover"}, "aircraft in the bay have no view to render"
+
+
+# --- small screens ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("size", [(1000, 640), (1280, 720), (1440, 900)])
+def test_the_window_works_at_laptop_sizes_with_no_panel_over_another(app, size):
+    from PySide6.QtWidgets import QSplitter
+
+    from ocu.ui import main_window as mw
+
+    window = MainWindow()
+    window.resize(*size)
+    window.show()
+    pump(app, 10)
+    assert (window.width(), window.height()) == size, "the window honours a laptop size"
+    splitter = window.findChild(QSplitter)
+    columns = [splitter.widget(i) for i in range(3)]
+    floors = (mw.LEFT_COLUMN_MIN_WIDTH, mw.MAP_MIN_WIDTH, mw.RIGHT_COLUMN_MIN_WIDTH)
+    for column, floor in zip(columns, floors):
+        assert column.width() >= floor - 1, (column.objectName(), column.width(), floor)
+    assert sum(c.width() for c in columns) <= window.width()
+    # The formation form scrolls rather than being cut off.
+    assert window.context_scroll.widget() is window.context_panel
+    window.close()
+
+
+def test_the_alert_banner_keeps_both_decisions_whole_on_a_narrow_map(app):
+    from ocu.ui.alert_banner import COMPACT_BELOW_WIDTH, AlertBanner
+
+    banner = AlertBanner()
+    banner.resize(COMPACT_BELOW_WIDTH - 100, 120)
+    banner.show()
+    banner.show_alert({"type": "mine", "x": 4.0, "y": -8.0, "confidence": 0.87, "source_id": "rover"})
+    pump(app, 20)
+    for button in (banner.confirm_btn, banner.reject_btn):
+        assert button.width() >= button.sizeHint().width(), button.text()
+        assert button.geometry().right() <= banner.width()
+    banner.resize(COMPACT_BELOW_WIDTH + 200, 120)
+    pump(app, 10)
+    assert banner.confirm_btn.geometry().top() == banner.reject_btn.geometry().top()
+    banner._timer.stop()

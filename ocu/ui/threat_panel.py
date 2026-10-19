@@ -15,7 +15,7 @@ human-in-the-loop rule.
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD
@@ -51,6 +51,9 @@ TITLE_PT = 14
 SMALL_PT = 11
 
 SELECTED_ROW = PANEL_RAISED
+
+#: Width the CONFIRM / CLEAR pair takes at the right of a pending row.
+ACTIONS_WIDTH = 146
 
 def confidence_color(confidence: float) -> QColor:
     if confidence >= ALERT_CONFIDENCE_THRESHOLD:
@@ -150,12 +153,18 @@ class ThreatCard(QWidget):
 
         text_left = rect.left() + 42
         painter.setPen(QPen(TEXT))
-        painter.setFont(QFont(FONT_LABEL, TITLE_PT, QFont.Bold))
+        title_font = QFont(FONT_LABEL, TITLE_PT, QFont.Bold)
+        painter.setFont(title_font)
+        title_room = rect.width() - text_left - 96
         painter.drawText(
-            QRectF(text_left, rect.top() + 7, rect.width() - text_left - 96, 15),
+            QRectF(text_left, rect.top() + 7, title_room, 15),
             Qt.AlignLeft | Qt.AlignVCenter,
-            f'{str(self.threat.get("type", "unknown")).replace("_", " ").upper()}'
-            f'   {self.threat["x"]:.0f}, {self.threat["y"]:.0f} m',
+            QFontMetricsF(title_font).elidedText(
+                f'{str(self.threat.get("type", "unknown")).replace("_", " ").upper()}'
+                f'   {self.threat["x"]:.0f}, {self.threat["y"]:.0f} m',
+                Qt.ElideRight,
+                max(title_room, 0.0),
+            ),
         )
 
         painter.setPen(QPen(status_color))
@@ -187,12 +196,20 @@ class ThreatCard(QWidget):
             f"{confidence:.2f}",
         )
 
+        # Clear of the action buttons, which sit at the right of this line
+        # while a contact is pending: the sensor list gives way to them, not
+        # the other way round.
         painter.setPen(QPen(TEXT_DIM))
-        painter.setFont(QFont("Menlo", SMALL_PT))
+        sensor_font = QFont("Menlo", SMALL_PT)
+        painter.setFont(sensor_font)
+        pending = self.threat.get("status") == "PENDING"
+        sensors_room = rect.width() - text_left - (ACTIONS_WIDTH if pending else 8)
         painter.drawText(
-            QRectF(text_left, rect.top() + 38, rect.width() - text_left - 100, 13),
+            QRectF(text_left, rect.top() + 38, max(sensors_room, 0.0), 13),
             Qt.AlignLeft | Qt.AlignVCenter,
-            sensor_list(self.threat.get("sensors", [])),
+            QFontMetricsF(sensor_font).elidedText(
+                sensor_list(self.threat.get("sensors", [])), Qt.ElideRight, max(sensors_room, 0.0)
+            ),
         )
         painter.end()
 

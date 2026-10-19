@@ -10,22 +10,39 @@ map's focus.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from ocu.ui.launch_console import short_label
-from ocu.ui.theme import UNIT_TINTS
+from ocu.ui.labels import short_label
+from ocu.ui.theme import (
+    BACKGROUND,
+    CAUTION,
+    FONT_LABEL,
+    FRIENDLY,
+    HAIRLINE,
+    INERT,
+    PANEL_RAISED,
+    TEXT,
+    TEXT_DIM,
+    THREAT,
+    UNIT_TINTS,
+)
 
-CARD_HEIGHT = 54
+CARD_HEIGHT = 52
 
 UNIT_COLORS = dict(UNIT_TINTS)
 
 LINK_COLORS = {
-    "CONNECTED": QColor("#4A9FD4"),
-    "DEGRADED": QColor("#C9952F"),
-    "LOST": QColor("#C04438"),
+    "CONNECTED": FRIENDLY,
+    "DEGRADED": CAUTION,
+    "LOST": THREAT,
 }
+
+#: The lock and its label, which is the one thing on a row that says an
+#: operator is flying this unit by hand.
+MANUAL = QColor("#D9B257")
+SELECTED_ROW = PANEL_RAISED
 
 ROW_ORDER = ["rover", "tricopter-1", "tricopter-2", "tricopter-3"]
 
@@ -60,71 +77,106 @@ class UnitCard(QWidget):
         self.clicked.emit(self.unit_id)
 
     def paintEvent(self, event) -> None:
+        """One unit, laid out from the width it has been given.
+
+        Every position here is derived from the card's width, and every string
+        is elided to the room it has, in an order that says what matters: the
+        call sign and the battery are never lost, the task gives way before
+        the endurance does. The earlier version placed things at fixed
+        offsets, which is fine at one width and prints text through other text
+        at every other, and a console gets resized.
+        """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0, 0, -1, -1)
-        accent = UNIT_COLORS.get(self.unit_id, QColor("#cccccc"))
+        rect = QRectF(self.rect())
+        accent = UNIT_COLORS.get(self.unit_id, TEXT_DIM)
+        pad = 10.0
 
-        painter.fillRect(rect, QColor("#182029") if self.selected else QColor("#121820"))
-        painter.setPen(QPen(QColor("#4A9FD4") if self.selected else QColor("#283340")))
-        painter.drawRect(rect)
-        painter.fillRect(QRectF(rect.left(), rect.top(), 3, rect.height()), accent)
+        painter.fillRect(rect, SELECTED_ROW if self.selected else BACKGROUND)
+        # The spine carries identity; the hairline separates rows. A selected
+        # row is lifted, not boxed.
+        painter.fillRect(QRectF(rect.left(), rect.top(), 2, rect.height()), accent)
+        painter.setPen(QPen(FRIENDLY if self.selected else HAIRLINE))
+        painter.drawLine(
+            QPointF(rect.left(), rect.bottom() - 0.5), QPointF(rect.right(), rect.bottom() - 0.5)
+        )
 
-        painter.setPen(QPen(QColor("#C6D0DA")))
-        painter.setFont(QFont("DIN Condensed", 11 + 3, QFont.Bold))
+        # --- row one: who, in what mode, and is the link up ---------------
+        title_font = QFont(FONT_LABEL, 14, QFont.Bold)
+        painter.setFont(title_font)
+        painter.setPen(QPen(TEXT))
+        sign = short_label(self.unit_id)
+        sign_w = QFontMetricsF(title_font).horizontalAdvance(sign)
         painter.drawText(
-            QRectF(rect.left() + 10, rect.top() + 5, 90, 15),
+            QRectF(rect.left() + pad, rect.top() + 5, sign_w + 2, 16),
             Qt.AlignLeft | Qt.AlignVCenter,
-            short_label(self.unit_id),
+            sign,
         )
 
+        link_x = rect.right() - pad - 7
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(LINK_COLORS.get(self.link_state, INERT))
+        painter.drawEllipse(QRectF(link_x, rect.top() + 10, 7, 7))
+
+        mode_font = QFont(FONT_LABEL, 11, QFont.Bold)
+        painter.setFont(mode_font)
+        painter.setPen(QPen(MANUAL if self.manual_holder else TEXT_DIM))
+        mode_left = rect.left() + pad + sign_w + 10
+        mode_room = max(link_x - 8 - mode_left, 0.0)
         mode_text = ("\U0001F512 " if self.manual_holder else "") + self.control_mode
-        painter.setPen(QPen(QColor("#D9B257") if self.manual_holder else QColor("#7B8794")))
-        painter.setFont(QFont("DIN Condensed", 8 + 3, QFont.Bold))
         painter.drawText(
-            QRectF(rect.left() + 100, rect.top() + 5, 96, 15), Qt.AlignLeft | Qt.AlignVCenter, mode_text
+            QRectF(mode_left, rect.top() + 5, mode_room, 16),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            _elide(mode_text, mode_font, mode_room),
         )
 
-        link_color = LINK_COLORS.get(self.link_state, QColor("#666666"))
+        # --- row two: the battery -------------------------------------------
+        pct_font = QFont(FONT_LABEL, 12, QFont.Bold)
+        pct_text = f"{self.battery_pct:.0f}%"
+        pct_w = QFontMetricsF(pct_font).horizontalAdvance("100%") + 2
+        bar_rect = QRectF(rect.left() + pad, rect.top() + 26, rect.width() - pad * 2 - pct_w - 6, 4)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(link_color)
-        painter.drawEllipse(QRectF(rect.right() - 16, rect.top() + 9, 7, 7))
-
-        bar_rect = QRectF(rect.left() + 10, rect.top() + 25, rect.width() - 62, 5)
-        painter.setPen(Qt.NoPen)
-        painter.fillRect(bar_rect, QColor("#283340"))
+        painter.fillRect(bar_rect, HAIRLINE)
         fill = QRectF(bar_rect)
         fill.setWidth(bar_rect.width() * min(max(self.battery_pct / 100.0, 0.0), 1.0))
         painter.fillRect(fill, battery_color(self.battery_pct))
-
+        painter.setFont(pct_font)
         painter.setPen(QPen(battery_color(self.battery_pct)))
-        painter.setFont(QFont("DIN Condensed", 11, QFont.Bold))
         painter.drawText(
-            QRectF(rect.right() - 46, rect.top() + 21, 40, 14),
+            QRectF(rect.right() - pad - pct_w, rect.top() + 20, pct_w, 16),
             Qt.AlignRight | Qt.AlignVCenter,
-            f"{self.battery_pct:.0f}%",
+            pct_text,
         )
 
+        # --- row three: what it is doing, and for how long it can ------------
+        small = QFont("Menlo", 8)
+        painter.setFont(small)
+        metrics = QFontMetricsF(small)
         # Time remaining at the current draw. The percentage alone barely
         # moves on a three hour platform, which tells an operator nothing.
+        endurance_w = metrics.horizontalAdvance(self.endurance) + 2 if self.endurance else 0.0
         if self.endurance:
-            painter.setPen(QPen(QColor("#7B8794")))
-            painter.setFont(QFont("Menlo", 8))
+            painter.setPen(QPen(TEXT_DIM))
             painter.drawText(
-                QRectF(rect.right() - 120, rect.top() + 36, 112, 14),
+                QRectF(rect.right() - pad - endurance_w, rect.top() + 34, endurance_w, 14),
                 Qt.AlignRight | Qt.AlignVCenter,
                 self.endurance,
             )
 
         task = "IN BAY" if self.docked else self.current_task.upper()
-        painter.setPen(QPen(QColor("#7B8794") if self.docked else QColor("#7B8794")))
-        painter.setFont(QFont("Menlo", 8))
+        task_room = max(rect.width() - pad * 2 - endurance_w - 10, 0.0)
+        painter.setPen(QPen(TEXT_DIM))
         painter.drawText(
-            QRectF(rect.left() + 10, rect.top() + 36, rect.width() - 20, 14),
+            QRectF(rect.left() + pad, rect.top() + 34, task_room, 14),
             Qt.AlignLeft | Qt.AlignVCenter,
-            task,
+            _elide(task, small, task_room),
         )
         painter.end()
+
+
+def _elide(text: str, font: QFont, width: float) -> str:
+    """Text cut to fit with an ellipsis, never allowed to run on."""
+    return QFontMetricsF(font).elidedText(text, Qt.ElideRight, max(width, 0.0))
 
 
 class FleetRoster(QWidget):

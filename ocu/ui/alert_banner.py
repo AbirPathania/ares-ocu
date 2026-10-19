@@ -18,9 +18,10 @@ from PySide6.QtCore import QPointF, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
-    QHBoxLayout,
+    QGridLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -31,6 +32,10 @@ from ocu.ui.motion import Reveal
 
 TICK_MS = 100
 BADGE_SIZE = 44
+
+
+# Below this the one-row banner leaves the message under ~20 characters.
+COMPACT_BELOW_WIDTH = 600
 
 
 class _ThreatBadge(QWidget):
@@ -95,38 +100,74 @@ class AlertBanner(QWidget):
         self._timer.setInterval(TICK_MS)
         self._timer.timeout.connect(self._on_tick)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(12, 8, 12, 8)
+        self._grid.setHorizontalSpacing(8)
+        self._grid.setVerticalSpacing(6)
 
         self.badge = _ThreatBadge()
-        layout.addWidget(self.badge)
 
-        text_col = QVBoxLayout()
-        text_col.setSpacing(2)
         self.title_label = QLabel("THREAT ALERT")
         self.title_label.setObjectName("alertTitle")
-        text_col.addWidget(self.title_label)
         self.message_label = QLabel()
         self.message_label.setObjectName("alertMessage")
-        text_col.addWidget(self.message_label)
-        layout.addLayout(text_col, stretch=1)
+        # The message is the part that can give way. The decision buttons
+        # never shrink below their text, so a narrow map loses detail from the
+        # sentence rather than half of the word CONFIRM.
+        self.message_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._text_col = QVBoxLayout()
+        self._text_col.setSpacing(2)
+        self._text_col.addWidget(self.title_label)
+        self._text_col.addWidget(self.message_label)
 
         self.countdown_label = QLabel()
         self.countdown_label.setObjectName("alertCountdown")
         self.countdown_label.setFixedWidth(48)
         self.countdown_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.countdown_label)
 
         self.confirm_btn = QPushButton("CONFIRM THREAT")
         self.confirm_btn.setObjectName("confirmButton")
         self.confirm_btn.clicked.connect(self._on_confirm)
-        layout.addWidget(self.confirm_btn)
-
         self.reject_btn = QPushButton("REJECT")
         self.reject_btn.clicked.connect(self._on_reject)
-        layout.addWidget(self.reject_btn)
+        for button in (self.confirm_btn, self.reject_btn):
+            button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        self._compact: bool | None = None
+        self._arrange(compact=False)
 
         self.hide()
+
+    def _arrange(self, compact: bool) -> None:
+        """One row when there is room, two when there is not.
+
+        On a narrow map the decision buttons would otherwise squeeze the
+        sentence that says what is being decided down to nothing. The second
+        row keeps both whole, and the buttons stay where the eye already is.
+        """
+        if compact == self._compact:
+            return
+        self._compact = compact
+        grid = self._grid
+        for item in (self.badge, self.countdown_label, self.confirm_btn, self.reject_btn):
+            grid.removeWidget(item)
+        grid.removeItem(self._text_col)
+        grid.addWidget(self.badge, 0, 0)
+        grid.addLayout(self._text_col, 0, 1)
+        grid.setColumnStretch(1, 1)
+        if compact:
+            grid.addWidget(self.countdown_label, 0, 2, Qt.AlignRight | Qt.AlignVCenter)
+            grid.addWidget(self.confirm_btn, 1, 0, 1, 2)
+            grid.addWidget(self.reject_btn, 1, 2)
+        else:
+            grid.addWidget(self.countdown_label, 0, 2)
+            grid.addWidget(self.confirm_btn, 0, 3)
+            grid.addWidget(self.reject_btn, 0, 4)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._arrange(compact=self.width() < COMPACT_BELOW_WIDTH)
 
     def _apply_reveal(self, progress: float) -> None:
         self._fade.setOpacity(progress)

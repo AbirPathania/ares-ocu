@@ -38,7 +38,6 @@ from ocu.core.constants import (
     MIN_AIRCRAFT_SEPARATION_M,
     TETHER_LIMIT_M,
 )
-from ocu.core.flight_director import to_body_frame
 from ocu.core.formation import Target, compute_formation_targets
 from ocu.core.launch_sequencer import LaunchSequencer, LaunchStage
 from ocu.ui.labels import short_label
@@ -298,6 +297,30 @@ class LaunchConsole(QWidget):
         )
         return targets[: max(len(self.selected_ids()), 1)]
 
+    def _body_targets(self) -> list[Target]:
+        """The formation in the rover's own frame, straight from the dial.
+
+        Worked out with the rover at the origin facing along +y, so a
+        target's y is how far ahead of the nose it sits and its x is how far
+        to the right. No world position or heading is involved, which is the
+        point: a plan built from the rover's pose at the moment of staging
+        and read back at the moment of launch is wrong by however far the
+        vehicle has turned in between. Measured: stage facing 127, launch
+        after the rover reached the end of its lane facing 247, and the
+        aircraft finished 146 degrees off the nose, behind the vehicle, with
+        the dial reading -26.
+        """
+        targets = compute_formation_targets(
+            0.0,
+            0.0,
+            self.bearing_spin.value(),
+            self.current_pattern(),
+            self.spacing_spin.value(),
+            self.rally_altitude_spin.value(),
+            standoff_m=self.standoff_spin.value(),
+        )
+        return targets[: max(len(self.selected_ids()), 1)]
+
     def _on_params_changed(self, *_args) -> None:
         self.bearingChanged.emit(self._compass_bearing())
         self._emit_preview()
@@ -321,9 +344,9 @@ class LaunchConsole(QWidget):
         selected = self.selected_ids()
         if not selected:
             return
-        origin = Target(*self._origin)
-        targets = self._current_targets()[: len(selected)]
-        self._sequencer.stage_formation(selected, targets, origin)
+        # Staged as places on the rover, not as positions on the map.
+        targets = self._body_targets()[: len(selected)]
+        self._sequencer.stage_formation(selected, targets, Target(0.0, 0.0, 0.0))
         self.stage_label.setText(self._sequencer.stage.value)
         self.stageChanged.emit(self._sequencer.stage.value)
         self.eventLogged.emit(
@@ -342,7 +365,6 @@ class LaunchConsole(QWidget):
         self.stageChanged.emit(self._sequencer.stage.value)
         launched = [plan.tricopter_id for plan in self._sequencer.plans]
         self.eventLogged.emit(f"Launch commanded: {', '.join(short_label(i) for i in launched)}")
-        heading = self._rover_heading
         self.launchRequested.emit(
             {
                 # Relative to the rover's nose, which is what the dial reads.
@@ -350,9 +372,10 @@ class LaunchConsole(QWidget):
                 "aircraft": [
                     {
                         "id": plan.tricopter_id,
-                        **dict(
-                            zip(("forward", "right"), to_body_frame(*plan.slot_offset, heading))
-                        ),
+                        # Staged in the rover's frame with the rover facing +y,
+                        # so x is across the nose and y is along it.
+                        "forward": plan.slot_offset[1],
+                        "right": plan.slot_offset[0],
                         "altitude": plan.target.z,
                         "delay": plan.liftoff_offset_s,
                     }
