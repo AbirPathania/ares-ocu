@@ -19,7 +19,7 @@ import time
 import numpy as np
 
 from ocu.core.terrain import Terrain, TerrainWorld
-from ocu.render import meshes, shaders
+from ocu.render import assets, meshes, shaders
 
 SHADOW_SIZE = 4096
 MSAA_SAMPLES = 4
@@ -77,13 +77,13 @@ def _bytes(matrix: np.ndarray) -> bytes:
 
 class GpuScene:
     @classmethod
-    def create(cls, world: TerrainWorld) -> "GpuScene | None":
+    def create(cls, world: TerrainWorld, use_assets: bool = True) -> "GpuScene | None":
         try:
-            return cls(world)
+            return cls(world, use_assets)
         except Exception:  # no GPU or no way to make a context: fall back
             return None
 
-    def __init__(self, world: TerrainWorld) -> None:
+    def __init__(self, world: TerrainWorld, use_assets: bool = True) -> None:
         import moderngl
 
         self.mgl = moderngl
@@ -95,9 +95,12 @@ class GpuScene:
         self._span = world._span
         self._elevation = world._elevation.astype(np.float64)
 
+        self._use_assets = bool(use_assets and assets.available())
         self._build_programs()
+        self._build_ground_textures()
         self._build_terrain()
         self._build_templates()
+        self._build_pbr_models()
         self._build_instances()
         self._build_shadow()
         self._targets: dict[tuple[int, int], tuple] = {}
@@ -112,9 +115,59 @@ class GpuScene:
     def _build_programs(self) -> None:
         self.p_terrain = self._program(shaders.TERRAIN_VERT, shaders.TERRAIN_FRAG)
         self.p_inst = self._program(shaders.INSTANCE_VERT, shaders.INSTANCE_FRAG)
+        self.p_pbr = self._program(shaders.PBR_VERT, shaders.PBR_FRAG)
         self.p_sky = self._program(shaders.SKY_VERT, shaders.SKY_FRAG)
         self.p_shadow_terrain = self._program(shaders.SHADOW_TERRAIN_VERT, shaders.SHADOW_FRAG)
         self.p_shadow_inst = self._program(shaders.SHADOW_INSTANCE_VERT, shaders.SHADOW_FRAG)
+
+    def _texture(self, image: np.ndarray):
+        tex = self.ctx.texture((image.shape[1], image.shape[0]), 3, np.ascontiguousarray(image).tobytes())
+        tex.build_mipmaps()
+        tex.filter = (self.mgl.LINEAR_MIPMAP_LINEAR, self.mgl.LINEAR)
+        tex.anisotropy = 8.0
+        return tex
+
+    def _build_ground_textures(self) -> None:
+        self.ground_albedo = self.ground_normal = None
+        if not self._use_assets:
+            return
+        ground = assets.load_ground_textures()
+        if ground is None:
+            return
+        layers = ("ground", "scrub", "track", "dark", "slope")
+        ctx = self.ctx
+        for attribute, field in (("ground_albedo", "albedo"), ("ground_normal", "normal")):
+            stack = np.stack([getattr(ground[name], field) for name in layers])  # (5, h, w, 3)
+            size = stack.shape[1]
+            array = ctx.texture_array((size, size, len(layers)), 3, np.ascontiguousarray(stack).tobytes())
+            array.build_mipmaps()
+            array.filter = (self.mgl.LINEAR_MIPMAP_LINEAR, self.mgl.LINEAR)
+            array.anisotropy = 8.0
+            setattr(self, attribute, array)
+
+    def _build_pbr_models(self) -> None:
+        """Upload the downloaded models: each variant as a near and a far mesh."""
+        self._pbr_models: dict[str, dict] = {}
+        if not self._use_assets:
+            return
+        for name in assets.PLAN:
+            model = assets.load_model(name)
+            if model is None or model.textures is None:
+                continue
+            kind = assets.PLAN[name][0]
+            textures = (
+                self._texture(model.textures.albedo),
+                self._texture(model.textures.normal),
+                self._texture(model.textures.arm),
+            )
+            variants = []
+            for variant in model.variants:
+                lods = []
+                for mesh in variant.lods:
+                    vertex = np.concatenate([mesh.positions, mesh.normals, mesh.uvs], axis=1).astype(np.float32)
+                    lods.append((self.ctx.buffer(vertex.tobytes()), self.ctx.buffer(mesh.indices.astype(np.uint32).tobytes())))
+                variants.append({"variant": variant, "lods": lods})
+            self._pbr_models[name] = {"kind": kind, "textures": textures, "variants": variants}
 
     def _build_terrain(self) -> None:
         from ocu.core.camera import _box_blur
@@ -159,7 +212,7 @@ class GpuScene:
         # edge of the world smeared out for five kilometres.
         zp = padded(z)
         np_ = padded_with(normal, (0.0, 0.0, 1.0))
-        wp = padded_with(weights, (0.35, 0.65, 0.0, 0.0))
+        wp = padded_with(weights, (0.75, 0.25, 0.0, 0.0))
         ep = padded_with(extra, (0.0, 0.0, 0.0, 0.0))
         X, Y = np.meshgrid(xs, xs, indexing="ij")
         positions = np.stack([X, Y, zp], axis=-1).reshape(-1, 3)
@@ -361,6 +414,14 @@ class GpuScene:
                 part = rows[variant == v]
                 groups[key] = np.concatenate([groups[key], part.astype(np.float32)]) if key in groups else part.astype(np.float32)
 
+        self._pbr_groups: list[dict] = []
+        for kind in ("rock", "pebble", "grass", "bush"):
+            if any(m["kind"] == {"pebble": "stone", "bush": "shrub"}.get(kind, kind) for m in self._pbr_models.values()):
+                for key in [k for k in groups if k[0] == kind]:
+                    del groups[key]
+        if self._pbr_models:
+            self._build_pbr_groups(rng)
+
         ctx = self.ctx
         self._groups: dict[tuple[str, int], dict] = {}
         for (kind, variant), rows in groups.items():
@@ -380,6 +441,164 @@ class GpuScene:
         self._rover_buffer = ctx.buffer(reserve=48)
         vertices, indices = self._rover_mesh
         self._rover_vao, _ = self._template_vao(vertices, indices, self._rover_buffer)
+
+    def _pbr_variants(self, *kinds: str, models: tuple[str, ...] | None = None) -> list[tuple[str, dict]]:
+        out = []
+        for name, model in self._pbr_models.items():
+            if model["kind"] in kinds and (models is None or name in models):
+                for index, entry in enumerate(model["variants"]):
+                    out.append((name, entry))
+        return out
+
+    def _add_pbr_group(self, name: str, entry: dict, rows: np.ndarray, mode: int, lod_distance: float, draw: float,
+                       shadow: bool = False) -> None:
+        if not len(rows):
+            return
+        ctx = self.ctx
+        rows = rows[np.argsort(rows[:, 0])].astype(np.float32)
+        lods = []
+        for vbo_ibo in entry["lods"]:
+            vbo, ibo = vbo_ibo
+            buffer = ctx.buffer(reserve=max(rows.nbytes, 48))
+            vao = ctx.vertex_array(
+                self.p_pbr,
+                [(vbo, "3f 3f 2f", "in_pos", "in_normal", "in_uv"), (buffer, "4f 4f 4f/i", "i_pos_yaw", "i_scale", "i_tint")],
+                ibo,
+            )
+            lods.append({"vao": vao, "buffer": buffer})
+        group = {
+            "name": name, "rows": rows, "mode": mode, "lods": lods,
+            "lod_distance": lod_distance, "draw": draw,
+            "textures": self._pbr_models[name]["textures"],
+        }
+        if shadow:
+            # The shadow map is drawn once, from the far mesh and every instance.
+            vbo, ibo = entry["lods"][-1]
+            buffer = ctx.buffer(rows.tobytes())
+            group["shadow"] = ctx.vertex_array(
+                self.p_shadow_inst, [(vbo, "3f 5x4", "in_pos"), (buffer, "4f 4f 4x4/i", "i_pos_yaw", "i_scale")], ibo
+            )
+            group["shadow_count"] = len(rows)
+        self._pbr_groups.append(group)
+
+    def _build_pbr_groups(self, rng: np.random.Generator) -> None:
+        world = self._world
+
+        # Boulders: each takes the downloaded rock whose proportions fit its
+        # footprint best, turned so its long side lies along the boulder's.
+        rocks = self._pbr_variants("rock", models=tuple(n for n in self._pbr_models if "boulder" in n))
+        b = world.boulders
+        if rocks and len(b):
+            aspect = np.array([e["variant"].half_extent[1] / e["variant"].half_extent[0] for _, e in rocks])
+            want = b[:, 3] / b[:, 2]
+            choice = np.argmin(np.abs(np.log(want[:, None]) - np.log(aspect[None, :])) + rng.uniform(0, 0.25, (len(b), len(rocks))), axis=1)
+            gz = self._ground(b[:, 0], b[:, 1])
+            for index, (name, entry) in enumerate(rocks):
+                sel = choice == index
+                if not sel.any():
+                    continue
+                v = entry["variant"]
+                hx, hy = v.half_extent
+                bb = b[sel]
+                along_y = hy > hx
+                yaw = bb[:, 4] + (math.pi / 2 if along_y else 0.0) + rng.normal(0, 0.05, len(bb))
+                a_axis, b_axis = (bb[:, 3], bb[:, 2]) if along_y else (bb[:, 2], bb[:, 3])
+                sx, sy = 0.94 * a_axis / hx, 0.94 * b_axis / hy
+                sz = bb[:, 5] / max(v.height, 1e-3)
+                tint = rng.uniform(0.86, 1.12, (len(bb), 1))
+                rows = np.concatenate(
+                    [
+                        np.stack([bb[:, 0], bb[:, 1], gz[sel] - 0.02, yaw], axis=1),
+                        np.stack([sx, sy, sz, rng.uniform(0, 100, len(bb))], axis=1),
+                        np.concatenate([tint, tint, tint, np.zeros((len(bb), 1))], axis=1),
+                    ],
+                    axis=1,
+                )
+                self._add_pbr_group(name, entry, rows, 0, 24.0, DRAW_DISTANCE["rock"], shadow=True)
+
+        # Stones and small rocks scattered over the ground.
+        stones = self._pbr_variants("stone") + self._pbr_variants("rock", models=("namaqualand_rocks_01",))
+        if stones:
+            reach = world.half_extent_m - 3.0
+            sx_ = rng.uniform(-reach, reach, PEBBLE_COUNT)
+            sy_ = rng.uniform(-reach, reach, PEBBLE_COUNT)
+            ok = np.array([world.classify(x, y) in (Terrain.GROUND, Terrain.SCRUB, Terrain.TRACK) for x, y in zip(sx_, sy_)])
+            sx_, sy_ = sx_[ok], sy_[ok]
+            radius = np.exp(rng.normal(math.log(0.09), 0.5, len(sx_)))
+            gz = self._ground(sx_, sy_)
+            pick = rng.integers(0, len(stones), len(sx_))
+            for index, (name, entry) in enumerate(stones):
+                sel = pick == index
+                if not sel.any():
+                    continue
+                v = entry["variant"]
+                scale = radius[sel] / max(max(v.half_extent), 1e-3)
+                tint = rng.uniform(0.8, 1.15, (sel.sum(), 1))
+                rows = np.concatenate(
+                    [
+                        np.stack([sx_[sel], sy_[sel], gz[sel] - 0.01, rng.uniform(0, math.tau, sel.sum())], axis=1),
+                        np.stack([scale, scale, scale, rng.uniform(0, 100, sel.sum())], axis=1),
+                        np.concatenate([tint, tint, tint, np.zeros((sel.sum(), 1))], axis=1),
+                    ],
+                    axis=1,
+                )
+                self._add_pbr_group(name, entry, rows, 1, 9.0, DRAW_DISTANCE["pebble"])
+
+        # Bushes: the downloaded shrub, one per bush the world has.
+        shrubs = self._pbr_variants("shrub")
+        k = world.bushes
+        if shrubs and len(k):
+            gz = self._ground(k[:, 0], k[:, 1])
+            pick = rng.integers(0, len(shrubs), len(k))
+            for index, (name, entry) in enumerate(shrubs):
+                sel = pick == index
+                n = int(sel.sum())
+                if not n:
+                    continue
+                v = entry["variant"]
+                scale = k[sel, 2] / max(max(v.half_extent), 1e-3) * rng.uniform(0.95, 1.2, n)
+                tint = rng.uniform(0.8, 1.15, (n, 1))
+                rows = np.concatenate(
+                    [
+                        np.stack([k[sel, 0], k[sel, 1], gz[sel] - 0.03, rng.uniform(0, math.tau, n)], axis=1),
+                        np.stack([scale, scale, scale * rng.uniform(0.8, 1.1, n), rng.uniform(0, 100, n)], axis=1),
+                        np.concatenate([tint, tint, tint, np.full((n, 1), 0.35)], axis=1),
+                    ],
+                    axis=1,
+                )
+                self._add_pbr_group(name, entry, rows, 3, 30.0, DRAW_DISTANCE["bush"])
+
+        # Grass clumps, thickest in scrub.
+        clumps = self._pbr_variants("grass", models=("grass_medium_01", "grass_medium_02"))
+        if clumps:
+            grid = world._grid
+            gx_all, gy_all = [], []
+            for terrain, per_cell in ((Terrain.SCRUB, 0.55), (Terrain.GROUND, 0.14), (Terrain.BUSH, 0.3)):
+                ix, iy = np.nonzero(grid == int(terrain))
+                count = rng.poisson(per_cell, len(ix))
+                ix, iy = np.repeat(ix, count), np.repeat(iy, count)
+                gx_all.append((ix - self._extent + rng.uniform(0, 1, len(ix))) * self._cell)
+                gy_all.append((iy - self._extent + rng.uniform(0, 1, len(ix))) * self._cell)
+            gx, gy = np.concatenate(gx_all), np.concatenate(gy_all)
+            gz = self._ground(gx, gy)
+            pick = rng.integers(0, len(clumps), len(gx))
+            for index, (name, entry) in enumerate(clumps):
+                sel = pick == index
+                n = int(sel.sum())
+                if not n:
+                    continue
+                scale = rng.uniform(1.8, 3.0, n)
+                straw = rng.uniform(0, 1, n) < 0.5
+                tint = np.where(straw[:, None], np.array([1.9, 1.5, 0.85]), np.array([1.35, 1.5, 1.05])) * rng.uniform(0.8, 1.2, (n, 1))
+                rows = np.concatenate(
+                    [
+                        np.stack([gx[sel], gy[sel], gz[sel] - 0.01, rng.uniform(0, math.tau, n)], axis=1),
+                        np.stack([scale, scale, scale * rng.uniform(0.8, 1.3, n), rng.uniform(0, 100, n)], axis=1),
+                        np.concatenate([tint, np.full((n, 1), 0.9)], axis=1),
+                    ],
+                    axis=1,
+                )
+                self._add_pbr_group(name, entry, rows, 2, 7.0, DRAW_DISTANCE["grass"])
 
     def _build_shadow(self) -> None:
         from ocu.core.camera import _sun_vector
@@ -411,6 +630,9 @@ class GpuScene:
         self.terrain_shadow_vao.render()
         for group in self._groups.values():
             group["shadow"].render(instances=group["count"])
+        for group in self._pbr_groups:
+            if "shadow" in group:
+                group["shadow"].render(instances=group["shadow_count"])
         fbo.release()
 
     # --- drawing ----------------------------------------------------------
@@ -438,6 +660,40 @@ class GpuScene:
             program[name].write(_bytes(value))
         else:
             program[name].value = value
+
+    def _draw_pbr(self, eye_v: np.ndarray, forward: np.ndarray, cone: float) -> None:
+        self._set(self.p_pbr, "u_albedo", 3)
+        self._set(self.p_pbr, "u_normal", 4)
+        self._set(self.p_pbr, "u_arm", 5)
+        for group in self._pbr_groups:
+            rows = group["rows"]
+            reach = group["draw"]
+            xs = rows[:, 0]
+            lo = int(np.searchsorted(xs, eye_v[0] - reach))
+            hi = int(np.searchsorted(xs, eye_v[0] + reach))
+            if hi <= lo:
+                continue
+            rows = rows[lo:hi]
+            d = rows[:, :3].astype(np.float64) - eye_v
+            dist = np.linalg.norm(d, axis=1)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                facing = (d @ forward) / np.maximum(dist, 1e-6) > cone - 0.12
+            visible = (dist < reach) & (facing | (dist < 5.0))
+            if not visible.any():
+                continue
+            albedo, normal, arm = group["textures"]
+            albedo.use(location=3)
+            normal.use(location=4)
+            arm.use(location=5)
+            self._set(self.p_pbr, "u_mode", group["mode"])
+            near = visible & (dist < group["lod_distance"])
+            far = visible & ~near
+            for mask, lod in ((near, group["lods"][0]), (far, group["lods"][-1])):
+                count = int(mask.sum())
+                if not count:
+                    continue
+                lod["buffer"].write(np.ascontiguousarray(rows[mask]).tobytes())
+                lod["vao"].render(instances=count)
 
     def render(
         self,
@@ -484,12 +740,19 @@ class GpuScene:
         ctx.disable(self.mgl.CULL_FACE)
         self.shadow_tex.use(location=0)
         self._set(self.p_inst, "u_kind", 0)
-        for program in (self.p_terrain, self.p_inst):
+        for program in (self.p_terrain, self.p_inst, self.p_pbr):
             for name, value in common.items():
                 self._set(program, name, value)
             self._set(program, "u_vp", vp)
             self._set(program, "u_shadow_vp", self._shadow_vp)
             self._set(program, "u_shadow", 0)
+        textured = self.ground_albedo is not None
+        self._set(self.p_terrain, "u_has_tex", 1 if textured else 0)
+        if textured:
+            self.ground_albedo.use(location=1)
+            self.ground_normal.use(location=2)
+            self._set(self.p_terrain, "u_g_albedo", 1)
+            self._set(self.p_terrain, "u_g_normal", 2)
         self.terrain_coarse_vao.render()
 
         # Cull instances to what could be in view.
@@ -520,6 +783,8 @@ class GpuScene:
             group["buffer"].write(visible.tobytes())
             self._set(self.p_inst, "u_kind", group["shader_kind"])
             group["vao"].render(instances=count)
+
+        self._draw_pbr(eye_v, forward, cone)
 
         if rover is not None:
             rx, ry, rheading = rover

@@ -77,6 +77,17 @@ The honest line to close on: almost every autonomy pitch claims to work in
 a GPS-denied, link-contested environment, and almost none of them show the
 failure on purpose and then show the recovery.
 
+## Photographic scenery (optional)
+
+The camera feeds use CC0 models and textures from Poly Haven when they are present:
+
+```
+.venv/bin/python scripts/fetch_assets.py
+```
+
+That downloads about 66 MB into `assets/polyhaven/` (not committed). Without it the
+feeds are drawn with procedural rocks, bushes and ground instead.
+
 ## Tests
 
 ```

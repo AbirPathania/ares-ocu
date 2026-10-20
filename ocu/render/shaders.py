@@ -140,6 +140,35 @@ in vec4 v_mat;
 in vec4 v_extra;
 out vec4 f_color;
 
+uniform int u_has_tex;
+uniform sampler2DArray u_g_albedo;   // ground, scrub, track, dark, slope
+uniform sampler2DArray u_g_normal;
+
+// A tiling photo texture sampled twice at unrelated scales and rotations, so the
+// repeat does not show.
+vec3 layer_grade(int layer) {
+    // The photographs are graded toward this scene's ground: warm, dry, a little
+    // darker than a studio capture, olive where there is vegetation.
+    if (layer == 0) return vec3(0.74, 0.60, 0.46);
+    if (layer == 1) return vec3(0.62, 0.70, 0.40);
+    if (layer == 2) return vec3(0.86, 0.76, 0.62);
+    if (layer == 3) return vec3(0.62, 0.50, 0.40);
+    return vec3(0.82, 0.78, 0.72);
+}
+vec3 tex_albedo(int layer, vec2 xy) {
+    vec2 a = xy / 2.6;
+    vec2 b = mat2(0.80, -0.60, 0.60, 0.80) * xy / 6.1 + vec2(17.0, 5.0);
+    vec3 c = pow(0.5 * (texture(u_g_albedo, vec3(a, layer)).rgb + texture(u_g_albedo, vec3(b, layer)).rgb), vec3(2.2));
+    return c * layer_grade(layer);
+}
+vec2 tex_normal(int layer, vec2 xy) {
+    vec2 a = xy / 2.6;
+    vec2 b = mat2(0.80, -0.60, 0.60, 0.80) * xy / 6.1 + vec2(17.0, 5.0);
+    vec2 na = texture(u_g_normal, vec3(a, layer)).xy * 2.0 - 1.0;
+    vec2 nb = mat2(0.80, 0.60, -0.60, 0.80) * (texture(u_g_normal, vec3(b, layer)).xy * 2.0 - 1.0);
+    return 0.5 * (na + nb);
+}
+
 void main() {
     vec3 p = v_pos;
     float dist = length(p - u_cam);
@@ -183,8 +212,32 @@ void main() {
 
     // Steep ground sheds soil and shows stone.
     float slope = 1.0 - v_normal.z;
+    float rockiness = smoothstep(0.20, 0.42, slope);
     vec3 stone = vec3(0.40, 0.37, 0.33) * (0.8 + 0.4 * n2);
-    albedo = mix(albedo, stone, smoothstep(0.20, 0.42, slope));
+    albedo = mix(albedo, stone, rockiness);
+
+    if (u_has_tex != 0) {
+        // Photographic ground. Only the layers that matter here are read.
+        float wg = v_mat.x, ws = v_mat.y, wt = v_mat.z, wd = v_mat.w;
+        vec3 tex = vec3(0.0);
+        vec2 nrm = vec2(0.0);
+        float total = 0.0;
+        if (wg > 0.02) { tex += wg * tex_albedo(0, p.xy); nrm += wg * tex_normal(0, p.xy); total += wg; }
+        if (ws > 0.02) { tex += ws * tex_albedo(1, p.xy); nrm += ws * tex_normal(1, p.xy); total += ws; }
+        if (wt > 0.02) { tex += wt * tex_albedo(2, p.xy); nrm += wt * tex_normal(2, p.xy); total += wt; }
+        if (wd > 0.02) { tex += wd * tex_albedo(3, p.xy); nrm += wd * tex_normal(3, p.xy); total += wd; }
+        tex /= max(total, 0.001); nrm /= max(total, 0.001);
+        if (rockiness > 0.02) {
+            tex = mix(tex, tex_albedo(4, p.xy), rockiness);
+            nrm = mix(nrm, tex_normal(4, p.xy), rockiness);
+        }
+        // The photographs carry the detail; the procedural colour carries the
+        // large-scale variation (wet and dry patches) a repeating texture cannot.
+        float large = 0.72 + 0.56 * n1;
+        vec3 photo = tex * large * 1.25;
+        albedo = mix(albedo, photo, 0.88);
+        n = normalize(n + vec3(nrm * 0.75 * (0.35 + 0.65 * near), 0.0));
+    }
     // A hole is bare earth, darker, with the rim scuffed.
     albedo = mix(albedo, albedo * 0.45 + vec3(0.05, 0.035, 0.02), clamp(v_extra.x * 3.0, 0.0, 0.9));
 
@@ -382,5 +435,105 @@ void main() {
         col = mix(col, cloud, cover * smoothstep(0.01, 0.25, d.z) * 0.85);
     }
     f_color = vec4(finish(col), 1.0);
+}
+"""
+
+
+PBR_VERT = """
+uniform mat4 u_vp;
+uniform float u_time;
+in vec3 in_pos;
+in vec3 in_normal;
+in vec2 in_uv;
+in vec4 i_pos_yaw;
+in vec4 i_scale;
+in vec4 i_tint;
+out vec3 v_world;
+out vec3 v_normal;
+out vec2 v_uv;
+out vec3 v_local;
+out vec4 v_tint;
+out float v_seed;
+void main() {
+    vec3 p = in_pos * i_scale.xyz;
+    float sway = i_tint.a;
+    if (sway > 0.0) {
+        float hf = clamp(in_pos.z / 0.18, 0.0, 1.0);
+        float ph = i_pos_yaw.x * 0.71 + i_pos_yaw.y * 0.43;
+        p.xy += vec2(sin(u_time * 1.7 + ph), cos(u_time * 1.3 + ph * 1.3)) * sway * hf * hf * i_scale.z * 0.16;
+    }
+    float c = cos(i_pos_yaw.w), s = sin(i_pos_yaw.w);
+    vec3 r = vec3(p.x * c - p.y * s, p.x * s + p.y * c, p.z);
+    v_world = r + i_pos_yaw.xyz;
+    vec3 n = normalize(in_normal / max(i_scale.xyz, vec3(0.001)));
+    v_normal = vec3(n.x * c - n.y * s, n.x * s + n.y * c, n.z);
+    v_uv = in_uv;
+    v_local = in_pos;
+    v_tint = i_tint;
+    v_seed = i_scale.w;
+    gl_Position = u_vp * vec4(v_world, 1.0);
+}
+"""
+
+PBR_FRAG = COMMON + SHADOWED + """
+uniform sampler2D u_albedo;
+uniform sampler2D u_normal;
+uniform sampler2D u_arm;
+uniform int u_mode;        // 0 rock, 1 stone, 2 grass, 3 shrub
+in vec3 v_world;
+in vec3 v_normal;
+in vec2 v_uv;
+in vec3 v_local;
+in vec4 v_tint;
+in float v_seed;
+out vec4 f_color;
+
+void main() {
+    vec3 view = normalize(v_world - u_cam);
+    float dist = length(v_world - u_cam);
+    vec3 geo = normalize(v_normal);
+    if (!gl_FrontFacing) geo = -geo;
+
+    vec3 raw = texture(u_albedo, v_uv).rgb;
+    // The plant textures are painted on a black ground rather than carrying an
+    // alpha channel; what is black is not leaf.
+    if (u_mode >= 2 && max(raw.r, max(raw.g, raw.b)) < 0.06) discard;
+    vec3 albedo = pow(raw, vec3(2.2)) * v_tint.rgb;
+    vec3 arm = texture(u_arm, v_uv).rgb;
+    float ao = arm.r;
+    float rough = arm.g;
+
+    // Normal map, with the tangent frame taken from the screen-space derivatives
+    // of the position and the texture coordinate.
+    vec3 dp1 = dFdx(v_world), dp2 = dFdy(v_world);
+    vec2 du1 = dFdx(v_uv), du2 = dFdy(v_uv);
+    vec3 perp2 = cross(dp2, geo), perp1 = cross(geo, dp1);
+    vec3 T = perp2 * du1.x + perp1 * du2.x;
+    vec3 B = perp2 * du1.y + perp1 * du2.y;
+    float inv = inversesqrt(max(max(dot(T, T), dot(B, B)), 1e-12));
+    vec3 nm = texture(u_normal, v_uv).xyz * 2.0 - 1.0;
+    nm.xy *= 1.0;
+    vec3 n = normalize(mat3(T * inv, -B * inv, geo) * nm);
+    if (!(dot(n, n) > 0.5)) n = geo;
+
+    if (u_mode == 0) {
+        // Dust settled round the foot of a rock, and a little where the sun has bleached it.
+        float foot = clamp(1.0 - v_local.z * 2.2, 0.0, 1.0);
+        albedo = mix(albedo, vec3(0.22, 0.16, 0.10), foot * 0.35);
+    }
+
+    float sh = shadowAt(v_world, geo);
+    float wrap = u_mode >= 2 ? clamp((dot(n, u_sun) + 0.4) / 1.4, 0.0, 1.0) : max(dot(n, u_sun), 0.0);
+    vec3 lit = albedo * (sunLight() * wrap * sh + skyLight(n) * (0.5 + 0.5 * sh)) * (0.35 + 0.65 * ao);
+    if (u_mode >= 2) {
+        float through = pow(max(dot(-view, u_sun), 0.0), 3.0) * (1.0 - clamp(dot(geo, u_sun), 0.0, 1.0));
+        lit += albedo * vec3(0.55, 0.62, 0.22) * through * 1.4 * sh;
+    }
+    vec3 h = normalize(u_sun - view);
+    float shininess = mix(6.0, 70.0, 1.0 - rough);
+    lit += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, h), 0.0), shininess) * (1.0 - rough) * 0.22 * sh;
+
+    lit = applyFog(lit, dist, view);
+    f_color = vec4(finish(lit), 1.0);
 }
 """

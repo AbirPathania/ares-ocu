@@ -265,7 +265,7 @@ def conifer_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
                     positions.append(centre + across * half * side)
                     n = np.array([direction[0] * 0.25, direction[1] * 0.25, 0.92])
                     normals.append(n / np.linalg.norm(n))
-                    green = np.array([0.15, 0.27, 0.13]) * (0.8 + 0.4 * rng.uniform())
+                    green = np.array([0.10, 0.18, 0.08]) * (0.8 + 0.4 * rng.uniform())
                     colours.append(green * tint)
                     occlusion.append(shade * (0.62 + 0.38 * f))
             for q in range(3):
@@ -308,7 +308,7 @@ def broadleaf_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
         normals /= np.linalg.norm(normals, axis=1, keepdims=True)
         top = np.clip((positions[:, 2] - 0.45) / 0.5, 0.0, 1.0)
         shade = 0.62 + 0.6 * fbm3(positions * 5.5, seed + 5 + k, 3)
-        green = np.array([0.24, 0.36, 0.14])
+        green = np.array([0.19, 0.27, 0.11])
         colours = np.tile(green, (len(positions), 1)) * shade[:, None]
         occlusion = np.clip(0.34 + 0.78 * top + 0.2 * np.clip(d[:, 2], 0, 1), 0.28, 1.0)
         parts.append((_pack(positions, normals, colours, occlusion), faces.reshape(-1).astype(np.uint32)))

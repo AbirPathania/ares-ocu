@@ -71,9 +71,9 @@ def test_a_rock_is_drawn_where_the_map_says_there_is_one(scene):
         eye=(x, y, world._elevation[world._extent + int(x / world.cell_size_m), world._extent + int(y / world.cell_size_m)] + 9.0),
         heading_deg=0.0, pitch_down_deg=89.0, hfov_deg=50.0, width=200, height=200,
     )
-    centre = frame[90:110, 90:110].astype(int)
-    spread = centre.max(axis=2) - centre.min(axis=2)
-    assert spread.mean() < 26.0, "stone is grey; the ground around it is not"
+    centre = frame[90:110, 90:110].reshape(-1, 3).mean(axis=0)
+    ring = np.concatenate([frame[:15].reshape(-1, 3), frame[-15:].reshape(-1, 3)]).mean(axis=0)
+    assert np.abs(centre - ring).max() > 12.0, "a boulder is there, and it is not the colour of the ground round it"
 
 
 def test_frames_are_fast_enough_for_a_live_feed(scene):
@@ -84,3 +84,28 @@ def test_frames_are_fast_enough_for_a_live_feed(scene):
     for _ in range(10):
         view(scene, width=480, height=210)
     assert (time.time() - start) / 10 < 0.05
+
+
+# --- the downloaded models and textures ---------------------------------------
+
+
+def test_the_scene_still_draws_without_the_downloaded_assets():
+    made = gpu_scene.GpuScene.create(TerrainWorld(), use_assets=False)
+    if made is None:
+        pytest.skip("no GL context available")
+    assert made._pbr_groups == []
+    frame = made.render((0.0, 0.0, 1.6), 30.0, 3.0, 100.0, 200, 90)
+    assert frame.shape == (90, 200, 3) and frame.std() > 15.0
+
+
+def test_with_the_assets_the_rocks_are_the_photographed_ones(scene):
+    from ocu.render import assets
+
+    if not assets.available():
+        pytest.skip("assets not downloaded (scripts/fetch_assets.py)")
+    names = {g["name"] for g in scene._pbr_groups}
+    assert any("boulder" in n for n in names)
+    assert scene._pbr_groups, "the textured meshes are in the scene"
+    # Every boulder the world has is drawn once, as a downloaded model.
+    drawn = sum(len(g["rows"]) for g in scene._pbr_groups if g["mode"] == 0)
+    assert drawn == len(scene.world.boulders)

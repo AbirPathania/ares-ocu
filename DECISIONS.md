@@ -1109,3 +1109,30 @@ costs about 8 to 11 ms on an Apple M1. Without a GPU the application falls back 
 the numpy renderer. Using ready-made photoscanned models and textures (Poly Haven,
 Quaternius) would look better still; they are downloads, so that is left for the
 team to decide.
+
+## Poly Haven models and textures
+
+Approved by the team and fetched by `scripts/fetch_assets.py` (about 66 MB, CC0, from
+the Poly Haven API with checksums verified; `assets/polyhaven/` is not committed):
+
+- **Rocks:** five Namaqualand boulders become the world's boulders. Each boulder takes
+  the model whose proportions fit its footprint best and is stretched to it, so a camera
+  shows the same rock the map has. Small rocks and stones are scattered as pebbles.
+- **Shrubs:** the Othonna shrub is every bush.
+- **Grass:** two grass models, about 50,000 clumps, thickest in scrub.
+- **Ground:** five photographic textures (dry ground, grassy rock, gravelly sand, dry mud,
+  rocky terrain) with normal maps, blended by what the map says the ground is, sampled
+  twice at unrelated scales so the repeat does not show, and graded toward this scene.
+
+The files are tens of thousands of triangles each, so they are read as untrusted data
+(accessors range-checked, buffers kept inside the asset folder) and simplified once, with
+their normals and texture coordinates weighed in, to a near mesh of 500 to 5,500 triangles
+and a far one. A boulder that would not simplify (`boulder_01`, unwrapped into many small
+islands) was dropped.
+
+**Trees stay procedural.** Poly Haven's trees are 20 to 960 MB each, far too heavy to draw
+three hundred of. They are the one part of the scene that does not look photographic.
+
+Without the downloads the renderer draws its procedural rocks, bushes, grass and ground
+as before, and the application is none the worse for it. Costs: about 3 s to load, and a
+frame is 10 to 12 ms on an Apple M1.

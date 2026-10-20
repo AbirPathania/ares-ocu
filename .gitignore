@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+
+# Downloaded assets (see scripts/fetch_assets.py)
+assets/polyhaven/
