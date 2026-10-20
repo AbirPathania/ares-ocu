@@ -783,7 +783,7 @@ class MapView(QWidget):
         painter.setRenderHint(QPainter.Antialiasing, False)
 
         alpha = (255.0 * (0.4 + 0.6 * scan.intensities)).astype(np.int64)
-        for name in ("GROUND", "TRACK", "SCRUB", "TREE", "ROCK", "POTHOLE"):
+        for name in ("GROUND", "TRACK", "SCRUB", "TREE", "ROCK", "POTHOLE", "BUSH"):
             mask = scan.kinds == int(Terrain[name])
             if not mask.any():
                 continue

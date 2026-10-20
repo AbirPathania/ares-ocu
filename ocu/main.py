@@ -44,6 +44,9 @@ def main() -> int:
     app.setStyleSheet(STYLE_PATH.read_text())
 
     window = MainWindow()
+    # The feeds are drawn as 3D on the GPU where there is one; without it the
+    # numpy renderer is used and the application is none the worse for it.
+    window.enable_gpu_cameras()
     window.resize(opening_size(app))
     window.show()
 

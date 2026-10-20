@@ -2,3 +2,4 @@ PySide6>=6.11
 numpy>=2.0
 opensimplex>=0.4.5
 pytest>=8.0
+moderngl>=5.10

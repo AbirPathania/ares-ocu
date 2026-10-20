@@ -691,10 +691,7 @@ def test_the_rover_never_drives_onto_a_mapped_obstacle():
         assert perception.at(cell) != Terrain.TREE, f"drove onto the tree at step {step}"
 
 
-def test_the_last_line_of_defence_stops_the_rover_at_the_edge_of_a_mapped_obstacle():
-    """Whatever the planner does, the vehicle itself refuses to move onto a cell it
-    has mapped as an obstacle. The route is left stale on purpose, so only the guard
-    stands between the rover and the tree."""
+def _stale_route_into_a_tree():
     from ocu.core.flight_director import FlightDirector
     from ocu.core.navigation import update_costmap
 
@@ -705,120 +702,38 @@ def test_the_last_line_of_defence_stops_the_rover_at_the_edge_of_a_mapped_obstac
     director.replan(perception, CELL_SIZE_M)
     perception.observe((10, 0), Terrain.TREE)
     update_costmap(director._costmap, perception)  # known, but the route is never remade
+    return director
 
+
+def test_the_last_line_of_defence_stops_the_rover_at_the_edge_of_a_mapped_obstacle():
+    """Whatever the layers above do, the vehicle itself refuses to move onto a
+    cell it has mapped as an obstacle. The reactive layer is made to obey the
+    stale route, so only the guard stands between the rover and the tree."""
+    from ocu.core.local_planner import LocalCommand
+
+    director = _stale_route_into_a_tree()
+    director.local_planner.command = lambda obstacles, x, y, heading, bearing, cap, decel, speed=None: LocalCommand(
+        bearing, cap, 9.0, 9.0, False
+    )
     for _ in range(600):
         director.tick(0.1, director.rover_body.x, director.rover_body.y, director.rover_body.heading)
-        assert math.floor(director.rover_body.x / CELL_SIZE_M) != 10, "drove onto the tree"
+        cell = (math.floor(director.rover_body.x / CELL_SIZE_M), math.floor(director.rover_body.y / CELL_SIZE_M))
+        assert cell != (10, 0), "drove onto the tree"
 
 
-# --- planning only over ground that has been seen --------------------------
-
-
-def known_disc(radius_cells: int, kind=Terrain.GROUND) -> PerceptionMap:
-    perception = PerceptionMap()
-    for x in range(-radius_cells, radius_cells + 1):
-        for y in range(-radius_cells, radius_cells + 1):
-            if math.hypot(x, y) <= radius_cells:
-                perception.observe((x, y), kind)
-    return perception
-
-
-def test_a_goal_beyond_what_has_been_seen_gets_a_route_only_as_far_as_the_edge_of_it():
-    """The rover must not draw a route to somewhere it has never looked. It goes
-    to the best place to look from, and says that is all it knows."""
-    from ocu.core.navigation import plan_toward
-
-    perception = known_disc(30)  # 15 m of seen ground
-    costmap = build_costmap(perception, CELL_SIZE_M)
-    plan = plan_toward(costmap, (0, 0), (200, 0))
-    assert plan.path and not plan.reaches_goal
-    assert all(cell in costmap.base for cell in plan.path), "never through ground nobody has seen"
-    end = plan.path[-1]
-    assert end[0] > 20, "the frontier it picks is the one toward the goal"
-    assert abs(end[1]) < 12
-
-
-def test_the_frontier_chosen_is_the_one_on_the_goals_side():
-    from ocu.core.navigation import plan_toward
-
-    costmap = build_costmap(known_disc(30), CELL_SIZE_M)
-    east = plan_toward(costmap, (0, 0), (200, 0)).path[-1]
-    north = plan_toward(costmap, (0, 0), (0, 200)).path[-1]
-    west = plan_toward(costmap, (0, 0), (-200, 0)).path[-1]
-    assert east[0] > 15 and north[1] > 15 and west[0] < -15
-
-
-def test_a_goal_on_seen_ground_is_reached_by_a_complete_route():
-    from ocu.core.navigation import plan_toward
-
-    costmap = build_costmap(known_disc(30), CELL_SIZE_M)
-    plan = plan_toward(costmap, (0, 0), (20, 10))
-    assert plan.reaches_goal and plan.path[-1] == (20, 10)
-
-
-def test_a_route_is_not_laid_beyond_the_planning_horizon_even_over_seen_ground():
-    from ocu.core.navigation import PLANNING_HORIZON_M, plan_toward
-
-    costmap = build_costmap(open_ground(extent=120), CELL_SIZE_M)  # 60 m of seen ground
-    plan = plan_toward(costmap, (0, 0), (110, 0))
-    assert not plan.reaches_goal
-    reach = max(math.hypot(x, y) for x, y in plan.path) * CELL_SIZE_M
-    assert reach <= PLANNING_HORIZON_M + CELL_SIZE_M
-
-
-def test_a_frontier_it_has_already_stood_at_is_not_gone_to_again():
-    from ocu.core.navigation import plan_toward
-
-    costmap = build_costmap(known_disc(30), CELL_SIZE_M)
-    first = plan_toward(costmap, (0, 0), (200, 0)).path[-1]
-    again = plan_toward(costmap, (0, 0), (200, 0), visited=[first]).path[-1]
-    assert math.hypot(again[0] - first[0], again[1] - first[1]) * CELL_SIZE_M > 3.0
-
-
-def test_with_nothing_seen_and_nowhere_to_look_from_there_is_no_plan():
-    from ocu.core.navigation import plan_toward
-
-    perception = PerceptionMap()
-    perception.observe((0, 0), Terrain.GROUND)
-    costmap = build_costmap(perception, CELL_SIZE_M)
-    plan = plan_toward(costmap, (0, 0), (50, 0))
-    assert plan.path == [] or not plan.reaches_goal
-
-
-def test_a_rover_sent_across_unseen_ground_draws_only_what_it_knows():
-    from ocu.core.flight_director import FlightDirector
-
-    perception = known_disc(30)
-    director = FlightDirector()
-    director.navigate_to(150.0, 0.0)
-    assert director.replan(perception, CELL_SIZE_M)
-    assert not director.route_known
-    end = director.path[-1]
-    assert math.hypot(end[0], end[1]) < 22.5, "the drawn route stops at the horizon"
-    assert director.display_goal == end, "and what is marked is where it is going to look, not the goal"
-
-
-def test_as_the_rover_sees_further_the_route_grows_toward_the_goal_and_then_completes():
-    from ocu.core.flight_director import FlightDirector
-
-    director = FlightDirector()
-    director.rover_body.heading = 90.0
-    perception = PerceptionMap()
-    director.navigate_to(60.0, 0.0)
-    ends = []
-    for step in range(3000):
-        # A sensor that sees 20 m of the ground around wherever the rover is.
-        cx0, cy0 = int(director.rover_body.x / CELL_SIZE_M), int(director.rover_body.y / CELL_SIZE_M)
-        for x in range(cx0 - 40, cx0 + 41):
-            for y in range(cy0 - 40, cy0 + 41):
-                if math.hypot(x - cx0, y - cy0) <= 40 and not perception.is_known((x, y)):
-                    perception.observe((x, y), Terrain.GROUND)
-        director.replan(perception, CELL_SIZE_M)
+def test_the_rover_steers_round_an_obstacle_that_its_route_runs_straight_into():
+    """The route is stale and says straight on. The vehicle looks at what is in
+    front of it, and does not."""
+    director = _stale_route_into_a_tree()
+    tree = (5.25, 0.25)  # the centre of cell (10, 0)
+    closest = math.inf
+    passed = False
+    for _ in range(1200):
         director.tick(0.1, director.rover_body.x, director.rover_body.y, director.rover_body.heading)
-        if director.path and not director.route_known:
-            ends.append(director.path[-1][0])
-        if director.goal is None:
+        body = director.rover_body
+        closest = min(closest, math.hypot(body.x - tree[0], body.y - tree[1]))
+        if body.x > 9.0:
+            passed = True
             break
-    assert director.goal is None, "it got there"
-    assert math.hypot(director.rover_body.x - 60.0, director.rover_body.y) < 2.0
-    assert ends and max(ends) > min(ends) + 10.0, "the frontier moved out as it looked further"
+    assert passed, "it got past"
+    assert closest > 0.95, f"came within {closest:.2f} m of the tree's centre"

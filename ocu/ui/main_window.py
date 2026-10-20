@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ocu.core.camera import SCOUT_HFOV_DEG, SCOUT_PITCH_DOWN_DEG
 from ocu.core.constants import (
     ALERT_CONFIDENCE_THRESHOLD,
     ROVER_MIN_COMMAND_SPEED_MS,
@@ -163,6 +164,11 @@ WINDOW_MIN_SIZE = (LEFT_COLUMN_MIN_WIDTH + MAP_MIN_WIDTH + RIGHT_COLUMN_MIN_WIDT
 #: would make that one as slow as the three they are not watching.
 CAMERA_TICK_MS = 60
 
+#: With the GPU drawing the views a frame costs a few milliseconds, so every
+#: live tile is redrawn every tick and the picture moves smoothly, instead of one
+#: tile per tick.
+GPU_CAMERA_TICK_MS = 40
+
 
 
 def _default_units() -> dict[str, Unit]:
@@ -267,6 +273,7 @@ class MainWindow(QMainWindow):
         # it happened. Each tile still refreshes about three times a second.
         self.camera_rig = CameraRig(self.terrain)
         self._camera_turn = 0
+        self._gpu_worker = None
         self._camera_timer = QTimer(self)
         self._camera_timer.setInterval(CAMERA_TICK_MS)
         self._camera_timer.timeout.connect(self._tick_cameras)
@@ -855,6 +862,15 @@ class MainWindow(QMainWindow):
         if not live:
             return
 
+        if self._gpu_worker is not None and self._gpu_worker.available:
+            for unit_id in live:
+                self._gpu_worker.submit(unit_id, self._camera_request(unit_id))
+            return
+        if self.camera_rig.gpu is not None:
+            for unit_id in live:
+                self._render_unit_camera(unit_id)
+            return
+
         self._camera_turn += 1
         watched = self.selected_unit_id if self.selected_unit_id in live else None
         if watched is not None and self._camera_turn % 2 == 0:
@@ -862,7 +878,68 @@ class MainWindow(QMainWindow):
         else:
             others = [uid for uid in live if uid != watched] or live
             unit_id = others[(self._camera_turn // 2) % len(others)]
+        self._render_unit_camera(unit_id)
 
+    def enable_gpu_cameras(self, threaded: bool = True) -> bool:
+        """Draw the camera feeds as 3D on the GPU.
+
+        Threaded, the scene is built and drawn on a worker and frames arrive as
+        they are finished, so the interface never waits for one; until the scene
+        is ready (a second or so) the numpy renderer fills the tiles. Not
+        threaded, it is built and drawn here, which is what tests want. False
+        if there is no GPU, in which case the numpy renderer carries on.
+        """
+        if not threaded:
+            if not self.camera_rig.enable_gpu():
+                return False
+            self._camera_timer.setInterval(GPU_CAMERA_TICK_MS)
+            return True
+        from ocu.ui.gpu_worker import GpuRenderWorker
+
+        self._gpu_worker = GpuRenderWorker(self.terrain, self)
+        self._gpu_worker.frameReady.connect(self._on_gpu_frame)
+        self._gpu_worker.ready.connect(self._on_gpu_ready)
+        self._gpu_worker.start()
+        return True
+
+    def _on_gpu_ready(self, available: bool) -> None:
+        if available:
+            self._camera_timer.setInterval(GPU_CAMERA_TICK_MS)
+        else:
+            self._gpu_worker = None
+
+    def _on_gpu_frame(self, unit_id: str, frame) -> None:
+        feed = self.camera_feeds.get(unit_id)
+        live = unit_id == "rover" or not self._docked_state.get(unit_id, True)
+        if feed is not None and live and self._comms.video:
+            feed.set_frame(frame)
+
+    def _camera_request(self, unit_id: str) -> dict:
+        """Everything the renderer needs to draw one unit's view, as plain data."""
+        feed = self.camera_feeds[unit_id]
+        width, height = feed.render_size()
+        pose = self.units[unit_id].pose
+        rig = self.camera_rig
+        if unit_id == "rover":
+            return dict(
+                eye=(pose.x, pose.y, rig.elevation_at(pose.x, pose.y) + 1.5),
+                heading_deg=pose.heading, pitch_down_deg=3.0, hfov_deg=112.0,
+                width=width, height=height, rover=None, grain=2.2 / 255.0,
+            )
+        rover = self.units["rover"].pose
+        return dict(
+            eye=(pose.x, pose.y, rig.elevation_at(pose.x, pose.y) + pose.z),
+            heading_deg=pose.heading, pitch_down_deg=SCOUT_PITCH_DOWN_DEG, hfov_deg=SCOUT_HFOV_DEG,
+            width=width, height=height, rover=(rover.x, rover.y, rover.heading), grain=2.2 / 255.0,
+        )
+
+    def closeEvent(self, event) -> None:
+        if self._gpu_worker is not None:
+            self._gpu_worker.stop()
+            self._gpu_worker = None
+        super().closeEvent(event)
+
+    def _render_unit_camera(self, unit_id: str) -> None:
         feed = self.camera_feeds[unit_id]
         width, height = feed.render_size()
         pose = self.units[unit_id].pose

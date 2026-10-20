@@ -66,8 +66,8 @@ class SimulatedCameraFeed(QWidget):
         """
         ratio = self.devicePixelRatioF() or 1.0
         return (
-            int(min(max(self.width() * ratio, 96), 520)),
-            int(min(max(self.height() * ratio, 40), 220)),
+            int(min(max(self.width() * ratio, 96), 960)),
+            int(min(max(self.height() * ratio, 40), 440)),
         )
 
     def set_frame(self, rgb: np.ndarray) -> None:

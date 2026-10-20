@@ -59,6 +59,7 @@ from ocu.core.constants import (
     TRICOPTER_VERTICAL_ACCEL_MS2,
 )
 from ocu.core.formation import clamp_to_tether
+from ocu.core.local_planner import LocalPlanner
 from ocu.core.navigation import (
     LOOKAHEAD_M,
     plan_toward,
@@ -87,6 +88,20 @@ PLAN_RETRY_TICKS = 10
 #: or this often, whichever comes first.
 EXPLORE_REPLAN_NEAR_END_M = 5.0
 EXPLORE_REPLAN_TICKS = 20
+
+#: Exploring toward a goal it cannot find the way to is not the same as making
+#: progress toward it. If it has got no closer than this many metres better in
+#: this many ticks it stops and says so, rather than circling the last few
+#: metres of a destination that is walled in by obstacles it cannot see past.
+#: The formation holds its places against the rover's heading smoothed over this
+#: long, not its heading this instant. A rover weaving round obstacles yaws ten
+#: degrees a second, and a slot thirty metres ahead of it swings sideways at five
+#: metres a second when it does; no formation flies that, they fly the course
+#: made good, which is the heading with the small corrections taken out.
+FORMATION_REFERENCE_TAU_S = 2.5
+
+EXPLORE_PROGRESS_M = 1.5
+EXPLORE_STALL_TICKS = 450
 
 #: After this many consecutive failures the waypoint is called unreachable
 #: and the operator is told, rather than the vehicle holding in silence.
@@ -281,6 +296,7 @@ class FlightDirector:
         self._replans = 0
         #: Plan only over ground that has been seen. See `navigate_to`.
         self.explore = True
+        self.local_planner = LocalPlanner()
         #: Whether the route being driven reaches the goal over seen ground.
         #: False while the vehicle is still working out the way: the path is
         #: then only the part it knows, ending at the place it is going to look
@@ -288,6 +304,9 @@ class FlightDirector:
         self.route_known = False
         self._explore_visited: list[tuple[float, float]] = []
         self._explore_ticks = 0
+        self._best_goal_distance = math.inf
+        self._stall_ticks = 0
+        self._reference_heading: float | None = None
 
     # --- ownership ---
 
@@ -411,6 +430,7 @@ class FlightDirector:
         self.route_known = False
         self._explore_visited = []
         self._explore_ticks = 0
+        self._reference_heading = None
         self._replans = 0
         self._costmap = None
         self._plan_failures = 0
@@ -575,6 +595,8 @@ class FlightDirector:
         self.route_known = False
         self._explore_visited = []
         self._explore_ticks = 0
+        self._best_goal_distance = math.inf
+        self._stall_ticks = 0
         self.path = []
         self._path_cells = []
         self._plan_failures = 0
@@ -709,6 +731,18 @@ class FlightDirector:
         body = self.rover_body
         here = (int(math.floor(body.x / cell_size_m)), int(math.floor(body.y / cell_size_m)))
         self._explore_ticks += 1
+        if not self.route_known:
+            to_goal = math.hypot(self.goal[0] - body.x, self.goal[1] - body.y)
+            if to_goal < self._best_goal_distance - EXPLORE_PROGRESS_M:
+                self._best_goal_distance = to_goal
+                self._stall_ticks = 0
+            else:
+                self._stall_ticks += 1
+                if self._stall_ticks > EXPLORE_STALL_TICKS:
+                    self.plan_failed = True
+                    return False
+        else:
+            self._stall_ticks = 0
 
         end = self.path[-1] if self.path else None
         near_end = (
@@ -800,6 +834,16 @@ class FlightDirector:
         if self.rover_mode == RoverMode.RETURNING:
             self.rover_mode = RoverMode.NORMAL
 
+    def _smoothed_heading(self, heading_deg: float, dt_s: float) -> float:
+        """The rover's heading with the weaving taken out, for the formation."""
+        if self._reference_heading is None:
+            self._reference_heading = heading_deg % 360.0
+        else:
+            error = (heading_deg - self._reference_heading + 180.0) % 360.0 - 180.0
+            alpha = 1.0 - math.exp(-dt_s / FORMATION_REFERENCE_TAU_S)
+            self._reference_heading = (self._reference_heading + error * alpha) % 360.0
+        return self._reference_heading
+
     # --- per-tick update ---
 
     def tick(
@@ -835,13 +879,12 @@ class FlightDirector:
             rover_pose if rover_pose else (rover_x, rover_y, rover_heading)
         )
 
+        reference = self._smoothed_heading(effective_heading, dt_s)
         poses: dict[str, tuple[float, float, float, float]] = {}
         for state in self.aircraft.values():
             if state.mode == AircraftMode.DOCKED:
                 continue
-            self._tick_aircraft(
-                state, dt_s, effective_x, effective_y, effective_heading, events
-            )
+            self._tick_aircraft(state, dt_s, effective_x, effective_y, reference, events)
             if state.mode == AircraftMode.PREFLIGHT:
                 continue  # still in the bay: the roster shows it docked
             poses[state.unit_id] = (state.x, state.y, state.z, state.heading)
@@ -894,11 +937,11 @@ class FlightDirector:
                 self._last_rover_xy = (body.x, body.y)
                 return (body.x, body.y, body.heading)
 
-            # Pure pursuit: steer at a point a fixed distance ahead on the
-            # planned line. A wheeled vehicle also cannot drive sideways, so
-            # it turns onto the bearing before it can build speed.
-            # Close to something, follow the line closely: a long lookahead
-            # chords across the corner the route was bent to go round.
+            # Two layers. The route says where to go: pure pursuit takes a point
+            # a little way ahead on it. The reactive layer says how, from where
+            # the vehicle is and what is mapped round it, and may decline to
+            # drive straight at that point. A vehicle that obeys a line into an
+            # obstacle because the line said so is not navigating.
             tight = self._costmap is not None and self._cell_of(body) in self._costmap.blocked
             target = pure_pursuit_target(
                 self.path, body.x, body.y, lookahead_m=TIGHT_LOOKAHEAD_M if tight else LOOKAHEAD_M
@@ -906,18 +949,36 @@ class FlightDirector:
             before = copy.copy(body)
             if target is not None:
                 dx, dy = target[0] - body.x, target[1] - body.y
-                if math.hypot(dx, dy) > 0.2:
-                    body.step_heading(math.degrees(math.atan2(dx, dy)) % 360.0, dt_s)
-                # The pace is the operator's: a sweep is usually driven at the
-                # survey crawl and a transit faster, but that is theirs to say.
-                body.step_toward(target[0], target[1], dt_s, speed_scale=self._pace_scale)
+                wanted = math.degrees(math.atan2(dx, dy)) % 360.0 if math.hypot(dx, dy) > 0.2 else body.heading
+                if self._costmap is not None:
+                    command = self.local_planner.command(
+                        self._costmap.obstacle_points(),
+                        body.x, body.y, body.heading, wanted,
+                        self.commanded_speed_ms, body.limits.max_decel_ms2, body.speed_ms,
+                    )
+                    heading, limit = command.heading_deg, command.speed_limit_ms
+                else:
+                    heading, limit = wanted, self.commanded_speed_ms
+                if self.route_known or not self.explore:
+                    # Arriving: slow to be able to stop at the goal, not past it.
+                    to_goal = math.hypot(self.goal[0] - body.x, self.goal[1] - body.y)
+                    limit = min(limit, math.sqrt(2.0 * body.limits.max_decel_ms2 * to_goal) + 0.25)
+                body.step_heading(heading, dt_s)
+                ahead = (
+                    body.x + math.sin(math.radians(heading)) * LOOKAHEAD_M,
+                    body.y + math.cos(math.radians(heading)) * LOOKAHEAD_M,
+                )
+                # The operator's speed is the ceiling; the reactive layer may
+                # only bring it lower.
+                body.step_toward(
+                    ahead[0], ahead[1], dt_s,
+                    speed_scale=min(self._pace_scale, limit / body.limits.max_speed_ms),
+                )
 
             # Nothing the rover has mapped as an obstacle is ever driven onto.
-            # The planner keeps a margin from it, and a vehicle that cuts a
-            # corner or starts inside that margin can still end up at its
-            # edge; at the edge it stops, and the route is made again from
-            # there, which is a sensible thing for a vehicle to do and driving
-            # through a tree is not.
+            # This should never be the thing that stops it: it is the last
+            # line behind the reactive layer, for a vehicle that is somehow
+            # still carried onto the edge of one.
             if self._costmap is not None and self._cell_of(body) in self._costmap.hard:
                 body.__dict__.update(before.__dict__)
                 body.vx = body.vy = 0.0

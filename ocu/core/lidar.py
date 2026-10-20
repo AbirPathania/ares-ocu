@@ -64,6 +64,7 @@ REFLECTIVITY = {
     Terrain.ROCK: 0.95,
     Terrain.TREE: 0.88,
     Terrain.POTHOLE: 0.30,  # the far wall of a hole, caught at an angle
+    Terrain.BUSH: 0.55,
     Terrain.UNKNOWN: 0.0,
 }
 
@@ -192,6 +193,9 @@ def cast_scan(
     # cell reads as ground, and the rock neither blocks the ray nor is mapped.
     unresolved = distance[None, :] > ROCK_DETECTION_RANGE_M
     kinds[(kinds == int(Terrain.ROCK)) & unresolved] = int(Terrain.GROUND)
+    # A shrub is too low for the horizontal beam to strike at all, and is found
+    # by the drive cameras instead, which only resolve it close in.
+    kinds[(kinds == int(Terrain.BUSH)) & (distance[None, :] > ROCK_DETECTION_RANGE_M)] = int(Terrain.GROUND)
 
     blocking = (kinds == int(Terrain.ROCK)) | (kinds == int(Terrain.TREE))
     hit = blocking.any(axis=1)

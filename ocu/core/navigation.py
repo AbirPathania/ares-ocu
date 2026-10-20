@@ -49,7 +49,7 @@ from ocu.core.terrain import (
 
 #: Half the rover's width plus clearance. The ARES-G is a 25 kg six-wheel
 #: platform; this is the radius a planner must keep clear of obstacles.
-ROVER_RADIUS_M = 0.9
+ROVER_RADIUS_M = 1.1
 
 #: Extra margin beyond the vehicle radius. Costs decay across this band so
 #: the planner prefers the middle of a gap rather than grazing the edge.
@@ -59,7 +59,7 @@ INFLATION_MARGIN_M = 1.1
 #: obstacle was not visible until it was close, may route through that band to
 #: get out of it, but only this far from where it stands, and at a heavy cost,
 #: so it leaves by the shortest way and does not use the band as a road.
-ESCAPE_RADIUS_M = 2.0
+ESCAPE_RADIUS_M = 2.4
 ESCAPE_COST_FACTOR = 10.0
 
 #: How far ahead on the path the follower aims. Shorter oscillates, longer
@@ -121,6 +121,8 @@ class Costmap:
     #: The planner keeps off everything in `blocked`; nothing may ever be
     #: driven onto a cell in `hard`.
     hard: set[tuple[int, int]] = field(default_factory=set)
+    _hard_version: int = 0
+    _hard_cache: tuple[int, object] | None = field(default=None, repr=False)
 
     #: How far into the perception map's journal this costmap has consumed,
     #: and which mission that journal belonged to.
@@ -135,6 +137,22 @@ class Costmap:
 
     def is_blocked(self, cell: tuple[int, int]) -> bool:
         return cell in self.blocked
+
+    def obstacle_points(self):
+        """The obstacle cells as (n, 2) world positions of their centres, kept
+        until the set changes so the reactive layer can ask every tick."""
+        import numpy as np
+
+        if self._hard_cache is not None and self._hard_cache[0] == self._hard_version:
+            return self._hard_cache[1]
+        size = self.cell_size_m
+        points = (
+            np.array([((cx + 0.5) * size, (cy + 0.5) * size) for cx, cy in self.hard], dtype=np.float64)
+            if self.hard
+            else np.zeros((0, 2), dtype=np.float64)
+        )
+        self._hard_cache = (self._hard_version, points)
+        return points
 
     def integrate(self, changes: Iterable[tuple[tuple[int, int], Terrain]]) -> None:
         """Fold a batch of newly classified cells into both layers.
@@ -155,9 +173,13 @@ class Costmap:
         for cell, kind in changes:
             self.base[cell] = TRAVERSE_COST.get(kind, TRAVERSE_COST[Terrain.UNKNOWN])
             if kind not in IMPASSABLE:
-                self.hard.discard(cell)
+                if cell in self.hard:
+                    self.hard.discard(cell)
+                    self._hard_version += 1
                 continue
-            self.hard.add(cell)
+            if cell not in self.hard:
+                self.hard.add(cell)
+                self._hard_version += 1
             cx, cy = cell
             for dx in range(-reach, reach + 1):
                 for dy in range(-reach, reach + 1):

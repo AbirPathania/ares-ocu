@@ -1,0 +1,386 @@
+"""GLSL for the scene renderer.
+
+One lighting model throughout, so a rock beside a tree beside the ground reads
+as lit by one sun: a directional sun with a shadow map, a hemisphere of sky
+light with the ground bouncing warm light back up, aerial perspective that
+bleeds distance into the horizon colour, and a filmic tone curve on the way
+out. The ground and the rocks are textured in the shader from noise anchored to
+the world, so the texture neither swims as the camera moves nor repeats.
+"""
+
+COMMON = """
+#version 330
+uniform vec3 u_sun;          // unit vector toward the sun
+uniform vec3 u_cam;
+uniform float u_time;
+uniform float u_fog;         // extinction per metre
+uniform float u_exposure;
+uniform float u_grain;       // sensor noise, as a fraction of full scale
+
+float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+float hash13(vec3 p3) {
+    p3 = fract(p3 * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+}
+float vnoise2(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash12(i), hash12(i + vec2(1, 0)), u.x),
+               mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), u.x), u.y);
+}
+float vnoise3(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    float a = mix(mix(hash13(i), hash13(i + vec3(1, 0, 0)), u.x),
+                  mix(hash13(i + vec3(0, 1, 0)), hash13(i + vec3(1, 1, 0)), u.x), u.y);
+    float b = mix(mix(hash13(i + vec3(0, 0, 1)), hash13(i + vec3(1, 0, 1)), u.x),
+                  mix(hash13(i + vec3(0, 1, 1)), hash13(i + vec3(1, 1, 1)), u.x), u.y);
+    return mix(a, b, u.z);
+}
+float fbm2(vec2 p) {
+    float t = 0.0, a = 0.5;
+    for (int i = 0; i < 4; i++) { t += a * vnoise2(p); p = p * 2.03 + 7.1; a *= 0.5; }
+    return t / 0.9375;
+}
+float fbm3(vec3 p) {
+    float t = 0.0, a = 0.5;
+    for (int i = 0; i < 3; i++) { t += a * vnoise3(p); p = p * 2.07 + 3.3; a *= 0.5; }
+    return t / 0.875;
+}
+
+vec3 skyColor(vec3 d) {
+    float h = clamp(d.z, 0.0, 1.0);
+    vec3 horizon = vec3(0.74, 0.80, 0.84);
+    vec3 zenith = vec3(0.20, 0.38, 0.68);
+    vec3 col = mix(horizon, zenith, pow(h, 0.5));
+    float s = max(dot(d, u_sun), 0.0);
+    col += vec3(1.0, 0.78, 0.52) * (pow(s, 6.0) * 0.20 + pow(s, 64.0) * 0.25);
+    col += vec3(1.0, 0.92, 0.80) * pow(s, 900.0) * 14.0;
+    col += vec3(0.32, 0.20, 0.09) * pow(s, 2.0) * (1.0 - h) * 0.35;
+    return col;
+}
+
+vec3 fogColor(vec3 view) {
+    // Haze takes the colour of the sky it sits in front of, warmer toward the sun.
+    float s = max(dot(normalize(vec3(view.xy, 0.0)), normalize(vec3(u_sun.xy, 0.0001))), 0.0);
+    vec3 base = vec3(0.70, 0.76, 0.80);
+    return base + vec3(0.28, 0.18, 0.08) * pow(s, 3.0) * 0.55;
+}
+
+vec3 applyFog(vec3 col, float dist, vec3 view) {
+    float f = 1.0 - exp(-pow(dist * u_fog, 1.4));
+    // Height-dependent: the haze lies in the low ground.
+    return mix(col, fogColor(view), clamp(f, 0.0, 0.94));
+}
+
+vec3 aces(vec3 x) {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+vec3 finish(vec3 linear) {
+    vec3 c = aces(linear * u_exposure);
+    // A touch of saturation and contrast, as a camera's pipeline adds.
+    float l = dot(c, vec3(0.299, 0.587, 0.114));
+    c = mix(vec3(l), c, 1.10);
+    c = pow(c, vec3(1.0 / 2.2));
+    // Sensor noise: a camera is never clean, and the grain moves every frame.
+    float g = hash12(gl_FragCoord.xy + vec2(fract(u_time * 7.3) * 311.0, fract(u_time * 3.1) * 177.0)) - 0.5;
+    float g2 = hash12(gl_FragCoord.yx * 1.7 + vec2(fract(u_time * 5.7) * 97.0, 13.0)) - 0.5;
+    return clamp(c + vec3(g, (g + g2) * 0.5, g2) * u_grain * 2.0, 0.0, 1.0);
+}
+"""
+
+SHADOWED = """
+uniform mat4 u_shadow_vp;
+uniform sampler2DShadow u_shadow;
+float shadowAt(vec3 world, vec3 n) {
+    vec4 sp = u_shadow_vp * vec4(world + n * 0.06, 1.0);
+    vec3 c = sp.xyz / sp.w * 0.5 + 0.5;
+    if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0 || c.z > 1.0) return 1.0;
+    float texel = 1.0 / 4096.0;
+    float lit = 0.0;
+    for (int x = -1; x <= 1; x++)
+        for (int y = -1; y <= 1; y++)
+            lit += texture(u_shadow, vec3(c.xy + vec2(x, y) * texel * 1.2, c.z - 0.0008));
+    return lit / 9.0;
+}
+vec3 sunLight() { return vec3(1.0, 0.92, 0.78) * 2.5; }
+vec3 skyLight(vec3 n) {
+    float up = n.z * 0.5 + 0.5;
+    vec3 sky = vec3(0.30, 0.42, 0.62);
+    vec3 bounce = vec3(0.26, 0.21, 0.14);
+    return mix(bounce, sky, up) * 0.9;
+}
+"""
+
+TERRAIN_VERT = """
+uniform mat4 u_vp;
+in vec3 in_pos;
+in vec3 in_normal;
+in vec4 in_mat;
+in vec4 in_extra;
+out vec3 v_pos;
+out vec3 v_normal;
+out vec4 v_mat;
+out vec4 v_extra;
+void main() {
+    v_pos = in_pos; v_normal = in_normal; v_mat = in_mat; v_extra = in_extra;
+    gl_Position = u_vp * vec4(in_pos, 1.0);
+}
+"""
+
+TERRAIN_FRAG = COMMON + SHADOWED + """
+in vec3 v_pos;
+in vec3 v_normal;
+in vec4 v_mat;
+in vec4 v_extra;
+out vec4 f_color;
+
+void main() {
+    vec3 p = v_pos;
+    float dist = length(p - u_cam);
+    vec3 view = normalize(p - u_cam);
+    float near = clamp(1.0 - dist / 38.0, 0.0, 1.0);   // fine detail fades before it can alias
+    float mid = clamp(1.0 - dist / 90.0, 0.0, 1.0);
+
+    float n1 = fbm2(p.xy * 0.22);
+    float n2 = vnoise2(p.xy * 1.6);
+    float n3 = vnoise2(p.xy * 7.0);
+    float n4 = near > 0.0 ? vnoise2(p.xy * 31.0) : 0.5;
+    float n5 = near > 0.0 ? vnoise2(p.xy * 90.0) : 0.5;
+
+    vec3 soil  = mix(vec3(0.34, 0.25, 0.16), vec3(0.46, 0.36, 0.23), n1);
+    vec3 straw = mix(vec3(0.50, 0.43, 0.22), vec3(0.40, 0.37, 0.17), n1);
+    vec3 olive = mix(vec3(0.18, 0.24, 0.09), vec3(0.28, 0.31, 0.12), n1);
+    vec3 track = vec3(0.52, 0.45, 0.34) * (0.92 + 0.16 * n2);
+    vec3 dark  = mix(vec3(0.20, 0.15, 0.10), vec3(0.28, 0.22, 0.15), n2);
+
+    vec3 scrub = mix(straw, olive, smoothstep(0.25, 0.60, n1 + 0.3 * (n2 - 0.5)));
+    vec3 albedo = mix(soil, scrub, 0.35 + 0.35 * smoothstep(0.35, 0.65, n1)) * v_mat.x + scrub * v_mat.y + track * v_mat.z + dark * v_mat.w;
+
+    // Grass: blades are short strokes, so a fine anisotropic grain on vegetated ground.
+    float veg = clamp(v_mat.y * 1.2 + v_mat.x * 0.35, 0.0, 1.0);
+    float blades = near > 0.0 ? vnoise2(vec2(p.x * 38.0 + n3 * 3.0, p.y * 9.0)) * 0.6 + vnoise2(vec2(p.x * 9.0, p.y * 38.0 + n3 * 3.0)) * 0.4 : 0.5;
+    albedo *= 1.0 + veg * near * 0.55 * (blades - 0.5);
+    albedo *= 0.86 + 0.20 * n2 + 0.20 * (n3 - 0.5) * clamp(1.0 - dist / 48.0, 0.0, 1.0) + 0.14 * (n4 - 0.5) * near + 0.08 * (n5 - 0.5) * near;
+    // Green flush where the ground is wet (low in the field's moisture).
+    albedo = mix(albedo, albedo * vec3(0.78, 1.0, 0.70), smoothstep(0.55, 0.9, n1) * veg * 0.6);
+
+    // Surface normal with a bump from the same noise, so slopes catch the light
+    // unevenly. Only worth its cost where it can be seen.
+    vec3 n = v_normal;
+    if (near > 0.0) {
+        float e = 0.12;
+        float h0 = vnoise2(p.xy * 5.0) * 0.5 + vnoise2(p.xy * 19.0) * 0.25;
+        float hx = vnoise2((p.xy + vec2(e, 0)) * 5.0) * 0.5 + vnoise2((p.xy + vec2(e, 0)) * 19.0) * 0.25;
+        float hy = vnoise2((p.xy + vec2(0, e)) * 5.0) * 0.5 + vnoise2((p.xy + vec2(0, e)) * 19.0) * 0.25;
+        n = normalize(v_normal + vec3(-(hx - h0), -(hy - h0), 0.0) * (0.9 * near + 0.25));
+    }
+
+    // Steep ground sheds soil and shows stone.
+    float slope = 1.0 - v_normal.z;
+    vec3 stone = vec3(0.40, 0.37, 0.33) * (0.8 + 0.4 * n2);
+    albedo = mix(albedo, stone, smoothstep(0.20, 0.42, slope));
+    // A hole is bare earth, darker, with the rim scuffed.
+    albedo = mix(albedo, albedo * 0.45 + vec3(0.05, 0.035, 0.02), clamp(v_extra.x * 3.0, 0.0, 0.9));
+
+    float sh = shadowAt(p, v_normal);
+    float diff = max(dot(n, u_sun), 0.0) * sh;
+    vec3 lit = albedo * (sunLight() * diff + skyLight(n) * (0.55 + 0.45 * sh));
+    // Contact darkening in hollows.
+    lit *= 1.0 - clamp(v_extra.x * 1.6, 0.0, 0.5);
+
+    lit = applyFog(lit, dist, view);
+    f_color = vec4(finish(lit), 1.0);
+}
+"""
+
+INSTANCE_VERT = """
+uniform mat4 u_vp;
+uniform float u_time;
+uniform int u_kind;
+in vec3 in_pos;
+in vec3 in_normal;
+in vec3 in_rgb;
+in float in_ao;
+in vec4 i_pos_yaw;
+in vec4 i_scale;
+in vec4 i_tint;
+out vec3 v_world;
+out vec3 v_normal;
+out vec3 v_local;
+out vec3 v_rgb;
+out float v_ao;
+out vec4 v_tint;
+out float v_seed;
+void main() {
+    vec3 p = in_pos * i_scale.xyz;
+    if (u_kind == 1 && i_tint.a > 0.0 && abs(in_normal.z) < 2.0) {
+        // Leafy crowns have a broken outline: push the surface in and out along
+        // its normal with noise, so a smooth lobe reads as a mass of leaves.
+        vec3 q = (in_pos + vec3(i_scale.w)) * 9.0;
+        float bump = fract(sin(dot(floor(q * 1.7), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        float smooth_bump = sin(q.x * 2.3 + q.y * 1.9) * sin(q.y * 2.7 - q.z * 2.1) * sin(q.z * 3.1 + q.x * 1.3);
+        p += normalize(in_normal) * (0.35 * smooth_bump + 0.15 * (bump - 0.5)) * 0.06 * max(i_scale.x, i_scale.z) * step(0.45, in_pos.z);
+    }
+    float sway = i_tint.a;
+    if (sway > 0.0) {
+        float hf = clamp(in_pos.z, 0.0, 1.0);
+        float ph = i_pos_yaw.x * 0.71 + i_pos_yaw.y * 0.43;
+        float gust = sin(u_time * 0.6 + ph * 0.3) * 0.5 + 0.5;
+        p.xy += vec2(sin(u_time * 1.15 + ph), cos(u_time * 0.93 + ph * 1.3))
+                * sway * hf * hf * i_scale.z * (0.010 + 0.014 * gust);
+    }
+    float c = cos(i_pos_yaw.w), s = sin(i_pos_yaw.w);
+    vec3 r = vec3(p.x * c - p.y * s, p.x * s + p.y * c, p.z);
+    v_world = r + i_pos_yaw.xyz;
+    vec3 n = in_normal / max(i_scale.xyz, vec3(0.001));
+    n = normalize(n);
+    v_normal = vec3(n.x * c - n.y * s, n.x * s + n.y * c, n.z);
+    v_local = in_pos;
+    v_rgb = in_rgb;
+    v_ao = in_ao;
+    v_tint = i_tint;
+    v_seed = i_scale.w;
+    gl_Position = u_vp * vec4(v_world, 1.0);
+}
+"""
+
+INSTANCE_FRAG = COMMON + SHADOWED + """
+uniform int u_kind;        // 0 rock, 1 foliage, 2 machine, 3 grass
+in vec3 v_world;
+in vec3 v_normal;
+in vec3 v_local;
+in vec3 v_rgb;
+in float v_ao;
+in vec4 v_tint;
+in float v_seed;
+out vec4 f_color;
+
+void main() {
+    vec3 view = normalize(v_world - u_cam);
+    float dist = length(v_world - u_cam);
+    vec3 n = normalize(v_normal);
+    if (!gl_FrontFacing) n = -n;
+    vec3 albedo = v_rgb * v_tint.rgb;
+    float ao = v_ao;
+    float leaf = 0.0;
+
+    if (u_kind == 0) {
+        // Weathered stone: banding, lichen on the sunward tops, cracks, a rough grain.
+        vec3 q = v_world * 2.3 + v_seed;
+        float grain = fbm3(q * 2.5);
+        float fine = vnoise3(v_world * 38.0 + v_seed);
+        float band = sin(v_local.z * 9.0 + grain * 5.0) * 0.5 + 0.5;
+        // Warm grey to brown, differently for each rock, with streaks down the faces.
+        vec3 stone = mix(vec3(0.30, 0.28, 0.25), vec3(0.42, 0.36, 0.29), fbm3(q * 0.7 + 3.0));
+        float streak = fbm3(vec3(v_world.xy * 5.0, v_world.z * 1.2) + v_seed);
+        albedo = stone * (0.55 + 0.85 * grain) * (0.88 + 0.22 * band) * (0.85 + 0.3 * fine);
+        albedo *= 0.75 + 0.5 * streak;
+        float crack = smoothstep(0.46, 0.5, abs(vnoise3(q * 3.3) - 0.5));
+        albedo *= mix(0.45, 1.0, crack);
+        float lichen = smoothstep(0.55, 0.9, n.z) * smoothstep(0.5, 0.72, fbm3(q * 1.7 + 11.0));
+        albedo = mix(albedo, vec3(0.22, 0.28, 0.11) * (0.7 + 0.5 * grain), lichen * 0.7);
+        float dust = clamp(1.0 - v_local.z * 1.4, 0.0, 1.0);
+        albedo = mix(albedo, vec3(0.34, 0.26, 0.17), dust * 0.35);
+        n = normalize(n + (vec3(vnoise3(q * 5.0), vnoise3(q * 5.0 + 4.0), vnoise3(q * 5.0 + 9.0)) - 0.5) * 0.9
+                        + (vec3(vnoise3(v_world * 31.0), vnoise3(v_world * 31.0 + 3.0), vnoise3(v_world * 31.0 + 7.0)) - 0.5) * 0.35);
+    } else if (u_kind == 1) {
+        leaf = 1.0;
+        vec3 q = v_world * 3.4 + v_seed;
+        float clump = fbm3(q);
+        float speck = vnoise3(v_world * 22.0 + v_seed);
+        albedo *= 0.70 + 0.62 * clump;
+        albedo *= 0.86 + 0.28 * speck;
+        // Sun-bleached tips toward the top of the crown.
+        albedo = mix(albedo, albedo * vec3(1.10, 1.05, 0.85), smoothstep(0.55, 1.0, v_local.z) * 0.25);
+        // Leaf facets: the crown's surface is thousands of small planes, not one
+        // smooth skin, and the light breaks up over them.
+        vec3 facet = vec3(vnoise3(v_world * 9.0 + v_seed), vnoise3(v_world * 9.0 + v_seed + 5.0), vnoise3(v_world * 9.0 + v_seed + 11.0)) - 0.5;
+        n = normalize(n + facet * 1.1);
+    } else if (u_kind == 3) {
+        leaf = 1.0;
+        albedo *= 0.85 + 0.3 * vnoise3(v_world * 3.0);
+    } else {
+        // machine: small specular and no dirt
+    }
+
+    float sh = shadowAt(v_world, n);
+    float wrap = leaf > 0.5 ? clamp((dot(n, u_sun) + 0.45) / 1.45, 0.0, 1.0) : max(dot(n, u_sun), 0.0);
+    vec3 lit = albedo * (sunLight() * wrap * sh + skyLight(n) * (0.55 + 0.45 * sh)) * (0.30 + 0.80 * ao);
+    if (leaf > 0.5) {
+        // Light through leaves when the sun is behind them.
+        float through = pow(max(dot(-view, u_sun), 0.0), 3.0) * (1.0 - clamp(dot(n, u_sun), 0.0, 1.0));
+        lit += albedo * vec3(0.55, 0.65, 0.20) * through * 1.6 * sh * ao;
+    }
+    if (u_kind == 2) {
+        vec3 h = normalize(u_sun - view);
+        lit += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, h), 0.0), 40.0) * 0.5 * sh;
+    }
+    lit = applyFog(lit, dist, view);
+    f_color = vec4(finish(lit), 1.0);
+}
+"""
+
+SHADOW_TERRAIN_VERT = """
+#version 330
+uniform mat4 u_vp;
+in vec3 in_pos;
+void main() { gl_Position = u_vp * vec4(in_pos, 1.0); }
+"""
+
+SHADOW_INSTANCE_VERT = """
+#version 330
+uniform mat4 u_vp;
+in vec3 in_pos;
+in vec4 i_pos_yaw;
+in vec4 i_scale;
+void main() {
+    vec3 p = in_pos * i_scale.xyz;
+    float c = cos(i_pos_yaw.w), s = sin(i_pos_yaw.w);
+    vec3 r = vec3(p.x * c - p.y * s, p.x * s + p.y * c, p.z) + i_pos_yaw.xyz;
+    gl_Position = u_vp * vec4(r, 1.0);
+}
+"""
+
+SHADOW_FRAG = """
+#version 330
+void main() {}
+"""
+
+SKY_VERT = """
+#version 330
+out vec2 v_ndc;
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    v_ndc = p * 2.0 - 1.0;
+    gl_Position = vec4(v_ndc, 0.9999, 1.0);
+}
+"""
+
+SKY_FRAG = COMMON + """
+uniform mat4 u_inv_vp;
+in vec2 v_ndc;
+out vec4 f_color;
+void main() {
+    vec4 far = u_inv_vp * vec4(v_ndc, 1.0, 1.0);
+    vec3 d = normalize(far.xyz / far.w - u_cam);
+    vec3 col = skyColor(d);
+    // Clouds: a thin layer of broken cumulus, lit from the sun side.
+    if (d.z > 0.01) {
+        float t = 900.0 / d.z;
+        vec2 uv = (u_cam.xy + d.xy * t) * 0.0011 + vec2(u_time * 0.0008, 0.0);
+        float c = fbm2(uv * 3.0) * 0.75 + fbm2(uv * 9.0) * 0.25;
+        float cover = smoothstep(0.50, 0.74, c);
+        float edge = smoothstep(0.50, 0.62, c) - smoothstep(0.66, 0.80, c);
+        vec3 cloud = mix(vec3(0.80, 0.84, 0.90), vec3(1.0, 0.98, 0.94), edge + 0.3 * fbm2(uv * 21.0));
+        cloud *= 0.82 + 0.25 * max(dot(vec3(d.xy, 0.0), vec3(u_sun.xy, 0.0)), 0.0);
+        col = mix(col, cloud, cover * smoothstep(0.01, 0.25, d.z) * 0.85);
+    }
+    f_color = vec4(finish(col), 1.0);
+}
+"""

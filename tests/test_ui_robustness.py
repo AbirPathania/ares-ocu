@@ -508,14 +508,27 @@ def test_a_guided_launch_from_a_driving_rover_forms_on_the_pattern_the_operator_
         here = (window.units["rover"].pose.x, window.units["rover"].pose.y)
         driven += math.hypot(here[0] - previous[0], here[1] - previous[1])
         previous = here
-    rover = window.units["rover"].pose
     assert driven > 8.0, "the rover must have driven on during the launch"
     assert window.flight_director.launch_stage(TRICOPTERS) == "FORMED"
+    # An aircraft trails its slot through a turn of the rover, which is true of
+    # aircraft and not what is under test, so compare once the rover is steady.
+    history = []
+    for _ in range(600):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        history.append(window.units["rover"].pose.heading)
+        recent = history[-80:]
+        if len(recent) == 80 and max(recent) - min(recent) < 0.6:
+            break
+    rover = window.units["rover"].pose
 
     # The dial reads against the rover's nose, so the pattern it describes is
     # wherever the nose is pointing now.
+    # The formation is held against the course made good: the rover's heading
+    # with its small weaving taken out.
+    course = window.flight_director._reference_heading
     want = compute_formation_targets(
-        rover.x, rover.y, rover.heading + bearing, pattern, spacing, rally, standoff_m=standoff
+        rover.x, rover.y, course + bearing, pattern, spacing, rally, standoff_m=standoff
     )
     for uid, target in zip(TRICOPTERS, want):
         pose = window.units[uid].pose
@@ -1768,8 +1781,8 @@ def test_scouts_on_station_keep_facing_the_formation_bearing_while_the_rover_tur
     not have to point where it is moving. Measured before: an outer scout
     yawed from 8 to 122 degrees through a 13 degree turn of the rover."""
     window = MainWindow()
-    window.pace_slider.setValue(70)
     _form_up(window)
+    window.pace_slider.setValue(70)
     fd = window.flight_director
     window._on_destination_placed(-40.0, 40.0)  # a real turn
     for _ in range(int(60.0 / 0.1)):
@@ -1780,7 +1793,9 @@ def test_scouts_on_station_keep_facing_the_formation_bearing_while_the_rover_tur
             state = fd.aircraft[uid]
             if state.mode.value != "STATION":
                 continue
-            wanted = (rover.heading + state.bearing_deg) % 360.0
+            # The formation faces its course, the rover's heading with the weaving
+            # taken out, which is what the slots are held against too.
+            wanted = (fd._reference_heading + state.bearing_deg) % 360.0
             assert _angle_between(state.heading, wanted) < 35.0, (uid, state.heading, wanted)
 
 
@@ -1810,3 +1825,83 @@ def test_a_scout_does_not_report_what_is_behind_it(app):
         )
     _drive(window, 3.0)
     assert ("behind", "aircraft") not in reports
+
+
+# --- obstacle avoidance, measured against the real objects ------------------------------------
+
+
+def _clearance_to_objects(world, x, y):
+    """Distance from a point to the nearest real surface of any boulder, tree
+    trunk or bush: the objects themselves, not the map's idea of them."""
+    import numpy as np
+
+    best = 1e9
+    boulders = world.boulders
+    if len(boulders):
+        near = np.hypot(boulders[:, 0] - x, boulders[:, 1] - y) < 8.0
+        for bx, by, a, b, theta, _top in boulders[near]:
+            angle = np.linspace(0.0, 2 * np.pi, 72, endpoint=False)
+            ex, ey = a * np.cos(angle), b * np.sin(angle)
+            c, s = np.cos(theta), np.sin(theta)
+            best = min(best, float(np.min(np.hypot(bx + ex * c - ey * s - x, by + ex * s + ey * c - y))))
+    trees = world.trees
+    if len(trees):
+        best = min(best, float(np.min(np.hypot(trees[:, 0] - x, trees[:, 1] - y))) - 0.35)
+    bushes = world.bushes
+    if len(bushes):
+        best = min(best, float(np.min(np.hypot(bushes[:, 0] - x, bushes[:, 1] - y) - bushes[:, 2])))
+    return best
+
+
+@pytest.mark.parametrize("destination", [(-45.0, -30.0), (60.0, -50.0), (70.0, 20.0)])
+def test_the_rover_never_touches_a_real_object_on_the_way_to_a_destination(app, destination):
+    """Driven flat out. The rover's body is about 0.43 m from its centre to its
+    side; it has to stay clear of every real surface by more than that."""
+    window = MainWindow()
+    window.pace_slider.setValue(window.pace_slider.maximum())
+    window._on_play_clicked()
+    window._on_destination_placed(*destination)
+    closest = 1e9
+    for _ in range(int(150.0 / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        rover = window.units["rover"].pose
+        closest = min(closest, _clearance_to_objects(window.terrain, rover.x, rover.y))
+        if window._destination_state != "enroute":
+            break
+    assert closest > 0.6, f"came within {closest:.2f} m of a real object"
+
+
+def test_the_rover_never_touches_a_real_object_while_sweeping(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    closest = 1e9
+    for _ in range(int(120.0 / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        rover = window.units["rover"].pose
+        closest = min(closest, _clearance_to_objects(window.terrain, rover.x, rover.y))
+    assert closest > 0.6, f"came within {closest:.2f} m of a real object"
+
+
+def test_the_camera_feeds_can_be_drawn_on_the_gpu_without_blocking_the_interface(app):
+    import time
+
+    window = MainWindow()
+    window.show()
+    window.enable_gpu_cameras()
+    deadline = time.time() + 15.0
+    while time.time() < deadline and window._gpu_worker is not None and not window._gpu_worker.available:
+        app.processEvents()
+        time.sleep(0.05)
+    if window._gpu_worker is None or not window._gpu_worker.available:
+        pytest.skip("no GPU available")
+    window._on_play_clicked()
+    window._tick_cameras()
+    deadline = time.time() + 5.0
+    while time.time() < deadline and window.camera_feeds["rover"]._frame is None:
+        window._tick_cameras()
+        app.processEvents()
+        time.sleep(0.02)
+    assert window.camera_feeds["rover"]._frame is not None
+    window.close()

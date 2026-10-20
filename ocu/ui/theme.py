@@ -158,6 +158,7 @@ TERRAIN_COLORS = {
     "TREE": _mapped(_CAM_CANOPY, 72),
     "ROCK": _mapped(_CAM_ROCK, 68),
     "POTHOLE": QColor("#2A1F2C"),
+    "BUSH": _mapped(_CAM_SCRUB, 96),
 }
 
 TERRAIN_LABELS = {
@@ -167,6 +168,7 @@ TERRAIN_LABELS = {
     "TREE": "tree",
     "ROCK": "rock",
     "POTHOLE": "hole",
+    "BUSH": "bush",
 }
 
 #: blend from the dim TERRAIN_COLORS tone toward this, weighted by the
@@ -185,4 +187,5 @@ RETURN_COLORS = {
     "ROCK": _mapped(_CAM_ROCK, 185),
     # Not a terrain colour: a hole is a hazard, and is coloured to be found.
     "POTHOLE": QColor("#B07ABE"),
+    "BUSH": _mapped(_CAM_SCRUB, 210),
 }

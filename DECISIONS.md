@@ -1031,3 +1031,81 @@ under 50 m across the ground from scout altitude (`aerial.MAX_SLANT_RANGE_M`,
 derived, not typed). The sensor and object sizes are assumptions, written down
 where they are used. A camera yawing faster than 20 degrees a second also sees
 nothing it sweeps over.
+
+## The world is made of objects, and everything works from the same ones
+
+The rover was reported driving through rocks and bushes. Measured, the cause was
+that three things each had their own idea of what was out there: the camera drew
+smoothed height fields, the LiDAR map was cells, and a boulder only counted as an
+obstacle where its dome stood over 30 cm, so a rover driving up the low flank of a
+big rock was, by the map's rules, on open ground; and bushes were drivable scrub.
+
+The world now generates **individual objects**: boulders (an ellipse, a height),
+trees (a trunk position, height and crown) and bushes (a patch). Their footprints
+*are* the class grid, so one list feeds all three:
+
+- **Boulders** are obstacles across their whole footprint, grown by 0.3 m so a cell
+  they only touch is on the map. Stones under 20 cm are pebbles, drawn and driven
+  over.
+- **Trees** stand at least 1.9 m inside the stands the grid already marks, with
+  crowns capped at 2.3 m, so every tree on a camera is inside ground the map
+  calls impassable.
+- **Bushes** are a new impassable class (`Terrain.BUSH`): too low for the
+  horizontal beam to strike, resolved at close range like a rock (16 m), remembered
+  once mapped.
+- A track no longer paves over a rock or a tree.
+
+Tests hold these together: every boulder footprint is ROCK on the map, every tree
+is inside TREE ground, every bush is BUSH, and the same seed gives the same world.
+
+## Avoiding things in real time
+
+A route plus a hard stop was not obstacle avoidance. The rover knew about one rock
+for fifty seconds, drove a route that hugged it, and froze against the last-line
+stop when its own heading drifted into the margin. There is now a reactive layer
+(`core/local_planner.py`) under the route planner, run every tick:
+
+- It lays a fan of straight tracks out from the vehicle, finds how far each can be
+  driven before the footprint (1.0 m from an obstacle cell's centre, against the
+  planner's 1.1 m) would touch something mapped, and picks the one that gets
+  nearest where the route wants to go while leaving room. It keeps to one side of
+  an obstacle rather than swinging between sides.
+- Tracks are examined as far as the vehicle needs to stop from its present speed,
+  plus a margin, and the speed allowed follows from how far the chosen track is
+  clear. It slows through a tight gap.
+- Starting inside the margin (an obstacle seen only when it was near) it leaves the
+  way that opens clearance instead of freezing.
+- The route planner's clearance rose from 0.9 m to 1.1 m: the vehicle is 1.15 by
+  0.85 m and sweeps a 0.72 m circle turning on the spot, and a map cell is a
+  quarter of a metre from its own edge.
+- The last-line stop is still there behind it, and is now never what stops the rover.
+- A destination whose surroundings are walled in is declared unreachable after 45 s
+  without getting 1.5 m closer, rather than circled forever.
+
+Measured across nine drives flat out (4.2 m/s) and a sweep, the rover's centre
+stayed at least 0.83 m from the real surface of every object. That is now a test.
+
+**The formation flies the course, not the wobble.** A rover weaving round
+obstacles yaws ten degrees a second, which swings a slot thirty metres ahead of it
+sideways at five metres a second; no formation flies that. Slots and facing are held
+against the rover's heading smoothed over 2.5 s.
+
+## The camera feeds are a 3D scene on the GPU
+
+The feeds were drawn by a numpy ray-marcher over blurred fields: flat-shaded
+blobs, a few frames a second. They are now a real-time scene (`ocu/render/`, on
+`moderngl`): the terrain as a mesh with a sun, a 4096 px shadow map of the whole
+world, hemisphere sky light, aerial perspective, a sky with clouds, and filmic
+tone mapping; boulders as cleavage-cut convex solids with weathering, lichen and
+cracks in the shader; trees built from whorls of boughs (conifers) and lobed crowns
+with leaf facets and a broken outline (broadleaf), swaying in wind; bushes as
+clumps of lobes; thousands of grass tufts near the camera; pebbles; the rover as a
+model when a scout looks at it. Everything is generated from numbers, with no
+asset files, from the same objects the map is made from.
+
+It runs on a worker thread, so a frame never makes the interface wait, and every
+live tile is redrawn about 25 times a second rather than one tile per tick. A frame
+costs about 8 to 11 ms on an Apple M1. Without a GPU the application falls back to
+the numpy renderer. Using ready-made photoscanned models and textures (Poly Haven,
+Quaternius) would look better still; they are downloads, so that is left for the
+team to decide.

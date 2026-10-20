@@ -51,6 +51,7 @@ class Terrain(IntEnum):
     ROCK = 4  # impassable, and it blocks the beam
     TREE = 5  # impassable, and it blocks the beam
     POTHOLE = 6  # a hole: impassable, but you can see straight over it
+    BUSH = 7  # a shrub: impassable, but low enough for a horizontal beam to pass over
 
 
 _TERRAIN_BY_VALUE = {int(t): t for t in Terrain}
@@ -63,7 +64,7 @@ OCCLUDING = frozenset({Terrain.ROCK, Terrain.TREE})
 #: scanning LiDAR looks straight over a pothole and sees the ground beyond.
 #: Negative obstacles are found by looking down, not across, which is what
 #: the drive stereo pair is for (see lidar.NEGATIVE_OBSTACLE_RANGE_M).
-IMPASSABLE = OCCLUDING | frozenset({Terrain.POTHOLE})
+IMPASSABLE = OCCLUDING | frozenset({Terrain.POTHOLE, Terrain.BUSH})
 
 #: Relative cost of crossing each traversable class, for the planner.
 TRAVERSE_COST = {
@@ -101,8 +102,31 @@ OUTCROP_CHANCE_PER_CELL = 0.0035
 BOULDER_CLEAR_RADIUS_M = 8.0  # around the deploy point
 
 #: How tall a boulder has to stand before a wheeled vehicle treats it as an
-#: obstacle. Lower than this is stone, which is rendered but driven over.
-ROCK_IMPASSABLE_HEIGHT_M = 0.30
+#: obstacle. Lower than this is a stone, drawn as a pebble and driven over.
+#: An obstacle is impassable across its whole footprint, not only where its
+#: dome is high: a rover that drove up the flank of a boulder because the
+#: flank was under thirty centimetres looked, to anyone watching, like a rover
+#: driving through a rock.
+BOULDER_OBSTACLE_MIN_TOP_M = 0.20
+ROCK_FOOTPRINT_EPS_M = 0.02
+
+#: How far a mapped footprint is grown past the object, so a cell the object
+#: only touches is on the map. Most of a cell's half-diagonal (0.35 m).
+FOOTPRINT_GROWTH_M = 0.3
+
+# Trees and bushes are individual plants, placed inside the ground that carries
+# them and kept clear of each other, so what is drawn is what is there.
+TREE_SPACING_M = 2.6
+TREE_HEIGHT_RANGE_M = (4.5, 9.5)
+TREE_CROWN_RATIO = (0.20, 0.30)  # crown radius over height
+TREE_EDGE_MARGIN_M = 1.9  # a crown stays this far inside its stand
+TREE_MAX_CROWN_M = 2.3
+WORLD_EDGE_MARGIN_M = 5.0  # nothing is placed within this of the world's edge
+BUSH_SPACING_M = 4.6
+BUSH_RADIUS_RANGE_M = (0.45, 0.95)
+BUSH_CHANCE_SCRUB = 0.50
+BUSH_CHANCE_GROUND = 0.06
+BUSH_CLEAR_RADIUS_M = 8.0
 
 # Potholes. Washouts and collapses on and beside a worn track: wider than a
 # wheel and deep enough to drop one in, which for a six-wheel platform is a
@@ -188,12 +212,24 @@ class TerrainWorld:
     #: the source of truth: the POTHOLE class is where it exceeds
     #: POTHOLE_IMPASSABLE_DEPTH_M, and the cameras render the dip itself.
     _pothole_depth: np.ndarray = field(default=None, repr=False)
+    #: The individual things standing in the world, which the cameras draw and
+    #: whose footprints the class grid is made from. Rows are
+    #: boulders (x, y, semi_major, semi_minor, theta, top),
+    #: trees (x, y, height, crown_radius, species),
+    #: bushes (x, y, radius, seed) and pebbles (x, y, radius, height, seed).
+    boulders: np.ndarray = field(default=None, repr=False)
+    trees: np.ndarray = field(default=None, repr=False)
+    bushes: np.ndarray = field(default=None, repr=False)
+    pebbles: np.ndarray = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._extent = int(self.half_extent_m / self.cell_size_m)
         self._span = self._extent * 2 + 1
         if self._grid is None:
             self._generate()
+        for name, width in (("boulders", 6), ("trees", 5), ("bushes", 4), ("pebbles", 5)):
+            if getattr(self, name) is None:
+                setattr(self, name, np.zeros((0, width), dtype=np.float64))
         if self._rock_height is None:
             self._rock_height = np.zeros((self._span, self._span), dtype=np.float32)
             self._rock_height[self._grid == int(Terrain.ROCK)] = PAINTED_ROCK_HEIGHT_M
@@ -304,7 +340,7 @@ class TerrainWorld:
         # slope are different ground, and a boulder inside a crown is not
         # one anyone can see.
         rock_height = self._scatter_boulders(slope, detail, trees)
-        grid[rock_height >= ROCK_IMPASSABLE_HEIGHT_M] = int(Terrain.ROCK)
+        grid[self._footprint | (rock_height > ROCK_FOOTPRINT_EPS_M)] = int(Terrain.ROCK)
 
         self._elevation = elevation
         self._grid = grid
@@ -321,6 +357,8 @@ class TerrainWorld:
         # the cameras show the dip rather than a flat patch of a new colour.
         self._elevation = self._elevation - self._pothole_depth
         self._clear_deploy_point()
+        self._scatter_trees(detail)
+        self._scatter_bushes()
 
     def _scatter_boulders(
         self, slope: np.ndarray, detail: np.ndarray, trees: np.ndarray
@@ -369,15 +407,147 @@ class TerrainWorld:
 
         height = np.zeros((span, span), dtype=np.float32)
         low, high = BOULDER_RADIUS_RANGE_M
+        placed: list[tuple[float, float, float, float, float, float]] = []
+        stones: list[tuple[float, float, float, float, float]] = []
         for x, y, r in boulders:
             if math.hypot(x, y) < BOULDER_CLEAR_RADIUS_M:
+                continue
+            if abs(x) > self.half_extent_m - WORLD_EDGE_MARGIN_M or abs(y) > self.half_extent_m - WORLD_EDGE_MARGIN_M:
                 continue
             r = min(max(r, low), high)
             aspect = rng.uniform(0.55, 1.0)
             theta = rng.uniform(0.0, math.pi)
             top = r * rng.uniform(0.5, 0.9)  # partly buried: lower than it is wide
+            if top < BOULDER_OBSTACLE_MIN_TOP_M:
+                # A stone, not an obstacle: drawn, and driven over.
+                stones.append((x, y, r, top, float(rng.integers(0, 1 << 30))))
+                continue
             self._raise_dome(height, x, y, r, r * aspect, theta, top)
+            placed.append((x, y, r, r * aspect, theta, top))
+        self.boulders = np.array(placed, dtype=np.float64).reshape(-1, 6)
+        self.pebbles = np.array(stones, dtype=np.float64).reshape(-1, 5)
+        self._footprint = self._boulder_footprint(self.boulders)
         return height
+
+    def _boulder_footprint(self, boulders: np.ndarray) -> np.ndarray:
+        """The cells a boulder touches, not only the cells whose centre it covers.
+
+        Rasterising to cell centres leaves the outer third of a cell's width of
+        every boulder off the map, and a vehicle keeping a margin from the
+        mapped edge then touches the real one. Growing each ellipse by most of a
+        cell's half-diagonal makes the map err on the side of the rock.
+        """
+        mask = np.zeros((self._span, self._span), dtype=bool)
+        cell = self.cell_size_m
+        grow = FOOTPRINT_GROWTH_M
+        for x, y, a, b, theta, _top in boulders:
+            reach = int(math.ceil((a + grow) / cell)) + 1
+            cx = int(math.floor(x / cell)) + self._extent
+            cy = int(math.floor(y / cell)) + self._extent
+            x0, x1 = max(cx - reach, 0), min(cx + reach + 1, self._span)
+            y0, y1 = max(cy - reach, 0), min(cy + reach + 1, self._span)
+            if x0 >= x1 or y0 >= y1:
+                continue
+            gx = (np.arange(x0, x1) - self._extent + 0.5) * cell - x
+            gy = (np.arange(y0, y1) - self._extent + 0.5) * cell - y
+            dx, dy = np.meshgrid(gx, gy, indexing="ij")
+            c, s = math.cos(theta), math.sin(theta)
+            u = (dx * c + dy * s) / (a + grow)
+            v = (-dx * s + dy * c) / (b + grow)
+            mask[x0:x1, y0:y1] |= (u * u + v * v) <= 1.0
+        return mask
+
+    def _scatter_trees(self, detail: np.ndarray) -> None:
+        """Individual trees, on a jittered grid, inside the stands.
+
+        The class grid marks a stand as a region; what stands in it is trees.
+        Each is placed well inside the region so its crown does not reach the
+        cells outside it, which means everything a camera shows as a tree is
+        something the map shows as impassable.
+        """
+        rng = np.random.default_rng(self.seed ^ 0x7233)
+        cell = self.cell_size_m
+        margin = int(math.ceil(TREE_EDGE_MARGIN_M / cell))
+        mask = self._grid == int(Terrain.TREE)
+        inner = mask.copy()
+        for dx in range(-margin, margin + 1):
+            for dy in range(-margin, margin + 1):
+                if dx * dx + dy * dy > margin * margin:
+                    continue
+                inner &= np.roll(np.roll(mask, dx, axis=0), dy, axis=1)
+
+        reach = self.half_extent_m - 2.0
+        axis = np.arange(-reach, reach, TREE_SPACING_M)
+        gx, gy = np.meshgrid(axis, axis, indexing="ij")
+        gx = gx + rng.uniform(-0.42, 0.42, gx.shape) * TREE_SPACING_M
+        gy = gy + rng.uniform(-0.42, 0.42, gy.shape) * TREE_SPACING_M
+        ix = np.floor(gx / cell).astype(np.int64) + self._extent
+        iy = np.floor(gy / cell).astype(np.int64) + self._extent
+        ok = (ix >= 0) & (ix < self._span) & (iy >= 0) & (iy < self._span)
+        keep = np.zeros(gx.shape, dtype=bool)
+        keep[ok] = inner[ix[ok], iy[ok]]
+        keep &= np.hypot(gx, gy) > 6.5  # not on the deploy point
+        keep &= (np.abs(gx) < self.half_extent_m - WORLD_EDGE_MARGIN_M) & (np.abs(gy) < self.half_extent_m - WORLD_EDGE_MARGIN_M)
+
+        xs, ys = gx[keep], gy[keep]
+        count = xs.size
+        low, high = TREE_HEIGHT_RANGE_M
+        # Height varies smoothly across a stand, with a little per tree.
+        patch = np.sin(xs * 0.11 + 1.3) * np.cos(ys * 0.09 - 0.7)
+        heights = low + (high - low) * np.clip(0.5 + 0.35 * patch + rng.normal(0.0, 0.16, count), 0.0, 1.0)
+        crowns = np.minimum(heights * rng.uniform(*TREE_CROWN_RATIO, size=count), TREE_MAX_CROWN_M)
+        # Conifers on the drier, higher side of a stand, broadleaf in the wet.
+        species = (np.sin(xs * 0.045 - ys * 0.037 + 0.4) + rng.normal(0.0, 0.25, count) > 0.0).astype(np.float64)
+        self.trees = np.stack([xs, ys, heights, crowns, species], axis=1)
+
+    def _scatter_bushes(self) -> None:
+        """Shrubs, each a small impassable patch of its own.
+
+        Broad scrub stays what it was, low cover that costs more to cross. A
+        bush is a thing with an edge: the camera draws it, the LiDAR resolves it
+        at close range, and the planner goes round it.
+        """
+        rng = np.random.default_rng(self.seed ^ 0xB05E)
+        cell = self.cell_size_m
+        reach = self.half_extent_m - 4.0
+        axis = np.arange(-reach, reach, BUSH_SPACING_M)
+        gx, gy = np.meshgrid(axis, axis, indexing="ij")
+        gx = (gx + rng.uniform(-0.4, 0.4, gx.shape) * BUSH_SPACING_M).ravel()
+        gy = (gy + rng.uniform(-0.4, 0.4, gy.shape) * BUSH_SPACING_M).ravel()
+        roll = rng.random(gx.size)
+        radii = rng.uniform(*BUSH_RADIUS_RANGE_M, size=gx.size)
+        seeds = rng.integers(0, 1 << 30, gx.size)
+
+        placed = []
+        for x, y, chance_roll, r, seed in zip(gx, gy, roll, radii, seeds):
+            if math.hypot(x, y) < BUSH_CLEAR_RADIUS_M:
+                continue
+            here = self.classify(x, y)
+            chance = {Terrain.SCRUB: BUSH_CHANCE_SCRUB, Terrain.GROUND: BUSH_CHANCE_GROUND}.get(here, 0.0)
+            if chance_roll > chance:
+                continue
+            # Clear of rock, trees and holes all round, so it is a bush and
+            # not a bush half inside something else.
+            blocked = False
+            span_cells = int(math.ceil(r / cell)) + 1
+            ci, cj = self.to_cell(x, y)
+            cells = []
+            for dx in range(-span_cells, span_cells + 1):
+                for dy in range(-span_cells, span_cells + 1):
+                    if math.hypot(dx, dy) * cell > r + FOOTPRINT_GROWTH_M:
+                        continue
+                    kind = self.at((ci + dx, cj + dy))
+                    if kind in (Terrain.ROCK, Terrain.TREE, Terrain.POTHOLE, Terrain.TRACK):
+                        blocked = True
+                    cells.append((ci + dx, cj + dy))
+            if blocked:
+                continue
+            for c in cells:
+                index = self._index(c)
+                if index is not None:
+                    self._grid[index] = int(Terrain.BUSH)
+            placed.append((x, y, r, float(seed)))
+        self.bushes = np.array(placed, dtype=np.float64).reshape(-1, 4)
 
     def _scatter_potholes(self, moisture: np.ndarray) -> np.ndarray:
         """Washouts, thicker along the track where water runs and wheels pass."""
@@ -503,7 +673,13 @@ class TerrainWorld:
             centre = self.to_cell(x, y)
             for dx in range(-half_width, half_width + 1):
                 for dy in range(-half_width, half_width + 1):
-                    self.set_cell((centre[0] + dx, centre[1] + dy), Terrain.TRACK)
+                    cell = (centre[0] + dx, centre[1] + dy)
+                    # A path goes round a boulder or a stand of trees; it does not
+                    # erase them, which would leave the cameras drawing a rock the
+                    # map no longer has.
+                    if self.at(cell) in (Terrain.ROCK, Terrain.TREE):
+                        continue
+                    self.set_cell(cell, Terrain.TRACK)
 
     def _clear_deploy_point(self) -> None:
         """A rover does not start inside a tree."""
@@ -589,7 +765,7 @@ class PerceptionMap:
         mapped a moment ago must not unmap it on the strength of the ground
         it reads beyond.
         """
-        return not (known in (Terrain.POTHOLE, Terrain.ROCK) and fresh is Terrain.GROUND)
+        return not (known in (Terrain.POTHOLE, Terrain.ROCK, Terrain.BUSH) and fresh is Terrain.GROUND)
 
     def at(self, cell: tuple[int, int]) -> Terrain:
         return self._observed.get(cell, Terrain.UNKNOWN)

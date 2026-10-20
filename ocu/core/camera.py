@@ -90,6 +90,7 @@ GROUND_RGB = {
     Terrain.ROCK: (124, 122, 116),
     Terrain.TREE: (74, 84, 52),  # leaf litter beneath a canopy
     Terrain.POTHOLE: (74, 62, 50),  # bare earth in shadow, down inside it
+    Terrain.BUSH: (101, 108, 62),
 }
 CANOPY_RGB = (48, 78, 42)
 TRUNK_RGB = (62, 47, 34)
@@ -222,6 +223,10 @@ class CameraRig:
     """
 
     def __init__(self, world: TerrainWorld) -> None:
+        self._world = world
+        #: The GPU scene, once `enable_gpu` has made one. While it is None the
+        #: views are drawn by the numpy renderer below.
+        self.gpu = None
         self._cell = world.cell_size_m
         self._extent = world._extent
         self._span = world._span
@@ -340,6 +345,13 @@ class CameraRig:
         texture = 0.80 + 0.16 * grit + 0.14 * patch + 0.12 * mottle
         return lit * texture[..., None]
 
+    def enable_gpu(self) -> bool:
+        """Draw the views on the GPU, as 3D geometry, if a GPU can be had."""
+        from ocu.render.gpu_scene import GpuScene
+
+        self.gpu = GpuScene.create(self._world)
+        return self.gpu is not None
+
     # --- oblique cameras: the rover's forward camera, and the scouts' ---------
 
     def forward_view(
@@ -356,6 +368,9 @@ class CameraRig:
         sensor_noise: float = 0.0,
     ) -> np.ndarray:
         """What the rover's forward camera sees. (height, width, 3) uint8."""
+        if self.gpu is not None:
+            eye = (x, y, self.elevation_at(x, y) + camera_height_m)
+            return self.gpu.render(eye, heading_deg, pitch_down_deg, fov_deg, width, height, grain=sensor_noise / 255.0)
         return self._render(
             x, y, self.elevation_at(x, y) + camera_height_m, heading_deg, width, height,
             fov_deg, pitch_down_deg, max_range_m, None, sensor_noise,
@@ -383,6 +398,11 @@ class CameraRig:
         the ground vehicle, drawn if it is in view: a vehicle is part of the
         scene an aircraft looks at.
         """
+        if self.gpu is not None:
+            eye = (x, y, self.elevation_at(x, y) + altitude_agl_m)
+            return self.gpu.render(
+                eye, heading_deg, pitch_down_deg, fov_deg, width, height, rover=rover, grain=sensor_noise / 255.0
+            )
         return self._render(
             x, y, self.elevation_at(x, y) + altitude_agl_m, heading_deg, width, height,
             fov_deg, pitch_down_deg, max_range_m, rover, sensor_noise,
@@ -633,6 +653,9 @@ class CameraRig:
         drawn if it falls inside the frame, since a vehicle is part of the
         scene an aircraft looks down on.
         """
+        if self.gpu is not None:
+            eye = (x, y, self.elevation_at(x, y) + max(altitude_m, 1.5))
+            return self.gpu.render(eye, heading_deg, 90.0, fov_deg, width, height, rover=rover, grain=sensor_noise / 255.0)
         altitude = max(altitude_m, 1.5)
         half_w = altitude * math.tan(math.radians(fov_deg / 2.0))
         half_h = half_w * height / width
