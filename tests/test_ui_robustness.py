@@ -2062,3 +2062,87 @@ def test_the_way_home_is_steered_round_whatever_is_in_it(app):
             break
     assert window.flight_director.rover_mode.value == "AT_BASE"
     assert closest > 0.6, f"came within {closest:.2f} m of a real object on the way home"
+
+
+# --- a flat battery stops the rover ---------------------------------------------------------
+
+
+def test_the_rover_stops_dead_when_its_battery_reaches_zero_and_says_so(app):
+    import math
+
+    window = MainWindow()
+    messages = _capture_log(window)
+    window.pace_slider.setValue(70)
+    window._on_play_clicked()
+    window._on_destination_placed(-30.0, 40.0)
+    _drive(window, 8.0)
+    assert window.flight_director.rover_body.speed_ms > 0.5
+    window.units["rover"].battery_pct = 0.0
+    _drive(window, 6.0)
+    assert window.flight_director.rover_body.speed_ms < 0.02, "it has stopped"
+    stopped = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+    _drive(window, 30.0)
+    moved = math.hypot(window.units["rover"].pose.x - stopped[0], window.units["rover"].pose.y - stopped[1])
+    assert moved < 0.05, "and stays stopped"
+    assert window.phase_label.text() == "BATTERY DEPLETED"
+    assert sum("BATTERY DEPLETED" in m for m in messages) == 1
+    assert any("DEPLETED" in n["headline"] for n in window.map_view._notices)
+
+
+def test_a_rover_with_a_flat_battery_cannot_be_driven_or_sent_anywhere(app):
+    window = MainWindow()
+    messages = _capture_log(window)
+    window._on_play_clicked()
+    window.units["rover"].battery_pct = 0.0
+    _drive(window, 2.0)
+    window._on_take_manual("rover")
+    assert window.control_authority.manual_holder != "rover"
+    window._on_destination_placed(20.0, 20.0)
+    assert window._destination is None
+    window._on_return_to_base()
+    assert any("flat" in m for m in messages)
+    _drive(window, 10.0)
+    assert window.flight_director.rover_body.speed_ms < 0.02
+
+
+def test_a_rover_on_the_sticks_stops_when_its_battery_runs_out(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    _drive(window, 2.0)
+    window._on_take_manual("rover")
+    from PySide6.QtCore import Qt
+
+    window._keys_down.add(int(Qt.Key_W))
+    _drive(window, 4.0)
+    assert window.flight_director.rover_body.speed_ms > 0.1
+    window.units["rover"].battery_pct = 0.0
+    _drive(window, 5.0)
+    assert window.flight_director.rover_body.speed_ms < 0.02
+    assert window.control_authority.manual_holder is None
+
+
+def test_aircraft_can_still_be_brought_down_onto_a_rover_that_has_stopped_for_good(app):
+    window = MainWindow()
+    _form_up(window)
+    window.units["rover"].battery_pct = 0.0
+    _drive(window, 3.0)
+    window._on_return_to_base()
+    for _ in range(int(120.0 / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        if all(window._docked_state[u] for u in TRICOPTERS):
+            break
+    assert all(window._docked_state[u] for u in TRICOPTERS)
+
+
+def test_a_reset_gives_the_rover_back_its_power(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    window.units["rover"].battery_pct = 0.0
+    _drive(window, 2.0)
+    assert window.flight_director.rover_disabled
+    window._on_reset_clicked()
+    assert not window.flight_director.rover_disabled
+    window._on_play_clicked()
+    _drive(window, 15.0)
+    assert window.flight_director.rover_body.speed_ms > 0.1

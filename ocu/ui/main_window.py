@@ -628,6 +628,11 @@ class MainWindow(QMainWindow):
         return False
 
     def _on_take_manual(self, unit_id: str) -> None:
+        if unit_id == "rover" and self.flight_director.rover_disabled:
+            self.event_log.log(
+                self.mission_clock.clock_s, "Manual control refused: the rover's battery is flat", level="caution"
+            )
+            return
         previous = self.control_authority.manual_holder
         if previous is not None and previous != unit_id:
             self.flight_director.release_manual(
@@ -761,7 +766,9 @@ class MainWindow(QMainWindow):
         """
         director = self.flight_director
         mode = director.rover_mode.value
-        if mode == "MANUAL":
+        if director.rover_disabled:
+            rover_task = "BATTERY DEPLETED"
+        elif mode == "MANUAL":
             rover_task = "MANUAL"
         elif mode == "RETURNING":
             rover_task = "RETURNING TO BASE"
@@ -985,6 +992,9 @@ class MainWindow(QMainWindow):
     def _on_destination_placed(self, x: float, y: float) -> None:
         self.map_view.set_placing_destination(False)
         now = self.mission_clock.clock_s
+        if self.flight_director.rover_disabled:
+            self.event_log.log(now, "Destination refused: the rover's battery is flat", level="caution")
+            return
         if self.flight_director.rover_mode == RoverMode.MANUAL:
             self.event_log.log(
                 now, "Destination refused: the rover is under manual control", level="caution"
@@ -1417,9 +1427,12 @@ class MainWindow(QMainWindow):
         rover = self.units["rover"]
         director = self.flight_director
 
+        if rover.battery_pct <= 0.0 and not director.rover_disabled:
+            self._rover_battery_flat()
         if (
             rover.battery_pct < ROVER_AUTO_RETURN_BATTERY_PCT
             and "rover" not in self._low_battery_actioned
+            and not director.rover_disabled
             and director.rover_mode not in (RoverMode.RETURNING, RoverMode.AT_BASE)
         ):
             self._low_battery_actioned.add("rover")
@@ -1434,6 +1447,28 @@ class MainWindow(QMainWindow):
                 continue
             self._low_battery_actioned.add(unit_id)
             self._auto_dock_aircraft(unit_id, unit.battery_pct)
+
+    def _rover_battery_flat(self) -> None:
+        """No charge left. The rover stops where it is and stays there."""
+        self._low_battery_actioned.add("rover")
+        if self.control_authority.manual_holder == "rover":
+            self._on_release_manual()
+        if self._destination is not None:
+            self._on_destination_cleared()
+        self.flight_director.disable_rover()
+        self.map_view.set_planned_path([], None)
+        self.event_log.log(
+            self.mission_clock.clock_s,
+            "BATTERY DEPLETED: rover has stopped and cannot be driven. Recover it, or bring the aircraft down onto it",
+            level="threat",
+        )
+        self.map_view.post_notice(
+            "ROVER BATTERY DEPLETED · STOPPED",
+            "0% charge. It will not move again until it is recovered.",
+            "threat",
+            seconds=30.0,
+        )
+        self._refresh_status()
 
     def _auto_return_rover(self, battery_pct: float) -> None:
         now = self.mission_clock.clock_s
@@ -1634,10 +1669,18 @@ class MainWindow(QMainWindow):
         for unit_id in TRICOPTER_IDS:
             self._ensure_director_owns(unit_id)
         rover = self.units["rover"]
+        flat = self.flight_director.rover_disabled
         recalled = self.flight_director.return_rover_to_base(
             0.0, 0.0, rover.pose.x, rover.pose.y, rover.pose.heading
         )
-        if recalled:
+        if flat:
+            self.event_log.log(
+                self.mission_clock.clock_s,
+                "RETURN TO BASE: the rover's battery is flat and it cannot move"
+                + (f"; recalling {', '.join(short_label(i) for i in recalled)} to dock where it stands" if recalled else ""),
+                level="caution",
+            )
+        elif recalled:
             self.event_log.log(
                 self.mission_clock.clock_s,
                 "RETURN TO BASE: recalling "

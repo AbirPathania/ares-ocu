@@ -1156,3 +1156,8 @@ frame is 10 to 12 ms on an Apple M1.
   route, over ground that has been seen and steered round obstacles, and if there is no clear way
   home the rover stops and says so instead of driving at the first rock.
 - The thresholds are the team's numbers, not the baseline's; they are named constants.
+
+- **A flat rover stops where it is.** At 0% it halts in whatever mode it was in and nothing moves it
+  again: manual control and new destinations are refused, and Return To Base can only bring the
+  aircraft down onto it where it stands. It is logged once, shown over the map for 30 s, and the top
+  bar and roster read BATTERY DEPLETED. A reset restores power.

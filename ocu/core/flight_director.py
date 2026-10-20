@@ -292,6 +292,10 @@ class FlightDirector:
         #: that is moving: the rover stands still until nothing is left to
         #: recover, and then carries on.
         self.hold_for_recovery = False
+        #: The rover's battery is flat. It stops where it is, in whatever mode it
+        #: was in, and nothing will move it: not the route, not the sticks, not the
+        #: way home.
+        self.rover_disabled = False
         self.lane_from: tuple[float, float] | None = None
         self._costmap = None
         self._plan_failures = 0
@@ -431,6 +435,7 @@ class FlightDirector:
         self.goal = None
         self.hold_navigation = False
         self.hold_for_recovery = False
+        self.rover_disabled = False
         self.lane_from = None
         self.route_known = False
         self._explore_visited = []
@@ -551,6 +556,10 @@ class FlightDirector:
         already home and arrive instantly.
         """
         self._base = (base_x, base_y)
+        if self.rover_disabled:
+            # It cannot go anywhere; what can still be done is to bring the
+            # aircraft down onto it where it stands.
+            return self.recall()
         if rover_x is not None and rover_y is not None:
             self.rover_body.x, self.rover_body.y = rover_x, rover_y
             if rover_heading is not None:
@@ -912,10 +921,27 @@ class FlightDirector:
         self._service_dock_queue(events)
         return poses, rover_pose, events
 
+    def disable_rover(self) -> None:
+        self.rover_disabled = True
+        self.rover_manual = ManualInput()
+        self.goal = None
+        self.path = []
+        self._path_cells = []
+        self.hold_for_recovery = False
+
     def _update_rover(
         self, dt_s: float, rover_x: float, rover_y: float, rover_heading: float, events: list
     ) -> tuple[float, float, float] | None:
         body = self.rover_body
+
+        if self.rover_disabled:
+            # No power: the wheels are not driven, and it coasts to a stop on its
+            # own brakes, in the mode it was in or any other.
+            body.halt(dt_s)
+            self._rover_speed_ms = body.speed_ms
+            self._rover_velocity = (body.vx, body.vy)
+            self._last_rover_xy = (body.x, body.y)
+            return (body.x, body.y, body.heading)
 
         if self.rover_mode == RoverMode.MANUAL:
             body.apply_yaw_command(self.rover_manual.turn * body.limits.max_yaw_rate_deg_s, dt_s)
