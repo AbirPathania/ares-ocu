@@ -31,9 +31,24 @@ from ocu.core.targets import BuriedTarget
 #: Deeper than this and there is nothing at the surface for a camera to see.
 MAX_VISIBLE_BURIAL_M = 0.10
 
-#: Beyond this a thing this small is not resolvable. Detection is graded: the
-#: nearer it is, the larger it looks, and the surer the scout is.
-MAX_RANGE_M = 90.0
+#: What the camera can resolve. A scout's sensor is 1280 pixels across the
+#: 84 degree field of view, so a pixel subtends 1.1 milliradians; something
+#: has to be about four pixels wide to be told from the ground, and a surface
+#: object of interest is about a quarter of a metre. That puts the limit at
+#: 0.25 / (4 x 0.00115) = 54 m of slant range, which from the scout's altitude
+#: is a little under 50 m across the ground. Detection is graded: the nearer it
+#: is, the larger it looks, and the surer the scout is.
+SENSOR_WIDTH_PX = 1280
+MIN_PIXELS_ON_TARGET = 4
+SURFACE_OBJECT_SIZE_M = 0.25
+MAX_SLANT_RANGE_M = SURFACE_OBJECT_SIZE_M / (
+    MIN_PIXELS_ON_TARGET * math.radians(SCOUT_HFOV_DEG) / SENSOR_WIDTH_PX
+)
+
+#: A camera swung faster than this smears small things into the background. A
+#: scout turning its camera through a formation change does not see anything it
+#: sweeps over.
+MAX_YAW_RATE_FOR_SIGHTING_DEG_S = 20.0
 
 #: A camera's evidence that something is out of place, however close it gets.
 #: Below the escalation threshold on purpose: it cannot say what it is.
@@ -53,6 +68,7 @@ def scout_sighting(
     y: float,
     height_above_ground_m: float,
     heading_deg: float,
+    yaw_rate_deg_s: float = 0.0,
 ) -> float:
     """Confidence with which a scout at (x, y) sees `target`, 0 if it does not.
 
@@ -61,10 +77,12 @@ def scout_sighting(
     """
     if target.depth_m > MAX_VISIBLE_BURIAL_M:
         return 0.0
+    if abs(yaw_rate_deg_s) > MAX_YAW_RATE_FOR_SIGHTING_DEG_S:
+        return 0.0
 
     dx, dy = target.x - x, target.y - y
     distance = math.hypot(dx, dy)
-    if distance < 1.0 or distance > MAX_RANGE_M:
+    if distance < 1.0:
         return 0.0
 
     azimuth = (math.degrees(math.atan2(dx, dy)) - heading_deg + 180.0) % 360.0 - 180.0
@@ -82,5 +100,8 @@ def scout_sighting(
     if not rig.line_of_sight(x, y, camera_z, target.x, target.y, target_z + 0.2):
         return 0.0
 
-    closeness = 1.0 - distance / MAX_RANGE_M
+    slant = math.hypot(distance, camera_z - target_z)
+    if slant > MAX_SLANT_RANGE_M:
+        return 0.0
+    closeness = 1.0 - slant / MAX_SLANT_RANGE_M
     return MIN_OPTICAL_CONFIDENCE + (MAX_OPTICAL_CONFIDENCE - MIN_OPTICAL_CONFIDENCE) * closeness**0.7

@@ -8,9 +8,12 @@ what it is, so on its own it must not reach the escalation threshold.
 
 import math
 
+import pytest
+
 from ocu.core.aerial import (
     MAX_OPTICAL_CONFIDENCE,
-    MAX_RANGE_M,
+    MAX_SLANT_RANGE_M,
+    MAX_YAW_RATE_FOR_SIGHTING_DEG_S,
     MAX_VISIBLE_BURIAL_M,
     scout_sighting,
 )
@@ -28,8 +31,8 @@ def surface_object(x: float, y: float, depth: float = 0.03) -> BuriedTarget:
     return BuriedTarget(x, y, depth, 120.0, True, 0.2, "test")
 
 
-def sees(rig, target, x=0.0, y=0.0, agl=20.0, heading=0.0) -> float:
-    return scout_sighting(rig, target, x, y, agl, heading)
+def sees(rig, target, x=0.0, y=0.0, agl=20.0, heading=0.0, yaw_rate=0.0) -> float:
+    return scout_sighting(rig, target, x, y, agl, heading, yaw_rate)
 
 
 def test_a_surface_object_ahead_in_view_is_seen():
@@ -58,7 +61,9 @@ def test_directly_beneath_is_below_the_camera_view():
 
 def test_too_far_to_resolve_is_not_seen():
     rig = open_rig()
-    assert sees(rig, surface_object(0.0, MAX_RANGE_M + 5.0), agl=40.0) == 0.0
+    reach = math.sqrt(MAX_SLANT_RANGE_M**2 - 20.0**2)  # across the ground, from 20 m up
+    assert sees(rig, surface_object(0.0, reach - 3.0), agl=20.0) > 0.0
+    assert sees(rig, surface_object(0.0, reach + 3.0), agl=20.0) == 0.0
 
 
 def test_something_buried_is_invisible_to_a_camera():
@@ -70,7 +75,7 @@ def test_something_buried_is_invisible_to_a_camera():
 def test_nearer_is_surer():
     rig = open_rig()
     near = sees(rig, surface_object(0.0, 32.0))
-    far = sees(rig, surface_object(0.0, 62.0))
+    far = sees(rig, surface_object(0.0, 46.0))
     assert near > far > 0.0
 
 
@@ -102,7 +107,7 @@ def test_a_scout_high_enough_looks_over_the_same_trees():
         for cy in range(int(12.0 / CELL_SIZE_M), int(16.0 / CELL_SIZE_M)):
             world.set_cell((cx, cy), Terrain.TREE)
     rig = CameraRig(world)
-    assert sees(rig, surface_object(0.0, 70.0), agl=40.0) > 0.0
+    assert sees(rig, surface_object(0.0, 40.0), agl=30.0) > 0.0
 
 
 def test_height_is_held_over_the_ground_not_over_a_datum():
@@ -121,3 +126,22 @@ def test_the_line_of_sight_test_is_the_one_the_picture_uses():
         for cy in range(int(18.0 / CELL_SIZE_M), int(20.0 / CELL_SIZE_M)):
             ridge._elevation[ridge._index((cx, cy))] = 12.0
     assert not CameraRig(ridge).line_of_sight(0.0, 0.0, 10.0, 0.0, 40.0, 0.5)
+
+
+def test_the_range_is_what_the_sensor_can_resolve_not_a_round_number():
+    """Four pixels on a quarter-metre object, through an 84 degree lens onto a
+    1280 pixel sensor: about 55 m of slant range."""
+    from ocu.core.camera import SCOUT_HFOV_DEG
+
+    pixel = math.radians(SCOUT_HFOV_DEG) / 1280
+    assert MAX_SLANT_RANGE_M == pytest.approx(0.25 / (4 * pixel))
+    assert 50.0 < MAX_SLANT_RANGE_M < 60.0
+
+
+def test_a_camera_being_swung_fast_sees_nothing_it_sweeps_over():
+    rig = open_rig()
+    target = surface_object(0.0, 35.0)
+    assert sees(rig, target, yaw_rate=0.0) > 0.0
+    assert sees(rig, target, yaw_rate=MAX_YAW_RATE_FOR_SIGHTING_DEG_S - 1.0) > 0.0
+    assert sees(rig, target, yaw_rate=MAX_YAW_RATE_FOR_SIGHTING_DEG_S + 5.0) == 0.0
+    assert sees(rig, target, yaw_rate=-(MAX_YAW_RATE_FOR_SIGHTING_DEG_S + 5.0)) == 0.0

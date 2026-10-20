@@ -1010,18 +1010,31 @@ def _plant_surface_object_ahead_of(window, uid, distance_m=40.0):
 
     from ocu.core.targets import BuriedTarget
 
+    from ocu.core.aerial import scout_sighting
     from ocu.core.terrain import IMPASSABLE
 
     _settle_heading(window, uid)
     scout = window.flight_director.aircraft[uid]
     heading = math.radians(scout.heading)
-    # An object under a tree or in a hole cannot be seen from above whatever
-    # the scout does, so plant it on ground that is open to the sky.
-    for distance in (distance_m, distance_m - 5, distance_m + 5, distance_m - 10, distance_m - 15):
-        x, y = scout.x + math.sin(heading) * distance, scout.y + math.cos(heading) * distance
-        if window.terrain.classify(x, y) not in IMPASSABLE:
+    # What is under test is what happens to a sighting, so plant the object
+    # somewhere this scout can actually see: open to the sky, in its picture,
+    # and as far ahead as the camera allows.
+    forward = (math.sin(heading), math.cos(heading))
+    right = (math.cos(heading), -math.sin(heading))
+    target = None
+    for distance in (distance_m, 36.0, 32.0, 44.0, 28.0, 40.0, 48.0, 25.0):
+        for lateral in (0.0, 4.0, -4.0, 8.0, -8.0):
+            x = scout.x + forward[0] * distance + right[0] * lateral
+            y = scout.y + forward[1] * distance + right[1] * lateral
+            if window.terrain.classify(x, y) in IMPASSABLE:
+                continue
+            candidate = BuriedTarget(x, y, 0.02, 90.0, True, 0.1, "planted")
+            if scout_sighting(window.camera_rig, candidate, scout.x, scout.y, scout.z, scout.heading) > 0.0:
+                target = candidate
+                break
+        if target is not None:
             break
-    target = BuriedTarget(x, y, 0.02, 90.0, True, 0.1, "planted")
+    assert target is not None, "nowhere in this scout's picture to plant an object"
     window.target_field.targets.append(target)
     return target
 
@@ -1741,3 +1754,59 @@ def test_the_scale_bar_stays_a_readable_length_at_every_zoom(app):
         xs = [x for x in range(900) if image.pixelColor(x, row).alpha() > 0]
         assert xs, scale
         assert 30 <= xs[-1] - xs[0] <= 160, (scale, xs[-1] - xs[0])
+
+
+# --- where a scout's camera points ----------------------------------------------------------
+
+
+def _angle_between(a, b):
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def test_scouts_on_station_keep_facing_the_formation_bearing_while_the_rover_turns(app):
+    """Following a slot round a turn is a sideways move, and a multirotor does
+    not have to point where it is moving. Measured before: an outer scout
+    yawed from 8 to 122 degrees through a 13 degree turn of the rover."""
+    window = MainWindow()
+    window.pace_slider.setValue(70)
+    _form_up(window)
+    fd = window.flight_director
+    window._on_destination_placed(-40.0, 40.0)  # a real turn
+    for _ in range(int(60.0 / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        rover = window.units["rover"].pose
+        for uid in TRICOPTERS:
+            state = fd.aircraft[uid]
+            if state.mode.value != "STATION":
+                continue
+            wanted = (rover.heading + state.bearing_deg) % 360.0
+            assert _angle_between(state.heading, wanted) < 35.0, (uid, state.heading, wanted)
+
+
+def test_a_scout_does_not_report_what_is_behind_it(app):
+    import math
+
+    from ocu.core.targets import BuriedTarget
+
+    window = MainWindow()
+    _form_up(window)
+    reports = []
+    original = window._report_detection
+
+    def spy(buried, **kwargs):
+        reports.append((buried.truth_class, kwargs.get("source")))
+        return original(buried, **kwargs)
+
+    window._report_detection = spy
+    for uid in TRICOPTERS:
+        state = window.flight_director.aircraft[uid]
+        behind = math.radians(state.heading + 180.0)
+        window.target_field.targets.append(
+            BuriedTarget(
+                state.x + math.sin(behind) * 30.0, state.y + math.cos(behind) * 30.0,
+                0.02, 90.0, True, 0.1, "behind",
+            )
+        )
+    _drive(window, 3.0)
+    assert ("behind", "aircraft") not in reports

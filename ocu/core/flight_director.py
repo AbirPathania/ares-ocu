@@ -1029,11 +1029,18 @@ class FlightDirector:
             body.step_toward(target_x, target_y, dt_s, feedforward=self._rover_velocity)
             body.step_altitude(state.commanded_altitude_m, dt_s)
 
-            # Facing. Moving to the slot it faces where it is going; holding
-            # it, the formation bearing, which is what its camera is for.
+            # Facing. Joining the formation it faces where it is going. Once on
+            # station it faces the formation bearing and nothing else: the
+            # rover turning swings every slot, an aircraft following its slot
+            # round is moving sideways, and a multirotor does not have to point
+            # where it is moving. Measured before this: a scout on the outer
+            # slot yawed from 8 to 122 degrees in two seconds through a 13
+            # degree turn of the rover, and swept its camera across ground
+            # behind the formation.
             rel_vx = body.vx - self._rover_velocity[0]
             rel_vy = body.vy - self._rover_velocity[1]
-            if math.hypot(rel_vx, rel_vy) > COURSE_FACING_SPEED_MS:
+            joining = state.mode == AircraftMode.TRANSITING
+            if joining and math.hypot(rel_vx, rel_vy) > COURSE_FACING_SPEED_MS:
                 body.step_heading(math.degrees(math.atan2(rel_vx, rel_vy)) % 360.0, dt_s)
             else:
                 body.step_heading((rover_heading + state.bearing_deg) % 360.0, dt_s)

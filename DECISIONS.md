@@ -1009,3 +1009,25 @@ speed readout and everything else are unchanged.
 The scroll wheel and a trackpad pinch zoom between 2.5 and 20 px per metre about
 the pointer, so the operator can come in on a detail without losing the wide
 picture. The scale bar picks a round length that stays readable at any zoom.
+
+## What a scout's camera points at, and how far it can see
+
+A scout reported objects 35 to 55 m *behind* the formation while the whole
+formation faced and moved away from them. Two causes, both fixed.
+
+**Facing.** An aircraft following its slot faced its direction of travel. When
+the rover turns, every slot swings, and an outer scout follows its slot
+sideways at several metres a second; the "face where you are going" rule then
+yawed it round. Measured: 8 to 122 degrees in two seconds through a 13 degree
+turn of the rover, with the camera sweeping across ground behind the formation.
+Course-facing now applies only while joining the formation. On station an
+aircraft faces the formation bearing, as a camera platform should, and a
+multirotor flying sideways does not have to point where it is going.
+
+**Range.** The sighting range was a round 90 m. It is now what the sensor can
+resolve: a 1280 pixel sensor across the 84 degree lens, four pixels to tell a
+quarter-metre object from the ground, which is 55 m of slant range and a little
+under 50 m across the ground from scout altitude (`aerial.MAX_SLANT_RANGE_M`,
+derived, not typed). The sensor and object sizes are assumptions, written down
+where they are used. A camera yawing faster than 20 degrees a second also sees
+nothing it sweeps over.

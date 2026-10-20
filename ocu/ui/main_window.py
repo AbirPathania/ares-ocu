@@ -1241,7 +1241,8 @@ class MainWindow(QMainWindow):
                 continue
             for buried in self.target_field.targets:
                 seen = scout_sighting(
-                    self.camera_rig, buried, state.x, state.y, state.z, state.heading
+                    self.camera_rig, buried, state.x, state.y, state.z, state.heading,
+                    state.body.yaw_rate,
                 )
                 if seen <= 0.0:
                     continue
