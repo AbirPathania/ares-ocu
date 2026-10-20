@@ -912,7 +912,7 @@ sensor model resolves them, which is the sensor behaving, not a bug.
 GO TO on the map, then a click, sends the rover to a point. It is the existing
 navigation, not a second one: the destination becomes a one-point waypoint
 list in place of the lanes, with no lane corridor on the planner, and the
-sweep's progress is parked so CLEAR DESTINATION resumes it. Refused when the
+sweep's progress is parked only for a destination set before deployment. Refused when the
 rover is under manual control, outside the operating area, or outside a
 configured geofence. Aircraft keep station on the rover as they always do, so
 the whole formation arrives together.
@@ -987,3 +987,12 @@ Known limit: a destination inside or behind dense forest can take the rover a lo
 time to approach, because it explores the forest edge one frontier at a time.
 Measured on this seed, one such point was still unreached after 400 s at the
 survey crawl; the other seven drives tried arrived, none entered an obstacle.
+
+## Clearing a destination holds position
+
+Clearing a destination used to resume the lane sweep, which drove the rover
+back across the ground to the lane point it had left. Clearing is the operator
+withdrawing an instruction, not giving a new one, so nothing is resumed now:
+the rover stops where it is (HOLDING POSITION) until it is given a new
+destination or sent home. The one exception is a destination set and cleared
+before the mission was deployed, where the sweep is still the plan.

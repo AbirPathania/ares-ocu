@@ -1361,21 +1361,87 @@ def test_a_destination_set_before_deploying_is_the_job_the_rover_starts_on(app):
     assert not any("Sweeping" in m for m in messages)
 
 
-def test_clearing_a_destination_picks_the_lane_sweep_up_again(app):
+def test_clearing_a_destination_leaves_the_rover_where_it_is(app):
+    """Reaching a destination and clearing it is not an instruction to go back to
+    the lanes, or home. Measured before the fix: it drove back across the
+    ground to the lane point it had left."""
+    import math
+
     window = MainWindow()
+    window.pace_slider.setValue(60)
     window._on_play_clicked()
     _drive(window, 10.0)
-    lane = window._current_lane
-    waypoint = window._waypoint_index
-    window._on_destination_placed(30.0, 30.0)
-    assert window._current_lane == "DESTINATION" and window._destination is not None
-    _drive(window, 5.0)
+    window._on_destination_placed(-20.0, -15.0)
+    assert _drive_until_settled(window) == "reached"
+    _drive(window, 5.0)  # it brakes to a stop at the point
+    here = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+
     window._on_destination_cleared()
-    assert window._destination is None
-    assert window._waypoint_index == waypoint
-    assert window._current_lane == lane
-    assert window.phase_label.text().startswith("SWEEPING")
-    assert window.map_view._destination is None
+    assert window._destination is None and window.map_view._destination is None
+    assert window.phase_label.text() == "HOLDING POSITION"
+    _drive(window, 60.0)
+    after = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+    assert math.hypot(after[0] - here[0], after[1] - here[1]) < 0.3, "it stayed put"
+    assert window.flight_director.rover_body.speed_ms < 0.05
+    assert window.flight_director.goal is None and window.map_view._planned_path == []
+
+
+def test_clearing_a_destination_part_way_there_stops_the_rover_where_it_is(app):
+    import math
+
+    window = MainWindow()
+    window.pace_slider.setValue(60)
+    window._on_play_clicked()
+    window._on_destination_placed(40.0, 50.0)
+    _drive(window, 20.0)
+    assert window._destination_state == "enroute"
+    window._on_destination_cleared()
+    _drive(window, 10.0)
+    stopped = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+    _drive(window, 30.0)
+    later = (window.units["rover"].pose.x, window.units["rover"].pose.y)
+    assert math.hypot(later[0] - stopped[0], later[1] - stopped[1]) < 0.3
+
+
+def test_after_clearing_a_destination_a_new_one_can_be_set_and_is_driven_to(app):
+    import math
+
+    window = MainWindow()
+    window.pace_slider.setValue(60)
+    window._on_play_clicked()
+    window._on_destination_placed(-20.0, -15.0)
+    assert _drive_until_settled(window) == "reached"
+    window._on_destination_cleared()
+    window._on_destination_placed(-35.0, -30.0)
+    assert window.phase_label.text() in EN_ROUTE
+    assert _drive_until_settled(window) == "reached"
+    rover = window.units["rover"].pose
+    assert math.hypot(rover.x + 35.0, rover.y + 30.0) < 1.5
+
+
+def test_after_clearing_a_destination_return_to_base_still_brings_the_rover_home(app):
+    import math
+
+    window = MainWindow()
+    window.pace_slider.setValue(70)
+    window._on_play_clicked()
+    window._on_destination_placed(-20.0, -15.0)
+    assert _drive_until_settled(window) == "reached"
+    window._on_destination_cleared()
+    _drive(window, 5.0)
+    window._on_return_to_base()
+    assert window.phase_label.text() == "RETURNING TO BASE"
+    _drive(window, 120.0)
+    rover = window.units["rover"].pose
+    assert math.hypot(rover.x, rover.y) < 2.0
+
+
+def test_clearing_a_destination_set_before_deploying_restores_the_sweep(app):
+    window = MainWindow()
+    window._on_destination_placed(15.0, 15.0)
+    window._on_destination_cleared()
+    window._on_play_clicked()
+    assert window.phase_label.text() in ("FIRST SCAN",) or window.phase_label.text().startswith("SWEEPING")
 
 
 def test_a_destination_outside_the_operating_area_is_refused(app):

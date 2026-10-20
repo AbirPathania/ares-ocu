@@ -245,6 +245,7 @@ class MainWindow(QMainWindow):
         self._destination_state = ""  # "enroute", "reached" or "unreachable"
         self._route_announced = False
         self._parked_sweep: tuple[list, int, str | None] | None = None
+        self._holding_position = False  # a destination was cleared: stay put
         self._last_replan_s = -1e9
         self._last_replan_waypoint = -1
         self._last_downlink_s = 0.0
@@ -766,6 +767,8 @@ class MainWindow(QMainWindow):
                 self._destination_state,
                 "GOING TO DESTINATION" if director.route_known else "EXPLORING TO DESTINATION",
             )
+        elif self._holding_position:
+            rover_task = "HOLDING POSITION"
         elif self._waypoint_index >= len(self._mission_waypoints):
             rover_task = "SWEEP COMPLETE"
         elif self._current_lane is None:
@@ -918,6 +921,7 @@ class MainWindow(QMainWindow):
             self._parked_sweep = (self._mission_waypoints, self._waypoint_index, self._current_lane)
         self._destination = (x, y)
         self._destination_state = "enroute"
+        self._holding_position = False
         self._route_announced = False
         self._mission_waypoints = [(x, y, DESTINATION_LANE)]
         self._waypoint_index = 0
@@ -938,6 +942,14 @@ class MainWindow(QMainWindow):
         self._refresh_status()
 
     def _on_destination_cleared(self) -> None:
+        """Let go of the destination. The rover stays where it is.
+
+        Clearing is the operator withdrawing an instruction, not giving a new
+        one, so nothing is resumed: not the lane sweep, which would drive the
+        rover back across the ground to wherever it left off, and not the way
+        home, which is its own command. It holds this position until it is told
+        otherwise, with a new destination or Return To Base.
+        """
         if self._destination is None:
             return
         now = self.mission_clock.clock_s
@@ -945,16 +957,22 @@ class MainWindow(QMainWindow):
         self._destination_state = ""
         self.map_view.set_destination(None)
         parked, self._parked_sweep = self._parked_sweep, None
-        if parked is not None:
-            self._mission_waypoints, self._waypoint_index, self._current_lane = parked
-        if self._mission_started() and self._waypoint_index < len(self._mission_waypoints):
-            self.event_log.log(now, "Destination cleared, resuming the lane sweep")
-            self._begin_autonomous_sweep()
-        else:
+        if not self._mission_started():
+            # Never deployed: the sweep it would have flown is still the plan.
+            if parked is not None:
+                self._mission_waypoints, self._waypoint_index, self._current_lane = parked
             self.event_log.log(now, "Destination cleared")
+        else:
+            self._holding_position = True
+            self._waypoint_index = len(self._mission_waypoints)
             self.flight_director.goal = None
             self.flight_director.path = []
-            self.map_view.set_planned_path([], None)
+            self.flight_director._path_cells = []
+            self.flight_director.route_known = False
+            self.event_log.log(
+                now, "Destination cleared: holding position until given a new one or sent home"
+            )
+        self.map_view.set_planned_path([], None)
         self._refresh_status()
 
     def _on_destination_event(self, event: str) -> None:
@@ -1452,6 +1470,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self.event_log.log(self.mission_clock.clock_s, "RETURN TO BASE: rover returning to start point")
+        self._refresh_status()
 
     def _on_guided_stage_changed(self, stage: str) -> None:
         if self.selected_unit_id in TRICOPTER_IDS:
@@ -1659,6 +1678,7 @@ class MainWindow(QMainWindow):
         self._destination = None
         self._destination_state = ""
         self._parked_sweep = None
+        self._holding_position = False
         self.map_view.set_destination(None)
         self._last_replan_s = -1e9
         self._last_replan_waypoint = -1
