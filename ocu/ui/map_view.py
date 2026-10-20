@@ -58,7 +58,15 @@ from ocu.ui.icons import (
 )
 from ocu.ui.launch_console import short_label
 
-SCALE_PX_PER_M = 9.0
+#: How many pixels a metre is drawn as. The default is half what it was: a
+#: rover at speed crossed the old map too quickly to read, and showing twice
+#: the ground in the same window is the honest way to slow the picture, since
+#: the vehicle's position on screen still is its position. It can be changed
+#: with the scroll wheel or a pinch.
+MAP_SCALE_DEFAULT = 4.5
+MAP_SCALE_MIN = 2.5
+MAP_SCALE_MAX = 20.0
+MAP_ZOOM_PER_NOTCH = 1.15
 TRAIL_MAX_POINTS = 240
 
 #: The band the detection array actually covers, drawn at the width it
@@ -198,6 +206,7 @@ class MapView(QWidget):
         self._bearing_deg = 0.0
         self._dragging_compass = False
         self._cursor_world: tuple[float, float] | None = None
+        self._scale = MAP_SCALE_DEFAULT
         # Where the operator has sent the rover, and whether the next click on
         # the map is going to set it.
         self._destination: tuple[float, float] | None = None
@@ -411,9 +420,49 @@ class MapView(QWidget):
             f"▲ LAUNCH  {ready} READY" if ready else "▲ BAY EMPTY"
         )
 
+    @property
+    def scale(self) -> float:
+        """Pixels per metre."""
+        return self._scale
+
+    def set_scale(self, scale: float, anchor: QPointF | None = None) -> None:
+        """Zoom, keeping the ground under `anchor` (the pointer, by default the
+        middle of the view) where it is."""
+        scale = max(MAP_SCALE_MIN, min(MAP_SCALE_MAX, float(scale)))
+        if scale == self._scale:
+            return
+        if anchor is None:
+            anchor = QPointF(self.width() / 2.0, self.height() / 2.0)
+        wx, wy = self._to_world(anchor)
+        self._scale = scale
+        self._pan = QPointF(
+            anchor.x() - wx * scale - self.width() / 2.0,
+            anchor.y() + wy * scale - self.height() / 2.0,
+        )
+        # Everything cached was drawn at the old scale.
+        self._cloud_dirty = True
+        self._grid_layer = None
+        self._fresh_layer = None
+        self._quiet_until_s = max(self._quiet_until_s, FOLLOW_QUIET_S / 2.0)
+        self.update()
+
+    def wheelEvent(self, event) -> None:
+        notches = event.angleDelta().y() / 120.0
+        if notches:
+            self.set_scale(self._scale * MAP_ZOOM_PER_NOTCH**notches, event.position())
+        event.accept()
+
+    def event(self, event) -> bool:
+        from PySide6.QtCore import QEvent
+
+        if event.type() == QEvent.NativeGesture and event.gestureType() == Qt.ZoomNativeGesture:
+            self.set_scale(self._scale * (1.0 + event.value()), event.position())
+            return True
+        return super().event(event)
+
     def focus_on(self, x: float, y: float) -> None:
         """Center the view on a world coordinate, used when a threat is picked."""
-        self._pan = QPointF(-x * SCALE_PX_PER_M, y * SCALE_PX_PER_M)
+        self._pan = QPointF(-x * self._scale, y * self._scale)
         self.update()
 
     def clear(self) -> None:
@@ -635,11 +684,11 @@ class MapView(QWidget):
 
     def _to_screen(self, x: float, y: float) -> QPointF:
         c = self._center()
-        return QPointF(c.x() + x * SCALE_PX_PER_M, c.y() - y * SCALE_PX_PER_M)
+        return QPointF(c.x() + x * self._scale, c.y() - y * self._scale)
 
     def _to_world(self, px: QPointF) -> tuple[float, float]:
         c = self._center()
-        return ((px.x() - c.x()) / SCALE_PX_PER_M, -(px.y() - c.y()) / SCALE_PX_PER_M)
+        return ((px.x() - c.x()) / self._scale, -(px.y() - c.y()) / self._scale)
 
     def _rover_pose(self) -> dict:
         return self._drawn_pose("rover")
@@ -784,7 +833,7 @@ class MapView(QWidget):
         if not self._swept:
             return
         pen = QPen(QColor(122, 196, 236, 52))
-        pen.setWidthF(max(SWEPT_WIDTH_M * SCALE_PX_PER_M, 1.5))
+        pen.setWidthF(max(SWEPT_WIDTH_M * self._scale, 1.5))
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(pen)
@@ -896,7 +945,7 @@ class MapView(QWidget):
         the limit without pretending the beam can be seen."""
         rover = self._rover_pose()
         centre = self._to_screen(rover["x"], rover["y"])
-        radius_px = LIDAR_RANGE_M * SCALE_PX_PER_M
+        radius_px = LIDAR_RANGE_M * self._scale
         pen = QPen(QColor(122, 196, 236, 34))
         pen.setWidth(1)
         painter.setPen(pen)
@@ -946,21 +995,21 @@ class MapView(QWidget):
         pen = QPen(color)
         pen.setWidth(1)
         painter.setPen(pen)
-        step = SCALE_PX_PER_M * spacing_m
+        step = self._scale * spacing_m
         c = self._center()
         painter.setFont(QFont("Menlo", 7))
         x = c.x() % step
         while x < self.width():
             painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
             if labelled:
-                world_x = (x - c.x()) / SCALE_PX_PER_M
+                world_x = (x - c.x()) / self._scale
                 painter.drawText(QRectF(x + 3, 2, 60, 11), Qt.AlignLeft, f"{world_x:+.0f}E")
             x += step
         y = c.y() % step
         while y < self.height():
             painter.drawLine(QPointF(0, y), QPointF(self.width(), y))
             if labelled:
-                world_y = -(y - c.y()) / SCALE_PX_PER_M
+                world_y = -(y - c.y()) / self._scale
                 painter.drawText(QRectF(3, y + 2, 60, 11), Qt.AlignLeft, f"{world_y:+.0f}N")
             y += step
 
@@ -981,7 +1030,7 @@ class MapView(QWidget):
                 continue
             center = self._to_screen(feature["x"], feature["y"])
             for ring in range(3):
-                radius_px = (feature["r"] - ring * 2.5) * SCALE_PX_PER_M
+                radius_px = (feature["r"] - ring * 2.5) * self._scale
                 if radius_px > 4:
                     painter.drawEllipse(center, radius_px, radius_px)
 
@@ -991,7 +1040,7 @@ class MapView(QWidget):
         approaches it."""
         rover = self._rover_pose()
         center = self._to_screen(rover["x"], rover["y"])
-        radius_px = TETHER_LIMIT_M * SCALE_PX_PER_M
+        radius_px = TETHER_LIMIT_M * self._scale
 
         pen = QPen(TETHER_COLOR)
         pen.setWidth(1)
@@ -1298,8 +1347,9 @@ class MapView(QWidget):
         painter.drawText(QRectF(x - 8, y - 30, 16, 12), Qt.AlignCenter, "N")
 
     def _draw_scale_bar(self, painter: QPainter) -> None:
-        bar_m = 10.0
-        bar_px = bar_m * SCALE_PX_PER_M
+        # The longest round length that still fits a comfortable bar.
+        bar_m = next((m for m in (100.0, 50.0, 20.0, 10.0, 5.0, 2.0, 1.0) if m * self._scale <= 150.0), 1.0)
+        bar_px = bar_m * self._scale
         x0, y0 = 16.0, self.height() - 20.0
         pen = QPen(QColor("#7B8794"), 2)
         painter.setPen(pen)

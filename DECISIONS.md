@@ -996,3 +996,16 @@ withdrawing an instruction, not giving a new one, so nothing is resumed now:
 the rover stops where it is (HOLDING POSITION) until it is given a new
 destination or sent home. The one exception is a destination set and cleared
 before the mission was deployed, where the sweep is still the plan.
+
+## The map is drawn at half its old scale, and zooms
+
+The rover looked too fast on the map. Changing the vehicle's speed would have
+changed the physics; slowing only the drawn icon would have put it somewhere
+other than where it is. The honest way to make a picture slower is to show more
+ground in the same window, so the map is now 4.5 px per metre where it was 9: a
+rover at 4 m/s crosses the screen at the speed a 2 m/s rover used to. Position,
+speed readout and everything else are unchanged.
+
+The scroll wheel and a trackpad pinch zoom between 2.5 and 20 px per metre about
+the pointer, so the operator can come in on a detail without losing the wide
+picture. The scale bar picks a round length that stays readable at any zoom.

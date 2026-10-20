@@ -1643,3 +1643,101 @@ def test_the_rover_announces_the_route_once_it_has_seen_all_the_way(app):
     window._on_destination_placed(-30.0, -25.0)
     assert _drive_until_settled(window) == "reached"
     assert sum("Route to the destination found" in m for m in messages) == 1
+
+
+# --- the scale of the map --------------------------------------------------------------------
+
+
+def test_the_map_is_drawn_at_half_its_old_scale_so_a_fast_rover_looks_half_as_fast(app):
+    from ocu.core.constants import ROVER_TOP_SPEED_MS
+    from ocu.ui.map_view import MAP_SCALE_DEFAULT, MapView
+
+    OLD_SCALE = 9.0
+    assert MAP_SCALE_DEFAULT == OLD_SCALE / 2
+    view = MapView()
+    view.resize(900, 700)
+    view.set_unit_pose("rover", 0.0, 0.0, 0.0, 0.0)
+    before = view._to_screen(0.0, 0.0)
+    after = view._to_screen(0.0, ROVER_TOP_SPEED_MS)  # one second at top speed
+    pixels_per_second = abs(after.y() - before.y())
+    assert pixels_per_second == pytest.approx(ROVER_TOP_SPEED_MS * OLD_SCALE / 2)
+    assert view.scale == MAP_SCALE_DEFAULT
+
+
+def test_zooming_keeps_the_ground_under_the_pointer_where_it_was(app):
+    from PySide6.QtCore import QPointF
+
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.resize(900, 700)
+    pointer = QPointF(640.0, 210.0)
+    ground = view._to_world(pointer)
+    view.set_scale(view.scale * 2.0, pointer)
+    after = view._to_world(pointer)
+    assert after[0] == pytest.approx(ground[0]) and after[1] == pytest.approx(ground[1])
+    # And a position survives the round trip at the new scale.
+    point = view._to_screen(12.0, -7.0)
+    back = view._to_world(point)
+    assert back == pytest.approx((12.0, -7.0))
+
+
+def test_the_zoom_has_limits_either_way(app):
+    from ocu.ui.map_view import MAP_SCALE_MAX, MAP_SCALE_MIN, MapView
+
+    view = MapView()
+    view.set_scale(1000.0)
+    assert view.scale == MAP_SCALE_MAX
+    view.set_scale(0.01)
+    assert view.scale == MAP_SCALE_MIN
+
+
+def test_the_scroll_wheel_zooms_the_map(app):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.resize(900, 700)
+    start = view.scale
+    pos = QPointF(450.0, 350.0)
+    up = QWheelEvent(pos, pos, QPoint(0, 0), QPoint(0, 120), Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+    view.wheelEvent(up)
+    assert view.scale > start
+    down = QWheelEvent(pos, pos, QPoint(0, 0), QPoint(0, -240), Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+    view.wheelEvent(down)
+    assert view.scale < start
+
+
+def test_zooming_redraws_everything_that_was_cached_at_the_old_scale(app):
+    from ocu.ui.map_view import MapView
+
+    view = MapView()
+    view.resize(900, 700)
+    view.grab()
+    assert view._grid_layer is not None
+    view._cloud_dirty = False
+    view.set_scale(view.scale * 1.5)
+    assert view._cloud_dirty and view._grid_layer is None and view._fresh_layer is None
+
+
+def test_the_scale_bar_stays_a_readable_length_at_every_zoom(app):
+    from PySide6.QtGui import QImage, QPainter
+
+    from ocu.ui.map_view import MAP_SCALE_MAX, MAP_SCALE_MIN, MapView
+
+    view = MapView()
+    view.resize(900, 700)
+    for scale in (MAP_SCALE_MIN, 4.5, 9.0, MAP_SCALE_MAX):
+        view.set_scale(scale)
+        image = QImage(900, 700, QImage.Format_ARGB32)
+        image.fill(0)
+        painter = QPainter(image)
+        view._draw_scale_bar(painter)
+        painter.end()
+        # Find the bar's drawn length on its row.
+        row = 700 - 20
+        xs = [x for x in range(900) if image.pixelColor(x, row).alpha() > 0]
+        assert xs, scale
+        assert 30 <= xs[-1] - xs[0] <= 160, (scale, xs[-1] - xs[0])
