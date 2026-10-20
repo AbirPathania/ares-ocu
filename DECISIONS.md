@@ -1136,3 +1136,23 @@ three hundred of. They are the one part of the scene that does not look photogra
 Without the downloads the renderer draws its procedural rocks, bushes, grass and ground
 as before, and the application is none the worse for it. Costs: about 3 s to load, and a
 frame is 10 to 12 ms on an Apple M1.
+
+## Low battery: the vehicles act without being told
+
+- **An aircraft below 8%** goes home to dock by itself (`TRICOPTER_AUTO_DOCK_BATTERY_PCT`).
+  It is recalled, and if it was on the sticks the sticks are taken back. It cannot dock onto a
+  moving rover, so a rover that is navigating stands still until nothing is left to recover,
+  then carries on with its mission.
+- **The rover below 12%** returns to base at once (`ROVER_AUTO_RETURN_BATTERY_PCT`). It gives up
+  the sticks, drops its destination, and every aircraft still out is recalled to come with it.
+  Higher than the aircraft's, because the way home is the long one and the rover is the one
+  vehicle that cannot be recovered.
+- **An aircraft is not launched below 15%.** It would be recalled as soon as it lifted off, and
+  the console says which one was left in the bay and why.
+- **The operator is told in two places:** a red line in the event log, and a notice over the map
+  that stays until it has been read. Each vehicle is acted on once; an aircraft that goes back on
+  charge is armed again.
+- The way home was a straight line that ignored everything in it. It is now driven like any other
+  route, over ground that has been seen and steered round obstacles, and if there is no clear way
+  home the rover stops and says so instead of driving at the first rock.
+- The thresholds are the team's numbers, not the baseline's; they are named constants.

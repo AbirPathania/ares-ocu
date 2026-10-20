@@ -184,3 +184,21 @@ CONTROL_MODES = ("MANUAL", "GUIDED", "AUTO", "HOLD")
 LINK_STATES = ("CONNECTED", "DEGRADED", "LOST")
 
 FORMATION_PATTERNS = ("vee", "line", "column")
+
+
+# --- Low battery: what the vehicles do without being told ------------------
+
+#: An aircraft below this charge goes home to dock by itself. The margin is for
+#: the flight back, which is short (it flies to the rover, not to the base), and
+#: for the minutes a docking can take while the rover is brought to a stop.
+TRICOPTER_AUTO_DOCK_BATTERY_PCT = 8.0
+
+#: The rover below this charge drives home at once, abandoning whatever it was
+#: doing, with any aircraft still out recalled to come with it. Higher than the
+#: aircraft's, because the way home is a long one and the rover is the one thing
+#: nobody can recover.
+ROVER_AUTO_RETURN_BATTERY_PCT = 12.0
+
+#: An aircraft is not launched below this: it would be recalled as soon as it
+#: lifted off. A little over the dock threshold so a launch is worth making.
+TRICOPTER_MIN_LAUNCH_BATTERY_PCT = 15.0

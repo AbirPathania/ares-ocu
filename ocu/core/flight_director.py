@@ -288,6 +288,10 @@ class FlightDirector:
         #: Set while the operator has the mission on hold: the rover stops
         #: where it is, and the aircraft keep station on it.
         self.hold_navigation = False
+        #: Set when an aircraft is on its way down and cannot dock onto a rover
+        #: that is moving: the rover stands still until nothing is left to
+        #: recover, and then carries on.
+        self.hold_for_recovery = False
         self.lane_from: tuple[float, float] | None = None
         self._costmap = None
         self._plan_failures = 0
@@ -426,6 +430,7 @@ class FlightDirector:
         self._path_cells = []
         self.goal = None
         self.hold_navigation = False
+        self.hold_for_recovery = False
         self.lane_from = None
         self.route_known = False
         self._explore_visited = []
@@ -553,6 +558,21 @@ class FlightDirector:
             self.rover_body.vx = self.rover_body.vy = 0.0
         self.rover_mode = RoverMode.RETURNING
         self.rover_manual = ManualInput()
+        # The way home is driven like any other route: planned over ground that
+        # has been seen, and steered round whatever is in it. (Without a map to
+        # plan over, in a bare simulation, it is a straight line.)
+        self.goal = (base_x, base_y)
+        self.lane_from = None
+        self.explore = True
+        self.route_known = False
+        self._explore_visited = []
+        self._explore_ticks = 0
+        self._best_goal_distance = math.inf
+        self._stall_ticks = 0
+        self.path = []
+        self._path_cells = []
+        self._plan_failures = 0
+        self.plan_failed = False
         return self.recall()
 
     def _cell_of(self, body: KinematicBody) -> tuple[int, int]:
@@ -909,8 +929,14 @@ class FlightDirector:
             self._last_rover_xy = (body.x, body.y)
             return (body.x, body.y, body.heading)
 
-        if self.rover_mode == RoverMode.NAVIGATING:
-            if self.hold_navigation:
+        driving_home = self.rover_mode == RoverMode.RETURNING and self._costmap is not None and self.goal is not None
+        if self.rover_mode == RoverMode.NAVIGATING or driving_home:
+            if self.hold_for_recovery and not any(
+                a.mode in (AircraftMode.RETURNING, AircraftMode.HOLDING, AircraftMode.DOCKING)
+                for a in self.aircraft.values()
+            ):
+                self.hold_for_recovery = False
+            if self.hold_navigation or (self.hold_for_recovery and self.rover_mode == RoverMode.NAVIGATING):
                 body.halt(dt_s)
                 self._rover_speed_ms = body.speed_ms
                 self._rover_velocity = (body.vx, body.vy)
@@ -928,7 +954,11 @@ class FlightDirector:
                 body.halt(dt_s)
                 self._rover_speed_ms = body.speed_ms
                 self._last_rover_xy = (body.x, body.y)
-                events.append(("rover", "WAYPOINT_UNREACHABLE"))
+                if self.rover_mode == RoverMode.RETURNING:
+                    self.rover_mode = RoverMode.NORMAL
+                    events.append(("rover", "RETURN_BLOCKED"))
+                else:
+                    events.append(("rover", "WAYPOINT_UNREACHABLE"))
                 return (body.x, body.y, body.heading)
 
             if not self.path or self.goal is None:
@@ -989,7 +1019,11 @@ class FlightDirector:
                 self.goal = None
                 self.path = []
                 self._path_cells = []
-                events.append(("rover", "WAYPOINT_REACHED"))
+                if self.rover_mode == RoverMode.RETURNING:
+                    self.rover_mode = RoverMode.AT_BASE
+                    events.append(("rover", "AT_BASE"))
+                else:
+                    events.append(("rover", "WAYPOINT_REACHED"))
 
             self._rover_speed_ms = body.speed_ms
             self._rover_velocity = (body.vx, body.vy)

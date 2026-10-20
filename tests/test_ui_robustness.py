@@ -890,7 +890,7 @@ def test_the_top_bar_reads_what_the_rover_is_doing(app):
 
     window._on_play_clicked()
     assert window.phase_label.text() in ("FIRST SCAN", "SWEEPING LANE 1")
-    _drive(window, 5.0)
+    _drive(window, 25.0)  # far enough from base that going home is a journey
     assert window.phase_label.text().startswith("SWEEPING LANE")
 
     window._on_play_clicked()
@@ -1905,3 +1905,160 @@ def test_the_camera_feeds_can_be_drawn_on_the_gpu_without_blocking_the_interface
         time.sleep(0.02)
     assert window.camera_feeds["rover"]._frame is not None
     window.close()
+
+
+# --- low battery: the vehicles act on their own and say so ----------------------------------
+
+
+def test_an_aircraft_below_8_percent_goes_home_to_dock_by_itself_and_the_operator_is_told(app):
+    from ocu.core.constants import TRICOPTER_AUTO_DOCK_BATTERY_PCT
+
+    window = MainWindow()
+    messages = _capture_log(window)
+    _form_up(window)
+    window.units["tricopter-2"].battery_pct = TRICOPTER_AUTO_DOCK_BATTERY_PCT - 0.1
+    window._on_director_tick()
+    assert window.flight_director.mode_of("tricopter-2") in ("RETURNING", "HOLDING", "DOCKING")
+    assert any("LOW BATTERY" in m and "TRI-2" in m for m in messages)
+    assert any("TRI-2" in n["headline"] for n in window.map_view._notices)
+    # The others are untouched.
+    assert window.flight_director.mode_of("tricopter-1") == "STATION"
+    # And it ends up docked, with nobody asking.
+    for _ in range(int(120.0 / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        if window._docked_state["tricopter-2"]:
+            break
+    assert window._docked_state["tricopter-2"], "it docked"
+
+
+def test_the_rover_stands_still_while_an_aircraft_is_recovered_and_then_carries_on(app):
+    window = MainWindow()
+    _form_up(window)
+    window._on_destination_placed(-30.0, 40.0)
+    _drive(window, 8.0)
+    assert window.flight_director.rover_body.speed_ms > 0.2
+    window.units["tricopter-1"].battery_pct = 5.0
+    window._on_director_tick()
+    assert window.flight_director.hold_for_recovery
+    _drive(window, 4.0)
+    assert window.flight_director.rover_body.speed_ms < 0.05, "it stopped to take the aircraft aboard"
+    for _ in range(int(120.0 / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        if window._docked_state["tricopter-1"]:
+            break
+    _drive(window, 3.0)
+    assert not window.flight_director.hold_for_recovery
+    assert window.flight_director.goal is not None, "the mission was not abandoned"
+
+
+def test_the_rover_below_12_percent_returns_to_base_at_once_and_says_so(app):
+    import math
+
+    from ocu.core.constants import ROVER_AUTO_RETURN_BATTERY_PCT
+
+    window = MainWindow()
+    messages = _capture_log(window)
+    _form_up(window)
+    window.pace_slider.setValue(70)
+    window._on_destination_placed(-30.0, 40.0)
+    _drive(window, 10.0)
+    window.units["rover"].battery_pct = ROVER_AUTO_RETURN_BATTERY_PCT - 0.1
+    window._on_director_tick()
+    assert window.flight_director.rover_mode.value == "RETURNING"
+    assert window._destination is None, "whatever it was doing is set aside"
+    assert window.phase_label.text() == "RETURNING TO BASE"
+    assert any("LOW BATTERY" in m and "rover" in m.lower() for m in messages)
+    assert any("ROVER" in n["headline"] for n in window.map_view._notices)
+    assert all(window.flight_director.mode_of(u) in ("RETURNING", "HOLDING", "DOCKING", "DOCKED") for u in TRICOPTERS), (
+        "anything still out comes home with it"
+    )
+    for _ in range(int(240.0 / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        if window.flight_director.rover_mode.value == "AT_BASE":
+            break
+    rover = window.units["rover"].pose
+    assert window.flight_director.rover_mode.value == "AT_BASE"
+    assert math.hypot(rover.x, rover.y) < 1.5
+
+
+def test_the_rover_gives_up_the_sticks_when_its_battery_runs_low(app):
+    window = MainWindow()
+    window._on_play_clicked()
+    _drive(window, 2.0)
+    window._on_take_manual("rover")
+    assert window.control_authority.manual_holder == "rover"
+    window.units["rover"].battery_pct = 9.0
+    window._on_director_tick()
+    assert window.control_authority.manual_holder is None
+    assert window.flight_director.rover_mode.value == "RETURNING"
+
+
+def test_a_low_battery_is_acted_on_once_and_said_once(app):
+    window = MainWindow()
+    messages = _capture_log(window)
+    window._on_play_clicked()
+    window.units["rover"].battery_pct = 10.0
+    for _ in range(50):
+        window._on_director_tick()
+    assert sum("LOW BATTERY" in m for m in messages) == 1
+
+
+def test_a_battery_just_above_the_limit_is_not_yet_low(app):
+    window = MainWindow()
+    messages = _capture_log(window)
+    window._on_play_clicked()
+    window.units["rover"].battery_pct = 12.05
+    window._on_director_tick()
+    assert not any("LOW BATTERY" in m for m in messages)
+    assert window.flight_director.rover_mode.value != "RETURNING"
+    window.units["rover"].battery_pct = 11.99
+    window._on_director_tick()
+    assert any("LOW BATTERY" in m for m in messages)
+
+
+def test_a_docked_aircraft_on_a_low_charge_is_not_sent_anywhere(app):
+    window = MainWindow()
+    messages = _capture_log(window)
+    window._on_play_clicked()
+    window.units["tricopter-3"].battery_pct = 3.0
+    for _ in range(20):
+        window._on_director_tick()
+    assert not any("LOW BATTERY" in m for m in messages)
+
+
+def test_an_aircraft_with_too_little_charge_is_not_launched(app):
+    window = MainWindow()
+    messages = _capture_log(window)
+    window._on_play_clicked()
+    window.units["tricopter-1"].battery_pct = 10.0
+    console = window.context_panel.launch_console
+    window._on_bay_launch_requested()
+    console._on_stage_clicked()
+    console._on_launch_confirmed()
+    _drive(window, 5.0)
+    assert any("TRI-1 not launched" in m for m in messages)
+    assert window.flight_director.mode_of("tricopter-1") != "CLIMBING"
+    assert window._docked_state["tricopter-1"]
+
+
+def test_the_way_home_is_steered_round_whatever_is_in_it(app):
+    window = MainWindow()
+    window.pace_slider.setValue(window.pace_slider.maximum())
+    window._on_play_clicked()
+    window._on_destination_placed(60.0, -50.0)
+    assert _drive_until_settled(window) == "reached"
+    window._on_destination_cleared()
+    window._on_return_to_base()
+    closest = 1e9
+    for _ in range(int(240.0 / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        rover = window.units["rover"].pose
+        closest = min(closest, _clearance_to_objects(window.terrain, rover.x, rover.y))
+        if window.flight_director.rover_mode.value == "AT_BASE":
+            break
+    assert window.flight_director.rover_mode.value == "AT_BASE"
+    assert closest > 0.6, f"came within {closest:.2f} m of a real object on the way home"

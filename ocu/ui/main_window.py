@@ -39,9 +39,12 @@ from PySide6.QtWidgets import (
 from ocu.core.camera import SCOUT_HFOV_DEG, SCOUT_PITCH_DOWN_DEG
 from ocu.core.constants import (
     ALERT_CONFIDENCE_THRESHOLD,
+    ROVER_AUTO_RETURN_BATTERY_PCT,
     ROVER_MIN_COMMAND_SPEED_MS,
     ROVER_SURVEY_SPEED_MS,
     ROVER_TOP_SPEED_MS,
+    TRICOPTER_AUTO_DOCK_BATTERY_PCT,
+    TRICOPTER_MIN_LAUNCH_BATTERY_PCT,
 )
 from ocu.core.comms import GHOST, LCA, STANDARD, profile_for
 from ocu.core.control_authority import ControlAuthority
@@ -274,6 +277,8 @@ class MainWindow(QMainWindow):
         self.camera_rig = CameraRig(self.terrain)
         self._camera_turn = 0
         self._gpu_worker = None
+        #: Vehicles already acted on for a low battery, so it is done once and said once.
+        self._low_battery_actioned: set[str] = set()
         self._camera_timer = QTimer(self)
         self._camera_timer.setInterval(CAMERA_TICK_MS)
         self._camera_timer.timeout.connect(self._tick_cameras)
@@ -1384,6 +1389,7 @@ class MainWindow(QMainWindow):
                 self._endurance_text(self.selected_unit_id), flight_regime(speed, vertical)
             )
 
+        self._check_low_battery()
         self._refresh_all_rows()
 
     def _endurance_text(self, unit_id: str) -> str:
@@ -1401,6 +1407,79 @@ class MainWindow(QMainWindow):
         speed = state.body.speed_ms if state else 0.0
         vertical = state.body.vz if state else 0.0
         return format_endurance(tricopter_endurance_s(unit.battery_pct, speed, vertical))
+
+    # --- low battery: the vehicles act on their own, and say so ---
+
+    def _check_low_battery(self) -> None:
+        """An aircraft below its threshold goes home to dock; the rover below its
+        own drives home at once. Neither waits to be told, and both tell the
+        operator what they have done and why."""
+        rover = self.units["rover"]
+        director = self.flight_director
+
+        if (
+            rover.battery_pct < ROVER_AUTO_RETURN_BATTERY_PCT
+            and "rover" not in self._low_battery_actioned
+            and director.rover_mode not in (RoverMode.RETURNING, RoverMode.AT_BASE)
+        ):
+            self._low_battery_actioned.add("rover")
+            self._auto_return_rover(rover.battery_pct)
+
+        for unit_id in TRICOPTER_IDS:
+            unit = self.units[unit_id]
+            if self._docked_state.get(unit_id, True):
+                self._low_battery_actioned.discard(unit_id)  # back on charge: armed again
+                continue
+            if unit.battery_pct >= TRICOPTER_AUTO_DOCK_BATTERY_PCT or unit_id in self._low_battery_actioned:
+                continue
+            self._low_battery_actioned.add(unit_id)
+            self._auto_dock_aircraft(unit_id, unit.battery_pct)
+
+    def _auto_return_rover(self, battery_pct: float) -> None:
+        now = self.mission_clock.clock_s
+        if self.control_authority.manual_holder == "rover":
+            self._on_release_manual()
+        if self._destination is not None:
+            self._on_destination_cleared()
+        self._on_return_to_base()
+        self.event_log.log(
+            now,
+            f"LOW BATTERY: rover at {battery_pct:.0f}% (limit {ROVER_AUTO_RETURN_BATTERY_PCT:.0f}%). "
+            "Returning to base automatically",
+            level="threat",
+        )
+        self.map_view.post_notice(
+            "ROVER LOW BATTERY · RETURNING TO BASE",
+            f"{battery_pct:.0f}% charge, under {ROVER_AUTO_RETURN_BATTERY_PCT:.0f}%. Mission set aside.",
+            "threat",
+        )
+        self._refresh_status()
+
+    def _auto_dock_aircraft(self, unit_id: str, battery_pct: float) -> None:
+        now = self.mission_clock.clock_s
+        if not self._ensure_director_owns(unit_id):
+            return
+        if self.control_authority.manual_holder == unit_id:
+            self._on_release_manual()
+        recalled = self.flight_director.recall([unit_id])
+        name = short_label(unit_id)
+        if recalled:
+            # It cannot dock onto a rover that is moving, so the rover stands
+            # until it has been recovered.
+            if self.flight_director.rover_mode == RoverMode.NAVIGATING:
+                self.flight_director.hold_for_recovery = True
+        self.event_log.log(
+            now,
+            f"LOW BATTERY: {name} at {battery_pct:.0f}% (limit {TRICOPTER_AUTO_DOCK_BATTERY_PCT:.0f}%). "
+            + ("Returning to dock automatically" if recalled else "Already on its way down"),
+            level="threat",
+        )
+        self.map_view.post_notice(
+            f"{name} LOW BATTERY · DOCKING",
+            f"{battery_pct:.0f}% charge, under {TRICOPTER_AUTO_DOCK_BATTERY_PCT:.0f}%. "
+            + ("Rover holds until it is aboard." if recalled else ""),
+            "caution",
+        )
 
     def _handle_director_event(self, unit_id: str, event: str) -> None:
         if event == "LIFTOFF":
@@ -1438,6 +1517,13 @@ class MainWindow(QMainWindow):
                     level="good",
                 )
             self._begin_autonomous_sweep()
+        elif event == "RETURN_BLOCKED":
+            self.event_log.log(
+                self.mission_clock.clock_s,
+                "RETURN TO BASE: no clear way home from here. The rover has stopped and needs the operator",
+                level="threat",
+            )
+            self.map_view.post_notice("NO CLEAR WAY HOME", "The rover has stopped. Drive it, or set a destination.", "threat")
         elif event == "AT_BASE":
             self.event_log.log(self.mission_clock.clock_s, "Rover at base, stationary. Docking may proceed.")
         elif event.startswith("RECOVERY:"):
@@ -1465,6 +1551,18 @@ class MainWindow(QMainWindow):
         bearing while the rover drives out from under it.
         """
         rover = self.units["rover"].pose
+        weak = [c["id"] for c in aircraft if self.units[c["id"]].battery_pct < TRICOPTER_MIN_LAUNCH_BATTERY_PCT]
+        for uid in weak:
+            self.event_log.log(
+                self.mission_clock.clock_s,
+                f"{short_label(uid)} not launched: battery {self.units[uid].battery_pct:.0f}% "
+                f"(minimum {TRICOPTER_MIN_LAUNCH_BATTERY_PCT:.0f}%)",
+                level="caution",
+            )
+        aircraft = [c for c in aircraft if c["id"] not in weak]
+        if not aircraft:
+            self.context_panel.launch_console.abort_launch()
+            return
         for craft in aircraft:
             self.flight_director.launch(
                 craft["id"], craft["forward"], craft["right"], craft["altitude"], bearing,
@@ -1757,6 +1855,7 @@ class MainWindow(QMainWindow):
         self._destination_state = ""
         self._parked_sweep = None
         self._holding_position = False
+        self._low_battery_actioned.clear()
         self.map_view.set_destination(None)
         self._last_replan_s = -1e9
         self._last_replan_waypoint = -1

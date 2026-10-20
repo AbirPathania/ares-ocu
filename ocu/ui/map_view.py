@@ -213,6 +213,9 @@ class MapView(QWidget):
         self._placing_destination = False
         self._press_pos: QPointF | None = None
         self._quiet_until_s = 0.0  # seconds the view is left alone after a drag
+        #: Things the operator has to know that are not about the map: a vehicle
+        #: acting on its own. Drawn over it until they expire.
+        self._notices: list[dict] = []
 
         self._pan = QPointF(0.0, 0.0)
         self._panning = False
@@ -334,7 +337,45 @@ class MapView(QWidget):
         self._radar_angle = (self._radar_angle + 0.64) % 360.0
         self._advance_shown_poses(dt)
         self._follow_rover(dt)
+        if self._notices:
+            for notice in self._notices:
+                notice["left"] -= dt
+            self._notices = [n for n in self._notices if n["left"] > 0.0]
         self.update()
+
+    def post_notice(self, headline: str, detail: str = "", severity: str = "caution", seconds: float = 18.0) -> None:
+        """Put a notice over the map. A line in the log is easy to miss; a vehicle
+        that has just taken itself out of the mission is not."""
+        self._notices = [n for n in self._notices if n["headline"] != headline]
+        self._notices.append({"headline": headline, "detail": detail, "severity": severity, "left": seconds})
+        self._notices = self._notices[-3:]
+        self.update()
+
+    def clear_notices(self) -> None:
+        self._notices.clear()
+        self.update()
+
+    def _draw_notices(self, painter: QPainter) -> None:
+        palette = {
+            "threat": (QColor("#D4675A"), QColor(60, 24, 24, 225)),
+            "caution": (QColor("#E8B04A"), QColor(58, 44, 16, 225)),
+            "info": (QColor("#8FC9E8"), QColor(20, 40, 56, 225)),
+        }
+        y = 112.0
+        for notice in self._notices:
+            accent, box = palette.get(notice["severity"], palette["caution"])
+            width, height = 460.0, 46.0
+            rect = QRectF((self.width() - width) / 2, y, width, height)
+            painter.setPen(QPen(accent, 1.2))
+            painter.setBrush(QBrush(box))
+            painter.drawRoundedRect(rect, 3, 3)
+            painter.setPen(QPen(accent))
+            painter.setFont(QFont("DIN Condensed", 14, QFont.Bold))
+            painter.drawText(QRectF(rect.x(), rect.y() + 4, width, 18), Qt.AlignCenter, notice["headline"])
+            painter.setPen(QPen(QColor("#C6D0DA")))
+            painter.setFont(QFont("Menlo", 9))
+            painter.drawText(QRectF(rect.x(), rect.y() + 25, width, 15), Qt.AlignCenter, notice["detail"])
+            y += height + 6.0
 
     def _follow_rover(self, dt_s: float) -> None:
         """Keep the rover on the map.
@@ -466,6 +507,7 @@ class MapView(QWidget):
         self.update()
 
     def clear(self) -> None:
+        self._notices.clear()
         self._units.clear()
         self._shown.clear()
         self._snap.clear()
@@ -720,6 +762,7 @@ class MapView(QWidget):
         self._draw_north_indicator(painter)
         self._draw_scale_bar(painter)
         self._draw_mesh_banner(painter)
+        self._draw_notices(painter)
         if self._stale:
             self._draw_stale_overlay(painter)
         self._draw_cursor_readout(painter)
