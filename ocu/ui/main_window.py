@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from ocu.core.camera import SCOUT_HFOV_DEG, SCOUT_PITCH_DOWN_DEG
 from ocu.core.constants import (
     ALERT_CONFIDENCE_THRESHOLD,
+    CAMERA_ON_ALTITUDE_M,
     ROVER_AUTO_RETURN_BATTERY_PCT,
     ROVER_MIN_COMMAND_SPEED_MS,
     ROVER_SURVEY_SPEED_MS,
@@ -867,13 +868,12 @@ class MainWindow(QMainWindow):
         if not self._comms.video:
             return
 
-        live = [
-            uid for uid in ALL_UNIT_IDS
-            if uid == "rover" or not self._docked_state.get(uid, True)
-        ]
+        live = self._cameras_on()
         if not live:
             return
 
+        if self._gpu_worker is not None and not self._gpu_worker.resolved:
+            return  # still building the scene: no stand-in picture while it does
         if self._gpu_worker is not None and self._gpu_worker.available:
             for unit_id in live:
                 self._gpu_worker.submit(unit_id, self._camera_request(unit_id))
@@ -891,6 +891,28 @@ class MainWindow(QMainWindow):
             others = [uid for uid in live if uid != watched] or live
             unit_id = others[(self._camera_turn // 2) % len(others)]
         self._render_unit_camera(unit_id)
+
+    def _cameras_on(self) -> list[str]:
+        """The units whose cameras are running: the rover's, and an aircraft's once
+        it is airborne and has cleared the rover. Lifting off, its camera would see
+        the rover's own body from just above it, so until it is clear of the deck
+        the tile says so instead."""
+        on = []
+        for uid in ALL_UNIT_IDS:
+            if uid == "rover":
+                on.append(uid)
+                continue
+            feed = self.camera_feeds.get(uid)
+            if self._docked_state.get(uid, True):
+                if feed is not None:
+                    feed.set_clearing(False)
+                continue
+            clear = self.units[uid].pose.z >= CAMERA_ON_ALTITUDE_M
+            if feed is not None:
+                feed.set_clearing(not clear, CAMERA_ON_ALTITUDE_M)
+            if clear:
+                on.append(uid)
+        return on
 
     def enable_gpu_cameras(self, threaded: bool = True) -> bool:
         """Draw the camera feeds as 3D on the GPU.
@@ -911,10 +933,14 @@ class MainWindow(QMainWindow):
         self._gpu_worker = GpuRenderWorker(self.terrain, self)
         self._gpu_worker.frameReady.connect(self._on_gpu_frame)
         self._gpu_worker.ready.connect(self._on_gpu_ready)
+        for feed in self.camera_feeds.values():
+            feed.set_starting(True)
         self._gpu_worker.start()
         return True
 
     def _on_gpu_ready(self, available: bool) -> None:
+        for feed in self.camera_feeds.values():
+            feed.set_starting(False)
         if available:
             self._camera_timer.setInterval(GPU_CAMERA_TICK_MS)
         else:
@@ -922,7 +948,9 @@ class MainWindow(QMainWindow):
 
     def _on_gpu_frame(self, unit_id: str, frame) -> None:
         feed = self.camera_feeds.get(unit_id)
-        live = unit_id == "rover" or not self._docked_state.get(unit_id, True)
+        live = unit_id == "rover" or (
+            not self._docked_state.get(unit_id, True) and self.units[unit_id].pose.z >= CAMERA_ON_ALTITUDE_M
+        )
         if feed is not None and live and self._comms.video:
             feed.set_frame(frame)
 

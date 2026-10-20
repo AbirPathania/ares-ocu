@@ -84,3 +84,31 @@ def test_a_missing_model_is_not_an_error(tmp_path, monkeypatch):
     assert assets.load_model("namaqualand_boulder_03") is None
     assert assets.load_ground_textures() is None
     assert not assets.available()
+
+
+@needs_assets
+def test_the_second_load_comes_from_the_cache_and_is_the_same_model():
+    import time
+
+    name = "namaqualand_boulder_03"
+    assets._cache_path(name).unlink(missing_ok=True)
+    first = assets.load_model(name)
+    assert assets._cache_path(name).exists()
+    start = time.time()
+    second = assets.load_model(name)
+    assert time.time() - start < 0.5
+    for a, b in zip(first.variants, second.variants):
+        assert a.half_extent == b.half_extent and a.height == pytest.approx(b.height)
+        for la, lb in zip(a.lods, b.lods):
+            assert np.array_equal(la.indices, lb.indices) and np.allclose(la.positions, lb.positions)
+
+
+@needs_assets
+def test_a_changed_plan_does_not_reuse_a_stale_cache(monkeypatch):
+    name = "namaqualand_boulder_03"
+    assets.load_model(name)
+    plan = dict(assets.PLAN)
+    plan[name] = ("rock", 2000, 400, 0.10, 1)
+    monkeypatch.setattr(assets, "PLAN", plan)
+    model = assets.load_model(name)
+    assert model.variants[0].lods[0].triangles <= 2100

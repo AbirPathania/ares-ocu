@@ -367,8 +367,10 @@ def test_standard_reports_the_real_link_state(app):
 
 
 def _undock_all(window):
+    """Aircraft up and clear of the rover, so their cameras are on."""
     for unit_id in TRICOPTERS:
         window._set_docked(unit_id, False)
+        window.units[unit_id].pose.z = 15.0
 
 
 def test_the_rover_tile_shows_a_picture_from_the_world(app):
@@ -1230,8 +1232,7 @@ def test_the_feed_the_operator_is_watching_gets_the_frames(app):
     An even share would make the one feed being watched as slow as the three
     that are not."""
     window = MainWindow()
-    for uid in TRICOPTERS:
-        window._set_docked(uid, False)
+    _undock_all(window)
     window._select_unit("tricopter-2")
 
     seen = _count_frames(window)
@@ -1241,8 +1242,7 @@ def test_the_feed_the_operator_is_watching_gets_the_frames(app):
 
 def test_every_live_feed_still_refreshes_when_the_rover_is_selected(app):
     window = MainWindow()
-    for uid in TRICOPTERS:
-        window._set_docked(uid, False)
+    _undock_all(window)
     window._select_unit("rover")
     seen = _count_frames(window)
     assert set(seen) == {"rover", *TRICOPTERS}
@@ -2146,3 +2146,98 @@ def test_a_reset_gives_the_rover_back_its_power(app):
     window._on_play_clicked()
     _drive(window, 15.0)
     assert window.flight_director.rover_body.speed_ms > 0.1
+
+
+def test_no_stand_in_picture_is_shown_while_the_gpu_camera_starts(app):
+    """The tiles used to show the cruder renderer's picture for the first few
+    seconds and then swap to the real one. They say the camera is starting instead."""
+    import time
+
+    window = MainWindow()
+    window.show()
+    window._on_play_clicked()
+    shown = []
+    window.camera_rig.forward_view = lambda *a, **k: shown.append("numpy") or __import__("numpy").zeros((8, 8, 3), "uint8")
+    window.enable_gpu_cameras()
+    if window._gpu_worker is None:
+        pytest.skip("no worker")
+    assert window.camera_feeds["rover"]._starting
+    if not window._gpu_worker.resolved:
+        window._tick_cameras()
+        assert shown == [], "nothing drawn by the old renderer"
+        assert window.camera_feeds["rover"]._frame is None
+    deadline = time.time() + 20.0
+    while time.time() < deadline and window.camera_feeds["rover"]._starting:
+        app.processEvents()
+        time.sleep(0.05)
+    assert not window.camera_feeds["rover"]._starting
+    window.close()
+
+
+# --- an aircraft's camera comes on once it has cleared the rover ---------------------------
+
+
+def test_a_launched_aircraft_shows_no_picture_until_it_has_cleared_the_rover(app):
+    """Just off the deck its camera sees the rover's own body from above. The tile
+    says it is clearing the rover, and the camera comes on at the threshold."""
+    from ocu.core.constants import CAMERA_ON_ALTITUDE_M
+
+    window = MainWindow()
+    window._on_play_clicked()
+    console = window.context_panel.launch_console
+    window._on_bay_launch_requested()
+    console._on_stage_clicked()
+    console._on_launch_confirmed()
+    rendered = []
+    original = window._render_unit_camera
+    window._render_unit_camera = lambda uid: (rendered.append((uid, window.units[uid].pose.z)), original(uid))[1]
+
+    for _ in range(int(40.0 / 0.1)):
+        window.mission_clock._tick()
+        window._on_director_tick()
+        window._tick_cameras()
+        for uid in TRICOPTERS:
+            feed = window.camera_feeds[uid]
+            if window._docked_state[uid]:
+                continue
+            if window.units[uid].pose.z < CAMERA_ON_ALTITUDE_M:
+                assert feed._frame is None and feed._clearing, (uid, window.units[uid].pose.z)
+    aircraft_frames = [z for uid, z in rendered if uid in TRICOPTERS]
+    assert aircraft_frames, "they did come on"
+    assert min(aircraft_frames) >= CAMERA_ON_ALTITUDE_M, "and never below the threshold"
+    assert not any(window.camera_feeds[u]._clearing for u in TRICOPTERS)
+
+
+def test_the_tile_says_why_it_is_dark_while_the_aircraft_clears_the_rover(app):
+    window = MainWindow()
+    for uid in TRICOPTERS:
+        window._set_docked(uid, False)
+        window.units[uid].pose.z = 1.0
+    window._tick_cameras()
+    feed = window.camera_feeds["tricopter-1"]
+    assert feed._clearing and feed._frame is None
+    window.units["tricopter-1"].pose.z = 12.0
+    for _ in range(8):  # one tile is drawn per tick
+        window._tick_cameras()
+    assert not feed._clearing and feed._frame is not None
+
+
+def test_an_aircraft_coming_down_to_dock_loses_its_picture_at_the_same_height(app):
+    window = MainWindow()
+    _undock_all(window)
+    for _ in range(8):
+        window._tick_cameras()
+    assert window.camera_feeds["tricopter-2"]._frame is not None
+    window.units["tricopter-2"].pose.z = 1.5
+    window._tick_cameras()
+    assert window.camera_feeds["tricopter-2"]._frame is None
+
+
+def test_a_frame_that_arrives_late_for_an_aircraft_still_on_the_deck_is_dropped(app):
+    import numpy as np
+
+    window = MainWindow()
+    window._set_docked("tricopter-1", False)
+    window.units["tricopter-1"].pose.z = 0.8
+    window._on_gpu_frame("tricopter-1", np.zeros((10, 10, 3), dtype=np.uint8))
+    assert window.camera_feeds["tricopter-1"]._frame is None

@@ -1161,3 +1161,14 @@ frame is 10 to 12 ms on an Apple M1.
   again: manual control and new destinations are refused, and Return To Base can only bring the
   aircraft down onto it where it stands. It is logged once, shown over the map for 30 s, and the top
   bar and roster read BATTERY DEPLETED. A reset restores power.
+
+## Cameras start when they have something to see
+
+- **The scene is not drawn twice.** The tiles used to show the numpy renderer's picture for the first
+  few seconds of a run and then swap to the GPU one. They now say CAMERA STARTING until the scene is
+  built, and draw nothing in the meantime. Startup is about 1.5 s once the simplified meshes are
+  cached (3.6 s the first time).
+- **An aircraft's camera comes on at 3 m** (`CAMERA_ON_ALTITUDE_M`), not at lift-off. Just off the
+  deck it sees the rover's own body filling the bottom of the frame; the tile reads CLEARING ROVER
+  until it is above that, and goes dark again at the same height coming down to dock. A frame that
+  arrives late for an aircraft that has gone back below it is dropped.

@@ -271,16 +271,70 @@ PLAN = {
 }
 
 
+def _cache_path(name: str) -> Path:
+    return ROOT / "cache" / f"{name}.npz"
+
+
+def _cache_key(name: str, gltf_path: Path) -> str:
+    return f"{PLAN[name]}|{gltf_path.stat().st_size}|{int(gltf_path.stat().st_mtime)}|v1"
+
+
+def _read_cache(name: str, key: str) -> list[Variant] | None:
+    path = _cache_path(name)
+    if not path.exists():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if str(data["key"]) != key:
+                return None
+            variants = []
+            for i in range(int(data["count"])):
+                lods = []
+                for lod in range(2):
+                    prefix = f"v{i}_l{lod}_"
+                    lods.append(Mesh(data[prefix + "p"], data[prefix + "n"], data[prefix + "u"], data[prefix + "i"]))
+                extent = data[f"v{i}_extent"]
+                variants.append(Variant(str(data[f"v{i}_name"]), lods, (float(extent[0]), float(extent[1])), float(data[f"v{i}_height"])))
+            return variants
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _write_cache(name: str, key: str, variants: list[Variant]) -> None:
+    arrays: dict[str, np.ndarray] = {"key": np.array(key), "count": np.array(len(variants))}
+    for i, variant in enumerate(variants):
+        arrays[f"v{i}_name"] = np.array(variant.name)
+        arrays[f"v{i}_extent"] = np.array(variant.half_extent, dtype=np.float64)
+        arrays[f"v{i}_height"] = np.array(variant.height)
+        for lod, mesh in enumerate(variant.lods):
+            prefix = f"v{i}_l{lod}_"
+            arrays[prefix + "p"], arrays[prefix + "n"] = mesh.positions, mesh.normals
+            arrays[prefix + "u"], arrays[prefix + "i"] = mesh.uvs, mesh.indices
+    try:
+        _cache_path(name).parent.mkdir(parents=True, exist_ok=True)
+        np.savez(_cache_path(name), **arrays)
+    except OSError:
+        pass  # a cache that cannot be written only costs time
+
+
 def load_model(name: str) -> Model | None:
-    """The model ready to draw, or None if it was not downloaded or is not what it claims."""
+    """The model ready to draw, or None if it was not downloaded or is not what it claims.
+
+    The simplified meshes are cached beside the download, since simplifying is
+    most of what loading costs and the answer does not change.
+    """
     directory = ROOT / "models" / name
     gltf_path = directory / f"{name}_1k.gltf"
     if not gltf_path.exists() or name not in PLAN:
         return None
     _kind, near_tris, far_tris, burial, parts = PLAN[name]
     try:
-        meshes = _read_gltf(gltf_path)[:parts]
         textures = load_textures(directory, name)
+        key = _cache_key(name, gltf_path)
+        cached = _read_cache(name, key)
+        if cached is not None:
+            return Model(name=name, variants=cached, textures=textures)
+        meshes = _read_gltf(gltf_path)[:parts]
     except (AssetError, KeyError, OSError, ValueError, json.JSONDecodeError):
         return None
     model = Model(name=name, textures=textures)
@@ -293,6 +347,7 @@ def load_model(name: str) -> Model | None:
         model.variants.append(
             Variant(part_name, lods, (float(high[0] - low[0]) / 2.0, float(high[1] - low[1]) / 2.0), height * (1.0 - burial))
         )
+    _write_cache(name, key, model.variants)
     return model
 
 

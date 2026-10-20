@@ -202,3 +202,10 @@ ROVER_AUTO_RETURN_BATTERY_PCT = 12.0
 #: An aircraft is not launched below this: it would be recalled as soon as it
 #: lifted off. A little over the dock threshold so a launch is worth making.
 TRICOPTER_MIN_LAUNCH_BATTERY_PCT = 15.0
+
+
+#: An aircraft's camera comes on once it is this far above the ground. Lower than
+#: that it is still beside and over the rover's own deck, and the picture is the
+#: rover's body filling the bottom of the frame, not the ground the aircraft is
+#: there to look at. The same height applies coming down to dock.
+CAMERA_ON_ALTITUDE_M = 3.0

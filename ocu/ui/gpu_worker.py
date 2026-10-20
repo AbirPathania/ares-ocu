@@ -32,6 +32,9 @@ class GpuRenderWorker(QObject):
         self._stop = False
         self._scene = None
         self.available = False
+        #: True once the scene has been built or has failed to be: until then there
+        #: is nothing to draw with, and the interface waits instead of improvising.
+        self.resolved = False
         self._thread = threading.Thread(target=self._run, name="gpu-camera", daemon=True)
 
     def start(self) -> None:
@@ -53,6 +56,7 @@ class GpuRenderWorker(QObject):
 
         self._scene = GpuScene.create(self._world)
         self.available = self._scene is not None
+        self.resolved = True
         self.ready.emit(self.available)
         if self._scene is None:
             return

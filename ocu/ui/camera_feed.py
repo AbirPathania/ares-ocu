@@ -38,6 +38,9 @@ class SimulatedCameraFeed(QWidget):
         self._emcon = False
         self._downlink_reason = ""
         self._frame: QImage | None = None
+        self._starting = False  # the picture is being built; show that, not a stand-in
+        self._clearing = False  # an aircraft still beside the rover's deck
+        self._clearing_threshold = 0.0
 
         # A 16:9 feed wants height, and the left column has it: the roster
         # below is a fixed stack of four cards, so whatever is left belongs
@@ -50,6 +53,21 @@ class SimulatedCameraFeed(QWidget):
         self.setMinimumHeight(44)
         self.setMaximumHeight(220)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+
+    def set_starting(self, starting: bool) -> None:
+        """The camera is still starting up. Say so, rather than showing a
+        different, cruder picture for a few seconds and then swapping it."""
+        self._starting = starting
+        self.update()
+
+    def set_clearing(self, clearing: bool, threshold_m: float = 0.0) -> None:
+        """An aircraft that has lifted off but has not yet cleared the rover. Its
+        camera would show the vehicle's own body, so it stays off until it has."""
+        self._clearing = clearing
+        self._clearing_threshold = threshold_m
+        if clearing:
+            self._frame = None
+        self.update()
 
     def set_active(self, active: bool) -> None:
         self._active = active
@@ -155,6 +173,16 @@ class SimulatedCameraFeed(QWidget):
             gradient.setColorAt(0.0, QColor("#141C24"))
             gradient.setColorAt(1.0, QColor("#0C1116"))
             painter.fillRect(rect, gradient)
+            caption = (
+                "CAMERA STARTING" if self._starting
+                else f"CLEARING ROVER \u00b7 CAMERA ON AT {self._clearing_threshold:.0f} m" if self._clearing
+                else ""
+            )
+            if caption:
+                painter.setPen(QPen(QColor("#6F8396")))
+                painter.setFont(QFont("Menlo", 8))
+                # Below the centre, where the frame's crosshair is.
+                painter.drawText(rect.adjusted(0, rect.height() * 0.3, 0, 0), Qt.AlignCenter, caption)
 
         # Scrims behind the text, so the label and telemetry stay legible
         # over whatever the camera happens to be looking at, bright sky
