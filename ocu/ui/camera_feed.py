@@ -41,6 +41,7 @@ class SimulatedCameraFeed(QWidget):
         self._starting = False  # the picture is being built; show that, not a stand-in
         self._clearing = False  # an aircraft still beside the rover's deck
         self._clearing_threshold = 0.0
+        self._detections: list[dict] = []  # boxes from the detector, in the frame's own 0..1 coordinates
 
         # A 16:9 feed wants height, and the left column has it: the roster
         # below is a fixed stack of four cards, so whatever is left belongs
@@ -94,6 +95,12 @@ class SimulatedCameraFeed(QWidget):
         height, width, _ = frame.shape
         # copy(): QImage borrows the array's memory, which will not outlive it.
         self._frame = QImage(frame.data, width, height, 3 * width, QImage.Format_RGB888).copy()
+        self.update()
+
+    def set_detections(self, detections: list[dict]) -> None:
+        """Boxes to draw over the picture: {box: (u0, v0, u1, v1), label, score, confirmed}, as fractions of the
+        rendered frame. A box is the detector's claim; a solid one has persisted, a dashed one has not yet."""
+        self._detections = list(detections)
         self.update()
 
     def set_downlink(self, video: bool, mode: str) -> None:
@@ -168,6 +175,7 @@ class SimulatedCameraFeed(QWidget):
                 (source.width() - shown_w) / 2, (source.height() - shown_h) / 2, shown_w, shown_h
             )
             painter.drawImage(rect, self._frame, crop)
+            self._draw_detections(painter, rect, source, crop)
         else:
             gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
             gradient.setColorAt(0.0, QColor("#141C24"))
@@ -222,6 +230,36 @@ class SimulatedCameraFeed(QWidget):
         painter.drawText(telemetry_rect, Qt.AlignLeft, self._telemetry)
 
         painter.end()
+
+    DETECTION_COLORS = {"person": "#E5484D", "vehicle": "#4DA3FF", "animal": "#B58CFF"}
+
+    def _draw_detections(self, painter: QPainter, rect: QRectF, source: QRectF, crop: QRectF) -> None:
+        """The detector's boxes, mapped through the same crop the picture is drawn with."""
+        if not self._detections:
+            return
+        sx, sy = rect.width() / crop.width(), rect.height() / crop.height()
+        painter.setFont(QFont("Menlo", 7))
+        for d in self._detections:
+            u0, v0, u1, v1 = d["box"]
+            r = QRectF(
+                rect.left() + (u0 * source.width() - crop.left()) * sx,
+                rect.top() + (v0 * source.height() - crop.top()) * sy,
+                (u1 - u0) * source.width() * sx,
+                (v1 - v0) * source.height() * sy,
+            )
+            color = QColor(self.DETECTION_COLORS.get(d.get("kind", ""), "#E4EBF1"))
+            pen = QPen(color)
+            pen.setWidthF(1.6 if d.get("confirmed") else 1.0)
+            if not d.get("confirmed"):
+                pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(r)
+            text = f'{str(d.get("label", "")).upper()} {d.get("score", 0.0):.2f}'
+            painter.setPen(QPen(QColor(0, 0, 0, 190)))
+            painter.drawText(r.topLeft() + QPointF(2.0, -2.0 if r.top() > 11 else 10.0 + r.height()), text)
+            painter.setPen(QPen(color))
+            painter.drawText(r.topLeft() + QPointF(1.0, -3.0 if r.top() > 11 else 9.0 + r.height()), text)
 
     def _draw_corner_ticks(self, painter: QPainter, rect: QRectF, color: QColor) -> None:
         pen = QPen(color)

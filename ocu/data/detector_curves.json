@@ -1,0 +1,404 @@
+{
+ "model": "final_U",
+ "model_checkpoint_sha256": "ef785bc4533ce2dab19b6fe89f8ccf9c83e176192d02620b93e01740921b62dd",
+ "operating_threshold": 0.4,
+ "size_is": "object height as a share of frame height; the detector squashes the whole frame to a square",
+ "decisions": [
+  37,
+  39,
+  43
+ ],
+ "iou": 0.5,
+ "curves": {
+  "animal": {
+   "source": "Caltech Camera Traps, 39 locations never trained on",
+   "bins": [
+    {
+     "share_lo": 0.04,
+     "share_hi": 0.07,
+     "n": 28,
+     "recall": 0.03571428571428571,
+     "recall_ci95": [
+      0.00633235649754188,
+      0.17712576118498663
+     ],
+     "median_score_when_found": 0.6272675395011902
+    },
+    {
+     "share_lo": 0.07,
+     "share_hi": 0.11,
+     "n": 75,
+     "recall": 0.21333333333333335,
+     "recall_ci95": [
+      0.13580086342007996,
+      0.31880178289861477
+     ],
+     "median_score_when_found": 0.554893434047699
+    },
+    {
+     "share_lo": 0.11,
+     "share_hi": 0.17,
+     "n": 114,
+     "recall": 0.2982456140350877,
+     "recall_ci95": [
+      0.22196010636934355,
+      0.387685383848033
+     ],
+     "median_score_when_found": 0.6013464331626892
+    },
+    {
+     "share_lo": 0.17,
+     "share_hi": 0.26,
+     "n": 90,
+     "recall": 0.6111111111111112,
+     "recall_ci95": [
+      0.5078226845453937,
+      0.7053024113608994
+     ],
+     "median_score_when_found": 0.6930012106895447
+    },
+    {
+     "share_lo": 0.26,
+     "share_hi": 0.4,
+     "n": 106,
+     "recall": 0.7452830188679245,
+     "recall_ci95": [
+      0.654772057573926,
+      0.8186369240869382
+     ],
+     "median_score_when_found": 0.7304570078849792
+    },
+    {
+     "share_lo": 0.4,
+     "share_hi": 0.6,
+     "n": 57,
+     "recall": 0.8596491228070176,
+     "recall_ci95": [
+      0.746752921041072,
+      0.9271281077287171
+     ],
+     "median_score_when_found": 0.7516544461250305
+    },
+    {
+     "share_lo": 0.6,
+     "share_hi": 1.01,
+     "n": 51,
+     "recall": 0.9019607843137255,
+     "recall_ci95": [
+      0.7902151004554693,
+      0.957392555046923
+     ],
+     "median_score_when_found": 0.762643575668335
+    }
+   ]
+  },
+  "person": {
+   "source": "COCO val2017 retention images (ordinary photographs, people close and clear)",
+   "bins": [
+    {
+     "share_lo": 0.0,
+     "share_hi": 0.02,
+     "n": 35,
+     "recall": 0.2571428571428571,
+     "recall_ci95": [
+      0.1416286872655014,
+      0.4206962427064873
+     ],
+     "median_score_when_found": 0.4824545979499817
+    },
+    {
+     "share_lo": 0.02,
+     "share_hi": 0.04,
+     "n": 87,
+     "recall": 0.5172413793103449,
+     "recall_ci95": [
+      0.4137493791703159,
+      0.6192751382314033
+     ],
+     "median_score_when_found": 0.5742233991622925
+    },
+    {
+     "share_lo": 0.04,
+     "share_hi": 0.07,
+     "n": 144,
+     "recall": 0.6180555555555556,
+     "recall_ci95": [
+      0.5366080743731294,
+      0.6933677916889263
+     ],
+     "median_score_when_found": 0.6141742467880249
+    },
+    {
+     "share_lo": 0.07,
+     "share_hi": 0.11,
+     "n": 159,
+     "recall": 0.7421383647798742,
+     "recall_ci95": [
+      0.6689929866303801,
+      0.8038591592586313
+     ],
+     "median_score_when_found": 0.7064454555511475
+    },
+    {
+     "share_lo": 0.11,
+     "share_hi": 0.17,
+     "n": 140,
+     "recall": 0.8285714285714286,
+     "recall_ci95": [
+      0.7575827935158305,
+      0.8820096470576894
+     ],
+     "median_score_when_found": 0.7477215528488159
+    },
+    {
+     "share_lo": 0.17,
+     "share_hi": 0.26,
+     "n": 151,
+     "recall": 0.8543046357615894,
+     "recall_ci95": [
+      0.78925330445889,
+      0.9017754630041174
+     ],
+     "median_score_when_found": 0.8088628053665161
+    },
+    {
+     "share_lo": 0.26,
+     "share_hi": 0.4,
+     "n": 132,
+     "recall": 0.8939393939393939,
+     "recall_ci95": [
+      0.8298328646402963,
+      0.9357647137156712
+     ],
+     "median_score_when_found": 0.8611655831336975
+    },
+    {
+     "share_lo": 0.4,
+     "share_hi": 0.6,
+     "n": 100,
+     "recall": 0.91,
+     "recall_ci95": [
+      0.8377362530335634,
+      0.9519280048361151
+     ],
+     "median_score_when_found": 0.8881993889808655
+    },
+    {
+     "share_lo": 0.6,
+     "share_hi": 1.01,
+     "n": 125,
+     "recall": 0.904,
+     "recall_ci95": [
+      0.8396789770994196,
+      0.9442293258089579
+     ],
+     "median_score_when_found": 0.8952053189277649
+    }
+   ]
+  },
+  "vehicle": {
+   "source": "COCO val2017 retention images, car bus truck",
+   "bins": [
+    {
+     "share_lo": 0.02,
+     "share_hi": 0.04,
+     "n": 38,
+     "recall": 0.6842105263157895,
+     "recall_ci95": [
+      0.5254394356005149,
+      0.8091557997633335
+     ],
+     "median_score_when_found": 0.8097368478775024
+    },
+    {
+     "share_lo": 0.04,
+     "share_hi": 0.07,
+     "n": 49,
+     "recall": 0.8571428571428571,
+     "recall_ci95": [
+      0.7333202681083708,
+      0.9290366627945541
+     ],
+     "median_score_when_found": 0.8724218010902405
+    },
+    {
+     "share_lo": 0.07,
+     "share_hi": 0.11,
+     "n": 33,
+     "recall": 0.7575757575757576,
+     "recall_ci95": [
+      0.5897505131450971,
+      0.8716843865335271
+     ],
+     "median_score_when_found": 0.8724601864814758
+    },
+    {
+     "share_lo": 0.11,
+     "share_hi": 0.17,
+     "n": 33,
+     "recall": 0.8181818181818182,
+     "recall_ci95": [
+      0.656114329507048,
+      0.9138934877430174
+     ],
+     "median_score_when_found": 0.8988096117973328
+    },
+    {
+     "share_lo": 0.17,
+     "share_hi": 0.26,
+     "n": 24,
+     "recall": 0.7916666666666666,
+     "recall_ci95": [
+      0.5952915551476452,
+      0.9075531089521192
+     ],
+     "median_score_when_found": 0.9208468198776245
+    },
+    {
+     "share_lo": 0.26,
+     "share_hi": 0.4,
+     "n": 15,
+     "recall": 0.8,
+     "recall_ci95": [
+      0.5481406466534955,
+      0.9295257935638959
+     ],
+     "median_score_when_found": 0.9361260533332825
+    },
+    {
+     "share_lo": 0.6,
+     "share_hi": 1.01,
+     "n": 12,
+     "recall": 0.9166666666666666,
+     "recall_ci95": [
+      0.6461140782014047,
+      0.9851352905492264
+     ],
+     "median_score_when_found": 0.8346301317214966
+    }
+   ]
+  },
+  "person_aerial": {
+   "source": "WiSARD visible drone frames, evaluation only (licence unconfirmed), the whole 4K frame squashed",
+   "bins": [
+    {
+     "share_lo": 0.0,
+     "share_hi": 0.03,
+     "n": 51,
+     "recall": 0.0,
+     "recall_ci95": [
+      0.0,
+      0.07004901388726806
+     ],
+     "median_score_when_found": null
+    },
+    {
+     "share_lo": 0.03,
+     "share_hi": 0.04,
+     "n": 143,
+     "recall": 0.0,
+     "recall_ci95": [
+      0.0,
+      0.02616152370990237
+     ],
+     "median_score_when_found": null
+    },
+    {
+     "share_lo": 0.04,
+     "share_hi": 0.05,
+     "n": 270,
+     "recall": 0.0,
+     "recall_ci95": [
+      8.673617379884035e-19,
+      0.014028547890459302
+     ],
+     "median_score_when_found": null
+    },
+    {
+     "share_lo": 0.05,
+     "share_hi": 0.06,
+     "n": 41,
+     "recall": 0.024390243902439025,
+     "recall_ci95": [
+      0.00431842027071648,
+      0.12595347011678087
+     ],
+     "median_score_when_found": 0.4957265853881836
+    }
+   ],
+   "fallback_to_person_above_share": 0.06,
+   "fallback_note": "above that share nothing was measured from the air; the ground curve is used and is untested there"
+  }
+ },
+ "false_alarm_scores": [
+  0.406,
+  0.411,
+  0.411,
+  0.412,
+  0.412,
+  0.412,
+  0.413,
+  0.415,
+  0.415,
+  0.416,
+  0.421,
+  0.424,
+  0.424,
+  0.429,
+  0.43,
+  0.442,
+  0.444,
+  0.445,
+  0.446,
+  0.451,
+  0.458,
+  0.467,
+  0.467,
+  0.472,
+  0.483,
+  0.496,
+  0.498,
+  0.512,
+  0.515,
+  0.517,
+  0.518,
+  0.523,
+  0.523,
+  0.525,
+  0.531,
+  0.545,
+  0.545,
+  0.564,
+  0.567,
+  0.569,
+  0.582,
+  0.592,
+  0.6,
+  0.657,
+  0.683,
+  0.687,
+  0.689,
+  0.699,
+  0.699,
+  0.717,
+  0.727,
+  0.729,
+  0.789,
+  0.808
+ ],
+ "false_alarm_scores_note": "scores of invented animals on 500 empty camera-trap images; the rover-run false alarms are too few to give a distribution",
+ "false_alarms": {
+  "person_or_animal_per_frame": 0.013888888888888888,
+  "invented": 2,
+  "frames": 144,
+  "source": "foldP_U and foldR_U on the two rover runs they never trained on",
+  "vehicle": null,
+  "vehicle_note": "no rate: Hyper-Drive vehicle labels have gaps (decision 34)"
+ },
+ "caveats": [
+  "person and vehicle curves come from photographs, not the rover's camera or terrain; the two real rover people found at 0.4 are too few to calibrate anything",
+  "animal curve is camera-trap photographs: animals close, still, often at night in infrared",
+  "tiny objects: below about 4 percent of frame height the person curve is estimated from few boxes and a drone flight (decision 42) found almost none",
+  "the model was trained on rover frames, so detections on this repository's simulated renders are not measured and not claimed"
+ ]
+}

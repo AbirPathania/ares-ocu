@@ -23,6 +23,7 @@ from ocu.render import assets, meshes, shaders
 
 SHADOW_SIZE = 4096
 MSAA_SAMPLES = 4
+ENTITY_SLOTS = 8  # the most of one kind drawn in a frame
 NEAR_M = 0.12
 FAR_M = 5000.0
 FOG_PER_M = 1.0 / 520.0
@@ -441,6 +442,12 @@ class GpuScene:
         self._rover_buffer = ctx.buffer(reserve=48)
         vertices, indices = self._rover_mesh
         self._rover_vao, _ = self._template_vao(vertices, indices, self._rover_buffer)
+        # People, vehicles and animals: a few of each at most, rewritten each time they are drawn.
+        self._entity_vaos = {}
+        for kind, mesh in (("person", meshes.person_mesh()), ("vehicle", meshes.truck_mesh()), ("animal", meshes.animal_mesh())):
+            buffer = ctx.buffer(reserve=48 * ENTITY_SLOTS)
+            vao, _ = self._template_vao(mesh[0], mesh[1], buffer)
+            self._entity_vaos[kind] = (buffer, vao)
 
     def _pbr_variants(self, *kinds: str, models: tuple[str, ...] | None = None) -> list[tuple[str, dict]]:
         out = []
@@ -705,6 +712,7 @@ class GpuScene:
         height: int,
         rover: tuple[float, float, float] | None = None,
         grain: float = 0.0,
+        entities: list[tuple[str, float, float, float]] | None = None,
     ) -> np.ndarray:
         """One frame, (height, width, 3) uint8. `eye` is absolute (x, y, z)."""
         ctx = self.ctx
@@ -793,6 +801,14 @@ class GpuScene:
             self._rover_buffer.write(row.tobytes())
             self._set(self.p_inst, "u_kind", 2)
             self._rover_vao.render(instances=1)
+
+        for kind in {e[0] for e in entities or ()}:
+            rows = [e for e in entities if e[0] == kind][:ENTITY_SLOTS]
+            ex = np.array([[x, y, float(self._ground(np.array([x]), np.array([y]))[0]), -math.radians(h), 1, 1, 1, 0, 1, 1, 1, 0] for _, x, y, h in rows], dtype=np.float32)
+            buffer, vao = self._entity_vaos[kind]
+            buffer.write(ex.tobytes())
+            self._set(self.p_inst, "u_kind", 2)
+            vao.render(instances=len(rows))
 
         ctx.copy_framebuffer(resolve, msaa)
         resolve.use()

@@ -109,3 +109,50 @@ def test_with_the_assets_the_rocks_are_the_photographed_ones(scene):
     # Every boulder the world has is drawn once, as a downloaded model.
     drawn = sum(len(g["rows"]) for g in scene._pbr_groups if g["mode"] == 0)
     assert drawn == len(scene.world.boulders)
+
+
+# ---- people, vehicles and animals
+
+def _changed_box(a, b, threshold=40, support=3):
+    """The core of what changed between two frames: columns and rows holding at least `support` changed pixels,
+    so the few stray pixels the shadow pass moves far away do not stretch the box."""
+    diff = np.abs(a.astype(int) - b.astype(int)).sum(axis=2) > threshold
+    cols, rows = np.where(diff.sum(axis=0) >= support)[0], np.where(diff.sum(axis=1) >= support)[0]
+    if not len(cols) or not len(rows):
+        return None
+    return cols.min(), rows.min(), cols.max(), rows.max()
+
+
+@pytest.mark.parametrize("kind,height,distance", [("person", 1.75, 7.0), ("vehicle", 1.9, 12.0), ("animal", 1.0, 6.0)])
+def test_an_entity_is_drawn_where_the_detector_model_says_its_box_is(scene, monkeypatch, kind, height, distance):
+    """The simulated detector's box (core/vision.py) and the picture have to agree, or the overlay lies."""
+    from ocu.core import vision as pc
+    from ocu.core.entities import SurfaceEntity
+
+    monkeypatch.setattr(gpu_scene.time, "monotonic", lambda: 123.0)  # wind sways the grass; hold the clock still
+    w, h = 640, 360
+    gz_eye = float(scene._ground(np.array([0.0]), np.array([0.0]))[0]) + 1.5
+    args = dict(eye=(0.0, 0.0, gz_eye), heading_deg=0.0, pitch_down_deg=3.0, hfov_deg=112.0, width=w, height=h)
+    with scene.ctx:  # an earlier test in this file makes a second GL context; make this scene's the current one
+        empty = scene.render(**args)
+        drawn = scene.render(**args, entities=[(kind, 0.0, distance, 0.0)])
+    box = _changed_box(empty, drawn)
+    assert box is not None, "the entity must change the picture"
+    cam = pc.CameraSpec(0.0, 0.0, gz_eye, 0.0, 3.0, 112.0, w, h, aerial=False)
+
+    class Rig:
+        def elevation_at(self, x, y):
+            return float(scene._ground(np.array([x]), np.array([y]))[0])
+
+        def line_of_sight(self, *a):
+            return True
+
+    length = {"person": 0.3, "vehicle": 5.0, "animal": 1.5}[kind]
+    width_m = {"person": 0.5, "vehicle": 1.9, "animal": 0.4}[kind]
+    ap = pc.appearance(cam, SurfaceEntity(kind, "x", height, width_m, length, ((0.0, distance),)), (0.0, distance, 0.0), Rig())
+    assert ap is not None
+    model_h = (ap.box[3] - ap.box[1]) * h
+    drawn_h = box[3] - box[1] + 1
+    assert drawn_h == pytest.approx(model_h, rel=0.30, abs=6), f"{kind}: drawn {drawn_h}px tall, model says {model_h:.0f}px"
+    assert (box[0] + box[2]) / 2 / w == pytest.approx((ap.box[0] + ap.box[2]) / 2, abs=0.04)
+    assert box[3] / h == pytest.approx(ap.box[3], abs=0.06), "its feet are where the model puts the bottom of the box"

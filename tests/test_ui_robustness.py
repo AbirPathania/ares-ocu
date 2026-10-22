@@ -1570,7 +1570,13 @@ def test_there_are_few_contacts_to_deal_with(app):
     window._on_play_clicked()
     window.pace_slider.setValue(100)
     _drive(window, 200.0)
-    assert len(window.threat_panel._threats) <= 5
+    # What the ground suite buried and what the cameras saw standing on the surface are different contacts, and the
+    # point of the test is that neither is a flood: the buried ones stay few, and a camera contact is one per
+    # thing on the ground (plus a little slack for one that walks out of its first marker's reach).
+    threats = list(window.threat_panel._threats.values())
+    camera = [t for t in threats if "camera" in t["sensors"]]
+    assert len(threats) - len(camera) <= 5
+    assert len(camera) <= len(window.surface_entities) + 2
 
 
 # --- the map keeps the rover in view --------------------------------------------------------

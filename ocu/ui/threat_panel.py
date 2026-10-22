@@ -169,7 +169,7 @@ class ThreatCard(QWidget):
             QRectF(text_left, rect.top() + 7, title_room, 15),
             Qt.AlignLeft | Qt.AlignVCenter,
             QFontMetricsF(title_font).elidedText(
-                f'{str(self.threat.get("type", "unknown")).replace("_", " ").upper()}'
+                f'{str(self.threat.get("label") or self.threat.get("type", "unknown")).replace("_", " ").upper()}'
                 f'   {self.threat["x"]:.0f}, {self.threat["y"]:.0f} m',
                 Qt.ElideRight,
                 max(title_room, 0.0),
@@ -270,6 +270,7 @@ class ThreatPanel(QWidget):
                 "x": detection["x"],
                 "y": detection["y"],
                 "type": detection.get("type", "unknown"),
+                "label": detection.get("label"),
                 "confidence": detection.get("confidence", 0.0),
                 "sensors": [],
                 "status": "PENDING",

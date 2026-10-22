@@ -42,6 +42,19 @@ on the map panel is the single most important interaction in the app
 disconnected and reconverging via the CRDT merge on reconnect, with a
 delta count showing exactly how much crossed the link.
 
+## People, vehicles and animals
+
+Three things stand or walk on the ground: a person, a parked vehicle and a deer-sized animal. The rover's
+camera and the scouts' cameras run a **simulated** detector over them, drawn as boxes on the feeds (dashed
+until a detection has persisted, solid once it has) and reported to the threat panel, the map and the log only
+once confirmed. **No neural network runs in this application.** The detector behaves the way a real trained
+model was measured to behave, on images it never saw, from curves built by the `ares-perception` repository
+(`ocu/data/detector_curves.json`). Those measurements are unflattering and are kept that way: a person seen from
+a scout at the usual distances is not found at all, small things are mostly missed, and the detector now and
+then invents a person or an animal, which the persistence gate normally catches. An animal is reported as
+`unknown` and labelled ANIMAL, and never raises a threat alert; whether `animal` becomes the spec's eighth
+threat class is an open decision. See DECISIONS.md, "People, vehicles and animals".
+
 ## The sixty second demo
 
 Section 8.5 calls the cut-link demonstration "the single most important

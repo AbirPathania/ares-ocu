@@ -72,6 +72,8 @@ from ocu.core.unit import Unit
 from ocu.sim.mission_clock import MissionClock
 from ocu.ui.alert_banner import AlertBanner
 from ocu.core.aerial import scout_sighting
+from ocu.core.entities import default_entities
+from ocu.core.vision import PERCEPTION_HZ, THREAT_TYPE, CameraSpec, ConfirmationGate, ContactRegistry, PerceptionSensor
 from ocu.core.camera import CameraRig
 from ocu.core.occlusion import occlusion_bearing
 from ocu.ui.camera_feed import SimulatedCameraFeed
@@ -230,6 +232,16 @@ class MainWindow(QMainWindow):
         self._aerial_evidence: dict[int, dict[str, float]] = {}
         self._last_reported: dict[tuple, float] = {}
         self._escalated: set = set()
+        # People, vehicles and animals on the ground, placed on purpose like the buried objects, and the camera
+        # detector that does or does not find them (core/vision.py, from measured curves). A camera detection
+        # becomes a report only after it persists (the confirmation gate), and where it was first reported is
+        # remembered so that a later, better reading updates that report instead of adding another.
+        self.surface_entities = default_entities(sweep=self.sweep)
+        self.camera_detector = PerceptionSensor()
+        self.camera_gate = ConfirmationGate()
+        self.camera_contacts = ContactRegistry()
+        self._vision_frame = -1
+        self._vision_noted = False
         # Which way the vapour plume runs. The SAW sensor only reads when
         # the vehicle is on the plume side of a source, so on this ground
         # it confirms on the outbound lanes and not on the return ones --
@@ -737,6 +749,7 @@ class MainWindow(QMainWindow):
         self._tick_lidar()
         self._tick_detection_suite()
         self._tick_aerial_detection()
+        self._tick_vision()
 
         for unit_id, event in events:
             self._handle_director_event(unit_id, event)
@@ -964,14 +977,18 @@ class MainWindow(QMainWindow):
             return dict(
                 eye=(pose.x, pose.y, rig.elevation_at(pose.x, pose.y) + 1.5),
                 heading_deg=pose.heading, pitch_down_deg=3.0, hfov_deg=112.0,
-                width=width, height=height, rover=None, grain=2.2 / 255.0,
+                width=width, height=height, rover=None, grain=2.2 / 255.0, entities=self._entities_to_draw(),
             )
         rover = self.units["rover"].pose
         return dict(
             eye=(pose.x, pose.y, rig.elevation_at(pose.x, pose.y) + pose.z),
             heading_deg=pose.heading, pitch_down_deg=SCOUT_PITCH_DOWN_DEG, hfov_deg=SCOUT_HFOV_DEG,
             width=width, height=height, rover=(rover.x, rover.y, rover.heading), grain=2.2 / 255.0,
+            entities=self._entities_to_draw(),
         )
+
+    def _entities_to_draw(self) -> list[tuple[str, float, float, float]]:
+        return [(e.kind, x, y, h) for e, (x, y, h) in zip(self.surface_entities, self._entity_poses(), strict=True)]
 
     def closeEvent(self, event) -> None:
         if self._gpu_worker is not None:
@@ -1382,6 +1399,64 @@ class MainWindow(QMainWindow):
                     source_id=unit_id,
                 )
 
+    def _camera_spec(self, unit_id: str, width: int, height: int) -> CameraSpec:
+        """The pinhole camera a unit's feed is rendered with: the same eye, heading, pitch and field of view."""
+        pose = self.units[unit_id].pose
+        ground = self.camera_rig.elevation_at(pose.x, pose.y)
+        if unit_id == "rover":
+            return CameraSpec(pose.x, pose.y, ground + 1.5, pose.heading, 3.0, 112.0, width, height, aerial=False)
+        return CameraSpec(pose.x, pose.y, ground + pose.z, pose.heading, SCOUT_PITCH_DOWN_DEG, SCOUT_HFOV_DEG, width, height, aerial=True)
+
+    def _entity_poses(self) -> list[tuple[float, float, float]]:
+        t = self.mission_clock.clock_s
+        return [e.pose_at(t) for e in self.surface_entities]
+
+    def _tick_vision(self) -> None:
+        """What each running camera's detector reports about the people, vehicles and animals in view.
+
+        One frame of detector output per 1/PERCEPTION_HZ of mission time. A detection is the detector's claim,
+        drawn over the feed as a dashed box; a track that persists is confirmed, drawn solid, and only then
+        reported to the threat panel, the map and the log. An animal is reported but never raised as an alert:
+        it is a contact, not a threat. See core/vision.py and DECISIONS.md.
+        """
+        self.camera_rig.entities = self._entities_to_draw()  # what the non-threaded renderer draws
+        frame = int(self.mission_clock.clock_s * PERCEPTION_HZ)
+        if frame == self._vision_frame:
+            return
+        self._vision_frame = frame
+        poses = self._entity_poses()
+        for unit_id in self._cameras_on():
+            feed = self.camera_feeds.get(unit_id)
+            width, height = feed.render_size() if feed is not None else (640, 360)
+            cam = self._camera_spec(unit_id, width, height)
+            detections = self.camera_detector.observe(unit_id, cam, self.surface_entities, poses, self.camera_rig, frame)
+            self.camera_gate.update(unit_id, frame, detections)
+            shown = [t for t in self.camera_gate.tracks if t.sensor_id == unit_id and t.hits and t.hits[-1] == frame]
+            if feed is not None:
+                feed.set_detections([
+                    {"box": t.box, "kind": t.kind, "label": t.kind, "score": t.scores[-1], "confirmed": t.confirmed} for t in shown
+                ])
+            for track in shown:
+                if not track.confirmed:
+                    continue
+                contact = self.camera_contacts.resolve(track.kind, track.x, track.y)
+                if not self._worth_reporting(("camera", unit_id, contact.id), track.confidence):
+                    continue
+                if not self._vision_noted:
+                    self._vision_noted = True
+                    self.event_log.log(
+                        self.mission_clock.clock_s,
+                        "Camera detections are simulated from measured detector curves, not from a live model",
+                        level="info",
+                    )
+                self._on_detection(
+                    {
+                        "x": contact.x, "y": contact.y, "confidence": track.confidence, "type": THREAT_TYPE[track.kind], "label": track.kind,
+                        "sensor": "camera", "sensors": ["camera"], "source": "rover" if unit_id == "rover" else "aircraft",
+                        "source_id": unit_id, "informational": track.kind == "animal",
+                    }
+                )
+
     def _tick_power(self, dt_s: float) -> None:
         """Integrate every battery from what that unit is actually doing.
 
@@ -1782,7 +1857,7 @@ class MainWindow(QMainWindow):
 
     def _on_detection(self, detection: dict) -> None:
         x, y, confidence = detection["x"], detection["y"], detection["confidence"]
-        threat_label = str(detection.get("type", "unknown")).replace("_", " ").upper()
+        threat_label = str(detection.get("label") or detection.get("type", "unknown")).replace("_", " ").upper()
         source = detection.get("source", "rover")
         source_id = detection.get("source_id", source)
         observation = VoxelObservation(
@@ -1811,7 +1886,7 @@ class MainWindow(QMainWindow):
             level="caution" if confidence >= 0.5 else "info",
         )
         key = (round(x, 2), round(y, 2))
-        if confidence >= ALERT_CONFIDENCE_THRESHOLD and key not in self._escalated:
+        if confidence >= ALERT_CONFIDENCE_THRESHOLD and key not in self._escalated and not detection.get("informational"):
             self._escalated.add(key)
             self.alert_banner.show_alert(detection)
             self.event_log.log(
@@ -1917,6 +1992,11 @@ class MainWindow(QMainWindow):
         # everything it found last time and no alert can fire again.
         self._target_evidence.clear()
         self._aerial_evidence.clear()
+        self.camera_gate = ConfirmationGate()
+        self.camera_contacts = ContactRegistry()
+        self._vision_frame = -1
+        for feed in self.camera_feeds.values():
+            feed.set_detections([])
         self._last_reported.clear()
         self._escalated.clear()
         self._waypoint_index = 0

@@ -1172,3 +1172,84 @@ frame is 10 to 12 ms on an Apple M1.
   deck it sees the rover's own body filling the bottom of the frame; the tile reads CLEARING ROVER
   until it is above that, and goes dark again at the same height coming down to dock. A frame that
   arrives late for an aircraft that has gone back below it is dropped.
+
+## People, vehicles and animals: a camera detector built on measured curves
+
+The spec names `person` and `vehicle` as threat types and nothing in the simulation could ever produce one:
+every contact was a buried object. This adds the other half of what ARES is meant to perceive, things that
+stand or walk on the surface, and a camera detector for the rover and the scouts. **The detector is simulated.
+No neural network runs inside this application.** What it does is behave the way a particular trained model
+was measured to behave, which is the same rule the rest of this build follows for its sensors: the shape of the
+response comes from somewhere checkable, and where this build has to invent a number the number is listed here.
+
+**Where the measured part comes from.** `ocu/data/detector_curves.json` is built by the `ares-perception`
+repository (`tools/build_ocu_curves.py`, decisions 37 to 43 there) from a trained RT-DETRv2 r18's saved
+detections on images it never trained on: 500 camera-trap images from 39 unseen locations (animals), COCO
+photographs (people, vehicles), and one drone flight (people from the air; evaluation only, the dataset's
+licence is unconfirmed and only aggregate recall numbers are used, no images or labels). It records, per
+apparent size (the object's height as a share of the frame height, which is what a detector that squashes any
+frame to a square actually sees), how often the model found the object, with a 95 percent interval and a count,
+and how confident it was when it did. It also records how often the model invents a person or an animal on
+empty rover ground (1 frame in 72, from 2 invented detections in 144 frames) and how confident those are.
+The file carries its model hash and its caveats, and `tests/test_vision.py` checks it is sane.
+
+**What the measurements say, and the model keeps.**
+- Finding something is far from certain at small apparent sizes (animals: 21 percent when 7 to 11 percent of the
+  frame height, 61 percent at 17 to 26 percent, 90 percent above 60 percent), and each frame is sampled, so a
+  camera sometimes loses what it had a moment ago.
+- **From a scout, a person at the sizes its camera usually produces was not found at all** (0 of 505 boxes at 3
+  to 5 percent of frame height). The aerial person curve is that. Above 6 percent of the frame the ground curve
+  is used and is **untested from the air**; the file says so.
+- The model invents people and animals now and then. Here a false alarm lasts one frame, which is an
+  assumption: real ones can sit on one rock for many frames, and persistence was not measured.
+- There is no vehicle false-alarm rate. The vehicle labels in the source data have gaps, any figure would be
+  wrong, so none is invented and vehicles are never falsely detected here.
+
+**What is this build's choice, not a measurement** (all in `core/vision.py` and `core/entities.py`):
+- Detector rate: 2 frames per second of mission time (`PERCEPTION_HZ`). The real rate depends on hardware that
+  has not been chosen.
+- Confirmation gate: a track is reported after 3 hits in 5 frames within 3.5 m of its last position
+  (`CONFIRM_HITS`, `CONFIRM_WINDOW`, `GATE_RADIUS_M`), and forgotten after 10 frames unseen
+  (`TRACK_MEMORY_FRAMES`). A detector that flickers is not shown to an operator as a
+  threat until it persists. In the tests, this removes nearly all invented reports (at most 5 percent of raw
+  false alarms survive) at the cost of at least a second before a real one is announced (three frames at 2 per second).
+- Confidence: the measured median for that size, plus or minus 0.06 (invented spread), never below the model's
+  operating threshold (0.40) and never above 0.97 (the rule detection.py already uses).
+- Position: where the bottom of the box meets flat ground, with 2 pixels of noise, which grows with the square of
+  range. A distant detection is placed loosely.
+- The three entities and their sizes, speeds and positions (`default_entities`): a person 1.75 m tall walking
+  1.2 m/s across the ground ahead of the lanes, a parked vehicle 1.9 m tall about 26 m along lane 3 and 10 m off
+  it, a deer-sized animal 1.0 m tall wandering at 0.5 m/s near the first lane. Placed on purpose relative to the
+  sweep, like the buried objects; nothing appears at random except what the detector invents.
+
+**The eighth threat class is still open, and this does not close it.** An animal is not in the spec's enum
+(`mine`, `ied`, `person`, `vehicle`, `disturbed_soil`, `safe_object`, `unknown`). Reporting it as `unknown`
+and carrying the word in a separate `label` keeps the data model inside the enum and lets the panels say
+ANIMAL. "animal" is the obvious candidate for the missing eighth value, and that is a call for Bhargav and
+Abir; nothing here guesses it. An animal is reported but never raised as a threat alert (`informational`): a
+deer at 0.9 confidence is a contact, and an alert for it would train the operator to stop reading alerts.
+
+**How it reaches the operator.** `_tick_vision` runs a detector frame for each running camera, draws every
+current track over that camera's feed (dashed until it has persisted, solid after), and sends a confirmed track
+through the same `_on_detection` as everything else: threat panel, map marker, event log, the shared map
+replica (rover or aircraft, so a cut link leaves each side with what it saw), and an alert for a person or
+vehicle at 0.85 or above. A track is reported once, where it was first confirmed, and a later better reading
+updates that report instead of adding another. Tracks of one kind that confirm within 8 m of an existing contact
+(`MERGE_RADIUS_M`) are that contact: monocular ground ranging at 30 m from a camera 1.6 m up is good to metres,
+and without this a single parked vehicle was reported four times in 200 s and the threat panel reached 12
+contacts, which `test_there_are_few_contacts_to_deal_with` rightly refused. That test now counts buried and
+camera contacts separately (at most 5 buried; at most one per entity plus 2 camera ones). A person who walks
+further than 8 m from where they were first reported becomes a second report, because the map marker does not
+move. The first report writes a line to the event log saying camera
+detections are simulated, so it cannot be mistaken for a live model.
+
+**What is drawn.** Low-poly figures (`render/meshes.py`) in the GPU renderer, in both the threaded and the
+direct paths. The numpy fallback renderer does not draw them. A test renders each figure with the real
+renderer and checks that its drawn height, centre and feet agree with the box the detector model projects for
+it, so an overlay cannot drift from the picture. The figures are not photographs and a model trained on
+photographs is not claimed to find them: what the detector reports about them comes from the curves.
+
+**Not covered.** Thermal and night cameras (a terrain fine-tune nearly erased thermal people in the source
+repository, so the numbers here would be wrong for them). Tiled or ensembled detection (not adopted there for
+the driving camera). Entities that hide, cross each other, or change size. The scouts' detections on the
+real renders, which no model was measured on.

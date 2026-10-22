@@ -227,6 +227,8 @@ class CameraRig:
         #: The GPU scene, once `enable_gpu` has made one. While it is None the
         #: views are drawn by the numpy renderer below.
         self.gpu = None
+        #: (kind, x, y, heading) of the people, vehicles and animals to draw; set by whoever owns the mission clock
+        self.entities: list = []
         self._cell = world.cell_size_m
         self._extent = world._extent
         self._span = world._span
@@ -370,7 +372,7 @@ class CameraRig:
         """What the rover's forward camera sees. (height, width, 3) uint8."""
         if self.gpu is not None:
             eye = (x, y, self.elevation_at(x, y) + camera_height_m)
-            return self.gpu.render(eye, heading_deg, pitch_down_deg, fov_deg, width, height, grain=sensor_noise / 255.0)
+            return self.gpu.render(eye, heading_deg, pitch_down_deg, fov_deg, width, height, grain=sensor_noise / 255.0, entities=self.entities or None)
         return self._render(
             x, y, self.elevation_at(x, y) + camera_height_m, heading_deg, width, height,
             fov_deg, pitch_down_deg, max_range_m, None, sensor_noise,
@@ -401,7 +403,7 @@ class CameraRig:
         if self.gpu is not None:
             eye = (x, y, self.elevation_at(x, y) + altitude_agl_m)
             return self.gpu.render(
-                eye, heading_deg, pitch_down_deg, fov_deg, width, height, rover=rover, grain=sensor_noise / 255.0
+                eye, heading_deg, pitch_down_deg, fov_deg, width, height, rover=rover, grain=sensor_noise / 255.0, entities=self.entities or None
             )
         return self._render(
             x, y, self.elevation_at(x, y) + altitude_agl_m, heading_deg, width, height,
@@ -655,7 +657,7 @@ class CameraRig:
         """
         if self.gpu is not None:
             eye = (x, y, self.elevation_at(x, y) + max(altitude_m, 1.5))
-            return self.gpu.render(eye, heading_deg, 90.0, fov_deg, width, height, rover=rover, grain=sensor_noise / 255.0)
+            return self.gpu.render(eye, heading_deg, 90.0, fov_deg, width, height, rover=rover, grain=sensor_noise / 255.0, entities=self.entities or None)
         altitude = max(altitude_m, 1.5)
         half_w = altitude * math.tan(math.radians(fov_deg / 2.0))
         half_h = half_w * height / width
