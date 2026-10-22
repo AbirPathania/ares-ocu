@@ -545,6 +545,7 @@ class MapView(QWidget):
         elif detection.get("confidence", 0.0) > existing.get("confidence", 0.0):
             existing["confidence"] = detection["confidence"]
             existing["type"] = detection.get("type", existing.get("type", "unknown"))
+            existing["label"] = detection.get("label", existing.get("label"))
         self.update()
 
     def confirm_detection(self, x: float, y: float) -> None:
@@ -1199,7 +1200,7 @@ class MapView(QWidget):
             # icons, and a scout hovering over its own detection collided with them.
             painter.setPen(QPen(QColor("#C6D0DA")))
             painter.setFont(QFont("Menlo", 8))
-            label = f"{threat_type.upper()} {confidence:.2f}"
+            label = f"{str(d.get('label') or threat_type).upper()} {confidence:.2f}"
             # Contacts on a swept lane cluster along it, so labels are
             # stepped to stop them stacking on one another.
             offset = radius + 3 + (index % 3) * 12
