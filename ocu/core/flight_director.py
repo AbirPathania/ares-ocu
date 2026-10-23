@@ -29,6 +29,8 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 
+import numpy as np
+
 from ocu.core.constants import (
     ARES_A_CEILING_M,
     DESCENT_RATE_COARSE_MS,
@@ -77,6 +79,15 @@ from ocu.core.navigation import (
 )
 from ocu.core.motion import KinematicBody, MotionLimits
 from ocu.core.recovery_sequencer import RecoveryStage
+
+#: The rover will not take a step that leaves its centre closer than this to the edge of a person or animal it
+#: has seen (a body length: the rover is 1.15 m long). A last line behind the reactive layer, like the one
+#: for mapped obstacles; chosen, not measured.
+DYNAMIC_STOP_GAP_M = 1.0
+
+#: Radius of the ring of points checked round the rover against its map under manual control: a little inside the
+#: footprint's half-diagonal (0.72 m), so that a grazing contact stops it and a near miss does not.
+MANUAL_GUARD_RING_M = 0.55
 
 #: A failed plan is retried at 1 Hz, not at tick rate. The map is still
 #: changing so retrying is right, but a search that cannot succeed is the
@@ -305,6 +316,14 @@ class FlightDirector:
         #: Plan only over ground that has been seen. See `navigate_to`.
         self.explore = True
         self.local_planner = LocalPlanner()
+        #: Moving things the rover has seen lately, given to the reactive layer as obstacle points, and how far
+        #: the nearest one is from a point (edge to centre). Set each tick by whoever knows where they are
+        #: (dynamic_obstacles.py); the route planner does not see them, because they will not be there for long.
+        self.dynamic_points = np.zeros((0, 2))
+        self.dynamic_gap_m = None
+        #: Whether the rover's own map marks a point as something it cannot drive on, set by whoever holds the map. Used
+        #: by the operator's driving keys, which have no route to keep the rover off an obstacle.
+        self.map_blocked_fn = None
         #: Whether the route being driven reaches the goal over seen ground.
         #: False while the vehicle is still working out the way: the path is
         #: then only the part it knows, ending at the place it is going to look
@@ -929,6 +948,25 @@ class FlightDirector:
         self._path_cells = []
         self.hold_for_recovery = False
 
+    def _blocked_points(self, x: float, y: float) -> int:
+        """How many of the points round the rover (its centre and a ring a little inside its footprint) lie on mapped obstacle."""
+        if self.map_blocked_fn is None:
+            return 0
+        n = int(self.map_blocked_fn(x, y))
+        for k in range(8):
+            a = k * math.pi / 4.0
+            n += int(self.map_blocked_fn(x + MANUAL_GUARD_RING_M * math.sin(a), y + MANUAL_GUARD_RING_M * math.cos(a)))
+        return n
+
+    def _manual_step_collides(self, before, after) -> bool:
+        """Whether a step under manual control would drive the rover onto, or toward, something it knows is there."""
+        if self._blocked_points(after.x, after.y) > self._blocked_points(before.x, before.y):
+            return True
+        if self.dynamic_gap_m is not None:
+            gap_after = self.dynamic_gap_m(after.x, after.y)
+            return gap_after < DYNAMIC_STOP_GAP_M and gap_after < self.dynamic_gap_m(before.x, before.y)
+        return False
+
     def _update_rover(
         self, dt_s: float, rover_x: float, rover_y: float, rover_heading: float, events: list
     ) -> tuple[float, float, float] | None:
@@ -947,9 +985,14 @@ class FlightDirector:
             body.apply_yaw_command(self.rover_manual.turn * body.limits.max_yaw_rate_deg_s, dt_s)
             heading_rad = math.radians(body.heading)
             demand = self.rover_manual.forward * self.commanded_speed_ms
+            before = copy.copy(body)
             body.apply_horizontal_command(
                 demand * math.sin(heading_rad), demand * math.cos(heading_rad), dt_s
             )
+            if self._manual_step_collides(before, body):
+                # The operator steers; the rover will not drive itself into what it knows is there. It stops, and a key
+                # that backs it away (or turns it) is still obeyed, because only a step that makes things worse is refused.
+                body.x, body.y, body.vx, body.vy = before.x, before.y, 0.0, 0.0
             self._rover_speed_ms = body.speed_ms
             self._rover_velocity = (body.vx, body.vy)
             self._last_rover_xy = (body.x, body.y)
@@ -1007,8 +1050,11 @@ class FlightDirector:
                 dx, dy = target[0] - body.x, target[1] - body.y
                 wanted = math.degrees(math.atan2(dx, dy)) % 360.0 if math.hypot(dx, dy) > 0.2 else body.heading
                 if self._costmap is not None:
+                    obstacles = self._costmap.obstacle_points()
+                    if self.dynamic_points.size:
+                        obstacles = np.vstack([obstacles, self.dynamic_points]) if obstacles.size else self.dynamic_points
                     command = self.local_planner.command(
-                        self._costmap.obstacle_points(),
+                        obstacles,
                         body.x, body.y, body.heading, wanted,
                         self.commanded_speed_ms, body.limits.max_decel_ms2, body.speed_ms,
                     )
@@ -1040,6 +1086,17 @@ class FlightDirector:
                 body.vx = body.vy = 0.0
                 self.path = []
                 self._path_cells = []
+            # The same last line for something that walks: the rover does not step to within a body's
+            # length of it, whatever the reactive layer decided, and waits for it to move on.
+            elif (
+                self.dynamic_gap_m is not None
+                and self.dynamic_gap_m(body.x, body.y) < DYNAMIC_STOP_GAP_M
+                and self.dynamic_gap_m(body.x, body.y) < self.dynamic_gap_m(before.x, before.y)
+            ):
+                # Only a step that closes the gap is refused. One that opens it is how the rover gets out of a gap
+                # it was already in, and refusing that as well would leave it stuck beside the thing for good.
+                body.__dict__.update(before.__dict__)
+                body.vx = body.vy = 0.0
 
             if math.hypot(self.goal[0] - body.x, self.goal[1] - body.y) < WAYPOINT_TOLERANCE_M:
                 self.goal = None

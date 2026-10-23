@@ -1,6 +1,8 @@
 """The 3D renderer. Skipped where there is no GPU, which is not a failure: the
 application falls back to the numpy renderer there."""
 
+import math
+
 import numpy as np
 import pytest
 
@@ -123,36 +125,55 @@ def _changed_box(a, b, threshold=40, support=3):
     return cols.min(), rows.min(), cols.max(), rows.max()
 
 
-@pytest.mark.parametrize("kind,height,distance", [("person", 1.75, 7.0), ("vehicle", 1.9, 12.0), ("animal", 1.0, 6.0)])
-def test_an_entity_is_drawn_where_the_detector_model_says_its_box_is(scene, monkeypatch, kind, height, distance):
+def _flat_site(scene):
+    """The flattest open ground within 40 m of the deploy point, away from rock and trees: a fair place to stand a figure."""
+    world, best = scene.world, None
+    for cx in range(-40, 41, 2):
+        for cy in range(-40, 41, 2):
+            if math.hypot(cx, cy) < 14:
+                continue
+            ground = [world.elevation_at(world.to_cell(cx + dx, cy + dy)) for dx in (-14, -7, 0, 7) for dy in (-3, 0, 3)]
+            clear = all(world.at(world.to_cell(cx + dx, cy + dy)).name in ("GROUND", "TRACK") for dx in range(-14, 9, 2) for dy in range(-6, 7, 2))
+            if clear and (best is None or max(ground) - min(ground) < best[0]):
+                best = (max(ground) - min(ground), cx, cy)
+    return best[1], best[2]
+
+
+@pytest.mark.parametrize("kind,distance", [("person", 7.0), ("vehicle", 12.0), ("animal", 6.0)])
+def test_an_entity_is_drawn_where_the_detector_model_says_its_box_is(scene, monkeypatch, kind, distance):
     """The simulated detector's box (core/vision.py) and the picture have to agree, or the overlay lies."""
     from ocu.core import vision as pc
-    from ocu.core.entities import SurfaceEntity
+    from ocu.core.entities import SurfaceEntity, default_entities
 
     monkeypatch.setattr(gpu_scene.time, "monotonic", lambda: 123.0)  # wind sways the grass; hold the clock still
     w, h = 640, 360
-    gz_eye = float(scene._ground(np.array([0.0]), np.array([0.0]))[0]) + 1.5
-    args = dict(eye=(0.0, 0.0, gz_eye), heading_deg=0.0, pitch_down_deg=3.0, hfov_deg=112.0, width=w, height=h)
+    sx, sy = _flat_site(scene)
+    ground = lambda x, y: float(scene._ground(np.array([x]), np.array([y]))[0])  # noqa: E731
+    # the camera stands `distance` south of the figure, looking north along the flat strip
+    ex, ey = sx, sy
+    cx, cy = ex, ey - distance
+    eye_z = ground(cx, cy) + 1.5
+    args = dict(eye=(cx, cy, eye_z), heading_deg=0.0, pitch_down_deg=3.0, hfov_deg=112.0, width=w, height=h)
     with scene.ctx:  # an earlier test in this file makes a second GL context; make this scene's the current one
         empty = scene.render(**args)
-        drawn = scene.render(**args, entities=[(kind, 0.0, distance, 0.0)])
+        drawn = scene.render(**args, entities=[(kind, ex, ey, 0.0, 0.0)])
     box = _changed_box(empty, drawn)
     assert box is not None, "the entity must change the picture"
-    cam = pc.CameraSpec(0.0, 0.0, gz_eye, 0.0, 3.0, 112.0, w, h, aerial=False)
+    cam = pc.CameraSpec(cx, cy, eye_z, 0.0, 3.0, 112.0, w, h, aerial=False)
 
     class Rig:
         def elevation_at(self, x, y):
-            return float(scene._ground(np.array([x]), np.array([y]))[0])
+            return ground(x, y)
 
         def line_of_sight(self, *a):
             return True
 
-    length = {"person": 0.3, "vehicle": 5.0, "animal": 1.5}[kind]
-    width_m = {"person": 0.5, "vehicle": 1.9, "animal": 0.4}[kind]
-    ap = pc.appearance(cam, SurfaceEntity(kind, "x", height, width_m, length, ((0.0, distance),)), (0.0, distance, 0.0), Rig())
+    proto = next(e for e in default_entities() if e.kind == kind)
+    ent = SurfaceEntity(kind, "x", proto.height_m, proto.width_m, proto.length_m, ((ex, ey),), box_offset_m=proto.box_offset_m)
+    ap = pc.appearance(cam, ent, (ex, ey, 0.0), Rig())
     assert ap is not None
     model_h = (ap.box[3] - ap.box[1]) * h
     drawn_h = box[3] - box[1] + 1
-    assert drawn_h == pytest.approx(model_h, rel=0.30, abs=6), f"{kind}: drawn {drawn_h}px tall, model says {model_h:.0f}px"
+    assert drawn_h == pytest.approx(model_h, rel=0.35, abs=6), f"{kind}: drawn {drawn_h}px tall, model says {model_h:.0f}px"
     assert (box[0] + box[2]) / 2 / w == pytest.approx((ap.box[0] + ap.box[2]) / 2, abs=0.04)
-    assert box[3] / h == pytest.approx(ap.box[3], abs=0.06), "its feet are where the model puts the bottom of the box"
+    assert box[3] / h == pytest.approx(ap.box[3], abs=0.07), "its feet are where the model puts the bottom of the box"

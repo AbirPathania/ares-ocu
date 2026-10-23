@@ -287,6 +287,32 @@ class TerrainWorld:
                 self._rock_height[index] = 0.0
                 self._pothole_depth[index] = 0.0
 
+    def stamp_object(
+        self, x: float, y: float, length_m: float, width_m: float, heading_deg: float, growth_m: float = FOOTPRINT_GROWTH_M
+    ) -> list[tuple[int, int]]:
+        """Make something that stands on the ground, a parked vehicle, an obstacle.
+
+        The cells an oriented rectangle covers, grown past its edge the way a boulder's
+        are (a cell it only touches is on the map), become ROCK: impassable, and a
+        surface a LiDAR ray stops at. The sensor cannot tell a truck from a boulder,
+        and does not need to; what the thing is comes from the cameras. Heading is in
+        degrees clockwise from +y, as everywhere else. Returns the cells stamped.
+        """
+        h = math.radians(heading_deg)
+        fwd, side = (math.sin(h), math.cos(h)), (math.cos(h), -math.sin(h))
+        half_l, half_w = length_m / 2.0 + growth_m, width_m / 2.0 + growth_m
+        reach = int(math.ceil(math.hypot(half_l, half_w) / self.cell_size_m)) + 1
+        cx, cy = self.to_cell(x, y)
+        stamped = []
+        for ix in range(cx - reach, cx + reach + 1):
+            for iy in range(cy - reach, cy + reach + 1):
+                wx, wy = (ix + 0.5) * self.cell_size_m, (iy + 0.5) * self.cell_size_m
+                dx, dy = wx - x, wy - y
+                if abs(dx * fwd[0] + dy * fwd[1]) <= half_l and abs(dx * side[0] + dy * side[1]) <= half_w and self._index((ix, iy)):
+                    self.set_cell((ix, iy), Terrain.ROCK)
+                    stamped.append((ix, iy))
+        return stamped
+
     def rock_height_at(self, cell: tuple[int, int]) -> float:
         index = self._index(cell)
         return float(self._rock_height[index]) if index else 0.0

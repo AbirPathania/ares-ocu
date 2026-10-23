@@ -392,49 +392,6 @@ def rover_mesh(length: float = 1.15, width: float = 0.85, height: float = 0.8) -
     return _merge(parts)
 
 
-# --- people, vehicles, animals ------------------------------------------------
-# Plain, low-poly figures facing +y, drawn so that a camera detector's boxes have something to sit on. They are
-# not photographs, and a model trained on photographs is not claimed to find them: what the simulated camera
-# reports about them comes from measured curves (core/vision.py), not from this picture.
-
-
-def person_mesh(height: float = 1.75) -> tuple[np.ndarray, np.ndarray]:
-    k = height / 1.75
-    parts = [
-        box((-0.11 * k, 0, 0.42 * k), (0.15 * k, 0.2 * k, 0.84 * k), (0.12, 0.14, 0.22)),  # legs
-        box((0.11 * k, 0, 0.42 * k), (0.15 * k, 0.2 * k, 0.84 * k), (0.12, 0.14, 0.22)),
-        box((0, 0, 1.18 * k), (0.42 * k, 0.24 * k, 0.62 * k), (0.62, 0.30, 0.16)),  # jacket
-        box((-0.27 * k, 0, 1.15 * k), (0.1 * k, 0.14 * k, 0.58 * k), (0.58, 0.28, 0.15)),  # arms
-        box((0.27 * k, 0, 1.15 * k), (0.1 * k, 0.14 * k, 0.58 * k), (0.58, 0.28, 0.15)),
-        box((0, 0, 1.64 * k), (0.2 * k, 0.22 * k, 0.24 * k), (0.78, 0.60, 0.48)),  # head
-    ]
-    return _merge(parts)
-
-
-def animal_mesh(height: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
-    k = height / 1.0
-    parts = [box((0, 0, 0.72 * k), (0.42 * k, 1.1 * k, 0.4 * k), (0.46, 0.33, 0.22)),  # body
-             box((0, 0.62 * k, 0.88 * k), (0.16 * k, 0.2 * k, 0.5 * k), (0.44, 0.31, 0.21)),  # neck
-             box((0, 0.74 * k, 1.08 * k), (0.15 * k, 0.3 * k, 0.16 * k), (0.40, 0.28, 0.19)),  # head
-             box((0, -0.58 * k, 0.78 * k), (0.1 * k, 0.12 * k, 0.16 * k), (0.88, 0.84, 0.78))]  # tail
-    for x in (-0.14, 0.14):
-        for y in (-0.4, 0.4):
-            parts.append(box((x * k, y * k, 0.26 * k), (0.07 * k, 0.07 * k, 0.52 * k), (0.34, 0.24, 0.16)))
-    return _merge(parts)
-
-
-def truck_mesh(height: float = 1.9, length: float = 5.0, width: float = 1.9) -> tuple[np.ndarray, np.ndarray]:
-    k = height / 1.9
-    parts = [box((0, 0, 0.85 * k), (width, length * 0.96, 0.7 * k), (0.74, 0.74, 0.70)),  # body
-             box((0, length * 0.14, 1.42 * k), (width * 0.92, length * 0.34, 0.62 * k), (0.62, 0.64, 0.66)),  # cab
-             box((0, length * 0.14, 1.5 * k), (width * 0.94, length * 0.22, 0.34 * k), (0.12, 0.16, 0.22)),  # glass
-             box((0, -length * 0.22, 1.1 * k), (width * 0.9, length * 0.5, 0.3 * k), (0.52, 0.54, 0.52))]  # bed
-    for y in (-length * 0.32, length * 0.32):
-        for side in (-1, 1):
-            parts.append(wheel((side * (width * 0.5), y, 0.4 * k), 0.4 * k, 0.28, (0.07, 0.07, 0.08)))
-    return _merge(parts)
-
-
 # --- grass ------------------------------------------------------------------
 
 

@@ -49,7 +49,7 @@ from ocu.core.constants import (
 )
 from ocu.core.comms import GHOST, LCA, STANDARD, profile_for
 from ocu.core.control_authority import ControlAuthority
-from ocu.core.flight_director import AircraftMode, FlightDirector, RoverMode
+from ocu.core.flight_director import DYNAMIC_STOP_GAP_M, AircraftMode, FlightDirector, RoverMode
 from ocu.core.geofence import Geofence
 from ocu.core.detection import REPORT_FLOOR, classify, fuse, sweep
 from ocu.core.lidar import LIDAR_RANGE_M, LIDAR_SCAN_HZ, cast_scan
@@ -67,12 +67,13 @@ from ocu.core.power import (
 )
 from ocu.core.sweep import cut_washouts_on_lanes, plan_lane_sweep, sweep_from_first_scan
 from ocu.core.targets import default_field
-from ocu.core.terrain import CELL_SIZE_M, WORLD_HALF_EXTENT_M, PerceptionMap, TerrainWorld
+from ocu.core.terrain import IMPASSABLE, CELL_SIZE_M, WORLD_HALF_EXTENT_M, PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
 from ocu.sim.mission_clock import MissionClock
 from ocu.ui.alert_banner import AlertBanner
 from ocu.core.aerial import scout_sighting
-from ocu.core.entities import default_entities
+from ocu.core.dynamic_obstacles import DynamicObstacles
+from ocu.core.entities import default_entities, settle_entities, stamp_static_entities
 from ocu.core.vision import PERCEPTION_HZ, THREAT_TYPE, CameraSpec, ConfirmationGate, ContactRegistry, PerceptionSensor
 from ocu.core.camera import CameraRig
 from ocu.core.occlusion import occlusion_bearing
@@ -100,6 +101,13 @@ SCOUT_RECOMMEND_HIDDEN_FRACTION = 0.30
 #: that creeps up by a thousandth as the vehicle moves is not news, and
 #: reporting every one buries the log; a step of this size is.
 DETECTION_REPORT_STEP = 0.05
+
+#: A person or animal stops when the rover is within this of the edge of it, until it has passed. A choice, not a
+#: measurement (DECISIONS.md).
+YIELD_GAP_M = 2.5
+
+#: The rover gives up a waypoint after standing this long beside something that will not clear it. Chosen, not measured.
+STALL_GIVE_UP_S = 8.0
 
 #: The rover has to be moving at least this fast for "ahead" to be where it is
 #: going, before it recommends anything about it. Half the survey pace: well
@@ -236,7 +244,15 @@ class MainWindow(QMainWindow):
         # detector that does or does not find them (core/vision.py, from measured curves). A camera detection
         # becomes a report only after it persists (the confirmation gate), and where it was first reported is
         # remembered so that a later, better reading updates that report instead of adding another.
-        self.surface_entities = default_entities(sweep=self.sweep)
+        # Placed on ground they can stand on, parked ones stamped into the world so the LiDAR hits them and the
+        # rover plans round them, walking ones tracked separately (core/dynamic_obstacles.py).
+        self.surface_entities = settle_entities(self.terrain, default_entities(sweep=self.sweep))
+        stamp_static_entities(self.terrain, self.surface_entities)
+        self.dynamic_obstacles = DynamicObstacles()
+        #: Seconds each walking entity has spent stopped for the rover; its pose is read at mission time minus this.
+        self._entity_hold: dict[str, float] = {}
+        self._stalled_s = 0.0
+        self._blocked_by: str | None = None
         self.camera_detector = PerceptionSensor()
         self.camera_gate = ConfirmationGate()
         self.camera_contacts = ContactRegistry()
@@ -709,6 +725,8 @@ class MainWindow(QMainWindow):
         dt = DIRECTOR_TICK_MS / 1000.0 * self.mission_clock.speed
         self._apply_manual_input()
         rover = self.units["rover"]
+        self._advance_entity_holds(dt, rover)
+        self._update_dynamic_obstacles(rover)
         poses, rover_pose, events = self.flight_director.tick(
             dt, rover.pose.x, rover.pose.y, rover.pose.heading
         )
@@ -987,8 +1005,12 @@ class MainWindow(QMainWindow):
             entities=self._entities_to_draw(),
         )
 
-    def _entities_to_draw(self) -> list[tuple[str, float, float, float]]:
-        return [(e.kind, x, y, h) for e, (x, y, h) in zip(self.surface_entities, self._entity_poses(), strict=True)]
+    def _entities_to_draw(self) -> list[tuple[str, float, float, float, float]]:
+        t = self.mission_clock.clock_s
+        out = []
+        for e, (x, y, h) in zip(self.surface_entities, self._entity_poses(), strict=True):
+            out.append((e.kind, x, y, h, e.gait_phase(t - self._entity_hold.get(e.name, 0.0))))
+        return out
 
     def closeEvent(self, event) -> None:
         if self._gpu_worker is not None:
@@ -1399,6 +1421,37 @@ class MainWindow(QMainWindow):
                     source_id=unit_id,
                 )
 
+    def _update_dynamic_obstacles(self, rover) -> None:
+        """What the rover can see of the things that walk, handed to its reactive layer before it steers."""
+        now = self.mission_clock.clock_s
+        moving = [(e.name, *e.pose_at(now - self._entity_hold.get(e.name, 0.0))[:2], e.obstacle_radius_m) for e in self.surface_entities if not e.static]
+        self.dynamic_obstacles.update(now, (rover.pose.x, rover.pose.y), moving, self.terrain)
+        self._give_up_on_a_blocked_waypoint(rover, now)
+        self.flight_director.dynamic_points = self.dynamic_obstacles.points(now)
+        if self.flight_director.map_blocked_fn is None:
+            self.flight_director.map_blocked_fn = lambda x, y: self.perception.at(self.terrain.to_cell(x, y)) in IMPASSABLE
+        self.flight_director.dynamic_gap_m = lambda x, y: self.dynamic_obstacles.nearest_gap_m(x, y, now)
+
+    def _give_up_on_a_blocked_waypoint(self, rover, now: float) -> None:
+        """A rover that has stood still for a while with something walking beside its goal skips that goal.
+
+        The reactive layer will not close on a person or an animal, and one that stands still (they stop for
+        the rover) next to a waypoint can hold it for as long as both wait. A vehicle in that position
+        waits a little, then tries the next point; this is the same decision, taken the way the planner
+        takes it for a point blocked by a rock.
+        """
+        fd = self.flight_director
+        near = self.dynamic_obstacles.nearest(rover.pose.x, rover.pose.y, now)
+        waiting = fd.rover_mode.name == "NAVIGATING" and fd.goal is not None and fd._rover_speed_ms < 0.05
+        if waiting and near is not None and near[1] < DYNAMIC_STOP_GAP_M + 1.5:
+            self._stalled_s += DIRECTOR_TICK_MS / 1000.0 * self.mission_clock.speed
+            self._blocked_by = near[0]
+        else:
+            self._stalled_s = 0.0
+        if self._stalled_s > STALL_GIVE_UP_S:
+            self._stalled_s = 0.0
+            fd.plan_failed = True
+
     def _camera_spec(self, unit_id: str, width: int, height: int) -> CameraSpec:
         """The pinhole camera a unit's feed is rendered with: the same eye, heading, pitch and field of view."""
         pose = self.units[unit_id].pose
@@ -1409,7 +1462,21 @@ class MainWindow(QMainWindow):
 
     def _entity_poses(self) -> list[tuple[float, float, float]]:
         t = self.mission_clock.clock_s
-        return [e.pose_at(t) for e in self.surface_entities]
+        return [e.pose_at(t - self._entity_hold.get(e.name, 0.0)) for e in self.surface_entities]
+
+    def _advance_entity_holds(self, dt: float, rover) -> None:
+        """A person or an animal stops for a vehicle coming close, and goes on once it has passed.
+
+        Nothing walks into a rover that is driving round it, or waiting for it to move: the rover refuses to
+        step toward them (`DYNAMIC_STOP_GAP_M`), and they refuse to step toward it.
+        """
+        t = self.mission_clock.clock_s
+        for e in self.surface_entities:
+            if e.static:
+                continue
+            x, y, _ = e.pose_at(t - self._entity_hold.get(e.name, 0.0))
+            if math.hypot(x - rover.pose.x, y - rover.pose.y) - e.obstacle_radius_m < YIELD_GAP_M:
+                self._entity_hold[e.name] = self._entity_hold.get(e.name, 0.0) + dt
 
     def _tick_vision(self) -> None:
         """What each running camera's detector reports about the people, vehicles and animals in view.
@@ -1641,10 +1708,12 @@ class MainWindow(QMainWindow):
             ]
             self.event_log.log(
                 self.mission_clock.clock_s,
-                f"{lane} point blocked with no clearance, skipping to the next",
+                f"{lane} point blocked by the {self._blocked_by}, skipping to the next" if self._blocked_by
+                else f"{lane} point blocked with no clearance, skipping to the next",
                 level="caution",
             )
             self._waypoint_index += 1
+            self._blocked_by = None
             self._begin_autonomous_sweep()
         elif event == "WAYPOINT_REACHED":
             self._waypoint_index += 1
@@ -1994,6 +2063,8 @@ class MainWindow(QMainWindow):
         self._aerial_evidence.clear()
         self.camera_gate = ConfirmationGate()
         self.camera_contacts = ContactRegistry()
+        self.dynamic_obstacles.clear()
+        self._entity_hold.clear()
         self._vision_frame = -1
         for feed in self.camera_feeds.values():
             feed.set_detections([])

@@ -17,12 +17,31 @@ No Qt import belongs in this file.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+import numpy as np
 
 from ocu.core.sweep import LaneSweep, sweep_from_first_scan
-from ocu.core.terrain import TerrainWorld
+from ocu.core.terrain import IMPASSABLE, WORLD_EDGE_MARGIN_M, TerrainWorld
 
 KINDS = ("person", "vehicle", "animal")
+
+#: How much room a thing takes on the ground, as a circle, for the planner. A walking person is
+#: about 0.5 m across at the shoulders, a deer about 1.6 m long; each is given a little more than
+#: that, because the rover treats the circle's edge as the obstacle. The margin for movement is added
+#: separately (dynamic_obstacles.py). Chosen, not measured.
+OBSTACLE_RADIUS_M = {"person": 0.4, "animal": 0.8, "vehicle": 2.8}
+
+#: Distance covered in one full stride (two steps), so that the legs move as fast as the ground goes by.
+STRIDE_M = {"person": 1.45, "animal": 1.35}
+
+#: Nothing is placed nearer than this to the deploy point, where the rover starts and the ground is cleared.
+MIN_FROM_DEPLOY_M = 7.0
+
+#: A parked vehicle needs ground this level under it, and every cell it covers (and a metre round it)
+#: clear of rock, trees, bushes and holes.
+MAX_FOOTPRINT_RELIEF_M = 0.30
+CLEAR_MARGIN_M = 1.0
 
 
 @dataclass(frozen=True)
@@ -34,6 +53,8 @@ class SurfaceEntity:
     length_m: float  # along the direction it faces
     path: tuple[tuple[float, float], ...]  # world points; one point means it stays put
     speed_ms: float = 0.0
+    heading_deg: float = 0.0  # only for something that stays put; a walker faces the way it walks
+    box_offset_m: float = 0.0  # how far ahead of its position the middle of its outline lies (a deer's head is out front)
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -41,11 +62,24 @@ class SurfaceEntity:
         if not self.path:
             raise ValueError("an entity needs at least one position")
 
+    @property
+    def static(self) -> bool:
+        return len(self.path) == 1 or self.speed_ms <= 0.0
+
+    def gait_phase(self, t_s: float) -> float:
+        """Where in its stride (0 to 1) a walker is after t_s seconds of walking: one stride per STRIDE_M walked."""
+        if self.static:
+            return 0.0
+        return (self.speed_ms * max(t_s, 0.0) / STRIDE_M.get(self.kind, 1.4)) % 1.0
+
+    @property
+    def obstacle_radius_m(self) -> float:
+        return OBSTACLE_RADIUS_M[self.kind]
+
     def pose_at(self, t_s: float) -> tuple[float, float, float]:
         """(x, y, heading in degrees clockwise from +y) after t_s seconds, walking its path back and forth."""
-        if len(self.path) == 1 or self.speed_ms <= 0.0:
-            heading = self._heading(0)
-            return self.path[0][0], self.path[0][1], heading
+        if self.static:
+            return self.path[0][0], self.path[0][1], self.heading_deg % 360.0
         legs = [math.dist(a, b) for a, b in zip(self.path, self.path[1:], strict=False)]
         total = sum(legs)
         if total <= 0.0:
@@ -71,18 +105,104 @@ class SurfaceEntity:
         return math.degrees(math.atan2(x1 - x0, y1 - y0)) % 360.0
 
 
+def _passable(world: TerrainWorld, x: float, y: float, radius: float) -> bool:
+    """Every cell within `radius` of the point is something a vehicle could drive on."""
+    cx, cy = world.to_cell(x, y)
+    reach = int(math.ceil(radius / world.cell_size_m))
+    for ix in range(cx - reach, cx + reach + 1):
+        for iy in range(cy - reach, cy + reach + 1):
+            wx, wy = (ix + 0.5) * world.cell_size_m, (iy + 0.5) * world.cell_size_m
+            if math.hypot(wx - x, wy - y) <= radius and world.at((ix, iy)) in IMPASSABLE:
+                return False
+    return True
+
+
+def _level(world: TerrainWorld, x: float, y: float, radius: float) -> bool:
+    heights = [
+        world.elevation_at((ix, iy))
+        for ix in range(world.to_cell(x, y)[0] - int(radius / world.cell_size_m), world.to_cell(x, y)[0] + int(radius / world.cell_size_m) + 1)
+        for iy in range(world.to_cell(x, y)[1] - int(radius / world.cell_size_m), world.to_cell(x, y)[1] + int(radius / world.cell_size_m) + 1)
+    ]
+    return max(heights) - min(heights) <= MAX_FOOTPRINT_RELIEF_M
+
+
+def _offsets(max_m: float = 24.0):
+    """Candidate shifts, nearest first: the place asked for, then rings round it."""
+    yield 0.0, 0.0
+    r = 1.0
+    while r <= max_m:
+        n = max(8, int(2 * math.pi * r / 1.0))
+        for k in range(n):
+            a = 2 * math.pi * k / n
+            yield r * math.sin(a), r * math.cos(a)
+        r += 1.0
+
+
+def settle_entities(world: TerrainWorld, entities: list[SurfaceEntity]) -> list[SurfaceEntity]:
+    """Move each entity to the nearest ground it can honestly stand or walk on.
+
+    A vehicle parked inside a stand of trees, a person walking through a boulder: placed on purpose does
+    not mean placed blind. A parked vehicle needs level, clear ground under its whole footprint (and a
+    metre round it); a walker or animal needs every point it will pass over clear, with room either side.
+    The first place that works, nearest to the one asked for, is used. Raises if there is none within 24 m,
+    which would mean the scenario is not possible on this ground.
+    """
+    out = []
+    for e in entities:
+        radius = max(e.length_m, e.width_m) / 2.0 if e.static else e.obstacle_radius_m
+        found = None
+        for dx, dy in _offsets():
+            for dh in ((0.0, 20.0, -20.0, 40.0, -40.0, 90.0) if e.static else (0.0,)):
+                path = tuple((x + dx, y + dy) for x, y in e.path)
+                if any(math.hypot(x, y) < MIN_FROM_DEPLOY_M for x, y in path):
+                    continue
+                if any(max(abs(x), abs(y)) > world.half_extent_m - WORLD_EDGE_MARGIN_M for x, y in path):
+                    continue  # off the edge of the map is not ground
+                if e.static:
+                    ok = _passable(world, *path[0], radius + CLEAR_MARGIN_M) and _level(world, *path[0], radius)
+                else:
+                    pts = [
+                        (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
+                        for a, b in zip(path, path[1:], strict=False)
+                        for f in np.linspace(0.0, 1.0, max(2, int(math.dist(a, b) / 0.5)))
+                    ]
+                    ok = all(_passable(world, x, y, radius + 0.4) for x, y in pts or [path[0]])
+                if ok:
+                    found = replace(e, path=path, heading_deg=(e.heading_deg + dh) % 360.0)
+                    break
+            if found:
+                break
+        if found is None:
+            raise ValueError(f"no clear ground within 24 m of the requested place for {e.name!r}")
+        out.append(found)
+    return out
+
+
+def stamp_static_entities(world: TerrainWorld, entities: list[SurfaceEntity]) -> list[tuple[int, int]]:
+    """Put every parked thing into the world as an obstacle, so the LiDAR hits it and the rover plans round it."""
+    cells = []
+    for e in entities:
+        if e.static:
+            x, y, heading = e.pose_at(0.0)
+            cells += world.stamp_object(x, y, e.length_m, e.width_m, heading)
+    return cells
+
+
 def default_entities(seed: int = 20261016, sweep: LaneSweep | None = None) -> list[SurfaceEntity]:
     """Three entities, each a different lesson, positioned from the sweep.
 
       - a person walking across the ground ahead of the lanes. Large enough to be seen from the ground
         at tens of metres, and a case where the camera's view from the air is the harder one
-      - a parked vehicle off to one side, far enough that the rover's camera barely resolves it
+      - a parked vehicle off to one side, far enough that the rover's camera barely resolves it, and away from the points
+        the operator is likely to send the rover to
       - an animal moving slowly near the first lane: not a threat, and the thing a detector most often
         invents on rocks, so seeing a real one is the contrast
     """
     sweep = sweep if sweep is not None else sweep_from_first_scan(TerrainWorld(seed=seed))
+    # Sizes are those of the figures drawn (render/figures.py): the whole outline, head and pack and roof rack included,
+    # which is what a person drawing a box round it would draw.
     return [
-        SurfaceEntity("person", "walker", 1.75, 0.5, 0.3, (sweep.at(1, 22.0, 12.0), sweep.at(1, 22.0, -4.0)), speed_ms=1.2),
-        SurfaceEntity("vehicle", "parked truck", 1.9, 1.9, 5.0, (sweep.at(3, 26.0, -10.0),)),
-        SurfaceEntity("animal", "deer", 1.0, 0.4, 1.5, (sweep.at(0, 10.0, 9.0), sweep.at(0, 16.0, 11.0), sweep.at(0, 12.0, 7.0)), speed_ms=0.5),
+        SurfaceEntity("person", "walker", 1.78, 0.54, 0.63, (sweep.at(1, 22.0, 12.0), sweep.at(1, 22.0, -4.0)), speed_ms=1.2, box_offset_m=-0.095),
+        SurfaceEntity("vehicle", "parked truck", 2.20, 2.12, 5.70, (sweep.at(3, 21.0, 14.0),), heading_deg=65.0),
+        SurfaceEntity("animal", "deer", 1.47, 0.34, 2.08, (sweep.at(0, 10.0, 9.0), sweep.at(0, 16.0, 11.0), sweep.at(0, 12.0, 7.0)), speed_ms=0.5, box_offset_m=0.28),
     ]

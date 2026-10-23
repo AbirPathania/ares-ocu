@@ -1218,8 +1218,8 @@ The file carries its model hash and its caveats, and `tests/test_vision.py` chec
 - Position: where the bottom of the box meets flat ground, with 2 pixels of noise, which grows with the square of
   range. A distant detection is placed loosely.
 - The three entities and their sizes, speeds and positions (`default_entities`): a person 1.75 m tall walking
-  1.2 m/s across the ground ahead of the lanes, a parked vehicle 1.9 m tall about 26 m along lane 3 and 10 m off
-  it, a deer-sized animal 1.0 m tall wandering at 0.5 m/s near the first lane. Placed on purpose relative to the
+  1.2 m/s across the ground ahead of the lanes, a parked vehicle (now the 2.2 m outline of the pickup that is drawn) 21 m along lane 3 and 14 m off
+  it on the far side, clear of the destinations the operator and the tests send the rover to, a deer-sized animal 1.0 m tall wandering at 0.5 m/s near the first lane. Placed on purpose relative to the
   sweep, like the buried objects; nothing appears at random except what the detector invents.
 
 **The eighth threat class is still open, and this does not close it.** An animal is not in the spec's enum
@@ -1253,3 +1253,65 @@ photographs is not claimed to find them: what the detector reports about them co
 repository, so the numbers here would be wrong for them). Tiled or ensembled detection (not adopted there for
 the driving camera). Entities that hide, cross each other, or change size. The scouts' detections on the
 real renders, which no model was measured on.
+
+## Things on the ground are obstacles, and look like what they are
+
+The first version of the people, vehicles and animals was drawn and detected and nothing more: the rover drove
+straight through a parked truck, and they were boxes with limbs. Both are fixed.
+
+**A parked vehicle is part of the ground.** `TerrainWorld.stamp_object` marks the cells its outline covers (grown
+by 0.3 m, as a boulder's are) as ROCK: impassable, and a surface a LiDAR ray stops at. The LiDAR maps it, the route
+planner and the reactive layer drive round it, and the costmap's last-line check refuses a step onto it, exactly as
+for a boulder. The sensor cannot tell a truck from a rock and the map says ROCK; what it is comes from the camera.
+Run with the stamp switched off, the rover's centre ends up 0.0 m from the truck (it drives through it); with it,
+never closer than half a metre, over the whole run (`tests/test_obstacles_window.py`).
+
+**Things that walk are obstacles the rover is told about, briefly.** The perception map keeps every obstacle it has
+ever mapped, on purpose, so stamping a person who crosses the lane would leave a wall behind them for the rest of
+the mission. `core/dynamic_obstacles.py` keeps them apart: a person or animal is noticed only when the LiDAR could
+see them (within 32 m, nothing that blocks a beam between), is followed at the velocity it was seen to have, is
+remembered for 4 s after it was last seen, and is given to the reactive planner as obstacle points: its disc, grown
+by 0.6 m because it can move, now and again 1 s and 2 s ahead, so the rover steers for where it is going. The route
+planner does not see them. A last line, like the one for mapped obstacles, refuses any step that would bring the
+rover's centre within 1.0 m of the edge of one, but only a step that closes the gap, so the rover can always back
+away. The radii (0.4 m for a person, 0.8 m for an animal), the margin, the lead times, the memory and the 1.0 m are
+this build's choices.
+
+**They stop for the rover.** Nothing walks into a rover that is driving round it or waiting for it. A person or an
+animal within 2.5 m of the rover stops until it has passed (`YIELD_GAP_M`): without that, a deer wandered into a
+waiting rover and the rover's centre ended up inside it (a gap of minus 0.58 m in the default run). That stand-off
+has a second half: a walker that has stopped beside a waypoint can hold the rover there for as long as both wait,
+so a rover that has stood still for 8 s (`STALL_GIVE_UP_S`) with one beside it skips that point, the same decision
+the planner takes for a point blocked by a rock, and says so in the log ("... point blocked by the deer, skipping
+to the next"). Both numbers are choices.
+
+**Placement.** Parked and walking things are placed on ground they can honestly stand or walk on: a vehicle needs
+level ground (0.3 m of relief or less under its footprint) with a metre of clear ground all round it, a walker needs
+every point of its path clear with 0.4 m either side, nothing is within 7 m of the deploy point or off the edge of
+the map, and the nearest place that works is used (`settle_entities`). The scenario raises if there is none within
+24 m, rather than putting a truck in a stand of trees. Sizes are those of what is drawn (a roof rack and a pack
+are part of the outline), so the detector's box, the obstacle footprint and the picture agree.
+
+**What they look like.** There are no photographed models of these in the free, licence-clean sources this build uses
+(Poly Haven has rocks, plants and props, not a pickup, a person or a deer), so they are built, in
+`render/figures.py`, from three primitives (a superellipsoid, a lofted tube, a surface of revolution) with the
+proportions and colours of the real thing: a long-wheelbase utility pickup with a glass greenhouse, roof rack,
+snorkel, bull bar, tyres with tread blocks and an open bed with a spare wheel and a jerrycan in it (about 39 000
+triangles; a person is about 8 500 and a deer about 7 800); a person in field clothes with a rucksack, sleeping mat and wide-brimmed hat; a doe with a countershaded
+coat, white rump and tail, large ears and a lateral-sequence walk. Each vertex says what it is made of (paint,
+glass, rubber, cloth, skin, hide, bright metal, lamp, hair), and the shader treats each properly: clear-coated
+paint under a layer of dust that rises from the ground, glass that darkens and shows the sky, cloth with a weave and
+folds, hide with a fine grain and soft light, skin that glows when the sun is behind it. People and deer come as a
+cycle of 12 poses, chosen from how far they have walked, so the legs move as fast as the ground goes by and stop
+when the figure stops. They cast shadows: each frame starts from a copy of the still scene's shadow map and adds
+them. Frame time with and without the three figures is the same to within noise on this machine (about 10 ms for a
+640 by 360 frame). A test renders each figure with the real renderer and checks its drawn height, centre and feet
+against the detector model's box for it, on flat open ground.
+
+**Not covered.** The numpy fallback renderer draws none of them (and shows an old-style dome where a truck is
+stamped). The figures are made, not scanned, and are plainly of a lower class than the photographed rocks they stand
+among; the colours were chosen by eye against the scene. They are not given the ground's slope: a vehicle rests on
+the average of the ground under its four wheels, so on ground more than a few degrees out of level a wheel can sink or
+hover, which is why the level-ground rule exists. Moving things do not appear in the LiDAR cloud. A walker that
+leaves its first marker by more than 8 m is a second report. Nothing about what a real operator does with any of
+this has been tested.

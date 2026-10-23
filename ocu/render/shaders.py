@@ -304,7 +304,7 @@ void main() {
 """
 
 INSTANCE_FRAG = COMMON + SHADOWED + """
-uniform int u_kind;        // 0 rock, 1 foliage, 2 machine, 3 grass
+uniform int u_kind;        // 0 rock, 1 foliage, 2 machine, 3 grass, 4 figure
 in vec3 v_world;
 in vec3 v_normal;
 in vec3 v_local;
@@ -322,6 +322,13 @@ void main() {
     vec3 albedo = v_rgb * v_tint.rgb;
     float ao = v_ao;
     float leaf = 0.0;
+    // Figures (kind 4): the vertex says what it is made of, packed with its occlusion.
+    int mat = 0;
+    float soft = 0.0, specAmt = 0.0, specPow = 40.0, reflAmt = 0.0, fresAmt = 0.0, emit = 0.0, sss = 0.0;
+    if (u_kind == 4) {
+        mat = int(floor(v_ao * 0.5 + 0.001));
+        ao = v_ao - 2.0 * float(mat);
+    }
 
     if (u_kind == 0) {
         // Weathered stone: banding, lichen on the sunward tops, cracks, a rough grain.
@@ -358,12 +365,56 @@ void main() {
     } else if (u_kind == 3) {
         leaf = 1.0;
         albedo *= 0.85 + 0.3 * vnoise3(v_world * 3.0);
+    } else if (u_kind == 4) {
+        // Dust kicked up to the height this figure stands in it, thicker in the hollows of a noisy field.
+        float field_n = fbm3(v_world * 2.6);
+        float dust = clamp(1.0 - v_local.z / max(v_seed, 0.05), 0.0, 1.0) * (0.45 + 0.55 * field_n);
+        dust += smoothstep(0.75, 1.0, n.z) * 0.14 * field_n;
+        dust = clamp(dust, 0.0, 0.85);
+        vec3 dirt = vec3(0.46, 0.37, 0.27) * (0.8 + 0.4 * field_n);
+        if (mat == 0) {            // paint under a clear coat, and dust
+            float scratch = smoothstep(0.62, 0.7, vnoise3(v_world * 26.0 + vec3(0.0, 0.0, 3.0)));
+            albedo *= 1.0 - 0.10 * scratch;
+            albedo = mix(albedo, dirt, clamp(dust * 0.75, 0.0, 0.85));
+            specAmt = 0.9 * (1.0 - dust); specPow = 110.0; reflAmt = 0.05 * (1.0 - dust); fresAmt = 0.35 * (1.0 - dust);
+        } else if (mat == 1) {     // glass: dark, and it shows the sky
+            albedo = vec3(0.012, 0.017, 0.022) + dirt * 0.05 * dust;
+            specAmt = 1.3; specPow = 200.0; reflAmt = 0.16; fresAmt = 0.85;
+        } else if (mat == 2) {     // rubber
+            albedo *= 0.72 + 0.56 * vnoise3(v_world * 55.0);
+            albedo = mix(albedo, dirt, dust * 0.55);
+            specAmt = 0.04;
+        } else if (mat == 3) {     // dark plastic and metal
+            albedo = mix(albedo, dirt, dust * 0.4);
+            specAmt = 0.3; specPow = 28.0; fresAmt = 0.1;
+        } else if (mat == 4) {     // cloth: a weave, folds, dust at the hem
+            albedo *= 0.86 + 0.28 * vnoise3(v_world * 120.0);
+            n = normalize(n + (vec3(vnoise3(v_world * 13.0), vnoise3(v_world * 13.0 + 4.0), vnoise3(v_world * 13.0 + 9.0)) - 0.5) * 0.55);
+            albedo = mix(albedo, dirt, dust * 0.5);
+            soft = 0.35; specAmt = 0.02;
+        } else if (mat == 5) {     // skin
+            albedo *= 0.93 + 0.14 * vnoise3(v_world * 34.0);
+            soft = 0.55; specAmt = 0.14; specPow = 18.0; sss = 0.35;
+        } else if (mat == 6) {     // hide
+            albedo *= 0.76 + 0.48 * vnoise3(v_world * vec3(70.0, 70.0, 26.0));
+            albedo = mix(albedo, dirt, dust * 0.4);
+            n = normalize(n + (vec3(vnoise3(v_world * 50.0), vnoise3(v_world * 50.0 + 3.0), vnoise3(v_world * 50.0 + 8.0)) - 0.5) * 0.35);
+            soft = 0.3; specAmt = 0.04; fresAmt = 0.12; sss = 0.12;
+        } else if (mat == 7) {     // bright metal
+            albedo = mix(albedo, dirt, dust * 0.45);
+            specAmt = 1.0; specPow = 120.0; reflAmt = 0.42 * (1.0 - dust); fresAmt = 0.4;
+        } else if (mat == 8) {     // a lamp lens
+            specAmt = 1.2; specPow = 150.0; reflAmt = 0.25; fresAmt = 0.5; emit = 0.12;
+        } else {                   // hair
+            soft = 0.4; specAmt = 0.25; specPow = 14.0;
+        }
     } else {
         // machine: small specular and no dirt
     }
 
     float sh = shadowAt(v_world, n);
-    float wrap = leaf > 0.5 ? clamp((dot(n, u_sun) + 0.45) / 1.45, 0.0, 1.0) : max(dot(n, u_sun), 0.0);
+    float wrap = leaf > 0.5 ? clamp((dot(n, u_sun) + 0.45) / 1.45, 0.0, 1.0)
+               : (soft > 0.0 ? clamp((dot(n, u_sun) + soft) / (1.0 + soft), 0.0, 1.0) : max(dot(n, u_sun), 0.0));
     vec3 lit = albedo * (sunLight() * wrap * sh + skyLight(n) * (0.55 + 0.45 * sh)) * (0.30 + 0.80 * ao);
     if (leaf > 0.5) {
         // Light through leaves when the sun is behind them.
@@ -373,6 +424,18 @@ void main() {
     if (u_kind == 2) {
         vec3 h = normalize(u_sun - view);
         lit += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, h), 0.0), 40.0) * 0.5 * sh;
+    }
+    if (u_kind == 4) {
+        vec3 h = normalize(u_sun - view);
+        lit += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, h), 0.0), specPow) * specAmt * sh;
+        // The sky in a glossy surface, more of it at a grazing angle, and the ground's bounce below.
+        vec3 refl = reflect(view, n);
+        vec3 env = refl.z > 0.0 ? skyColor(refl) : vec3(0.30, 0.24, 0.17) * 0.8;
+        float fres = pow(1.0 - clamp(dot(n, -view), 0.0, 1.0), 4.0);
+        lit = mix(lit, env * (0.35 + 0.65 * sh), clamp(reflAmt + fres * fresAmt, 0.0, 0.92));
+        // Light through thin flesh when the sun is behind it.
+        lit += albedo * vec3(0.70, 0.18, 0.06) * pow(max(dot(-view, u_sun), 0.0), 2.0) * sss * sh;
+        lit += albedo * emit;
     }
     lit = applyFog(lit, dist, view);
     f_color = vec4(finish(lit), 1.0);

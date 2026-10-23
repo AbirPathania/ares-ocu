@@ -123,14 +123,14 @@ class Appearance:
     ground_range_m: float
 
 
-def entity_box_corners(x: float, y: float, ground_z: float, heading_deg: float, height_m: float, width_m: float, length_m: float) -> np.ndarray:
+def entity_box_corners(x: float, y: float, ground_z: float, heading_deg: float, height_m: float, width_m: float, length_m: float, offset_m: float = 0.0) -> np.ndarray:
     """The eight corners of the box an entity occupies, facing `heading_deg`."""
     h = math.radians(heading_deg)
     fwd, side = np.array([math.sin(h), math.cos(h)]), np.array([math.cos(h), -math.sin(h)])
     pts = []
     for a in (-0.5, 0.5):
         for b in (-0.5, 0.5):
-            xy = np.array([x, y]) + a * length_m * fwd + b * width_m * side
+            xy = np.array([x, y]) + (a * length_m + offset_m) * fwd + b * width_m * side
             pts += [[xy[0], xy[1], ground_z], [xy[0], xy[1], ground_z + height_m]]
     return np.array(pts)
 
@@ -142,7 +142,7 @@ def appearance(cam: CameraSpec, entity, pose: tuple[float, float, float], rig) -
     """
     ex, ey, heading = pose
     gz = rig.elevation_at(ex, ey)
-    uvd = cam.project(entity_box_corners(ex, ey, gz, heading, entity.height_m, entity.width_m, entity.length_m))
+    uvd = cam.project(entity_box_corners(ex, ey, gz, heading, entity.height_m, entity.width_m, entity.length_m, entity.box_offset_m))
     if np.isnan(uvd).any() or (uvd[:, 2] < 0.5).any():
         return None
     u0, v0, u1, v1 = uvd[:, 0].min(), uvd[:, 1].min(), uvd[:, 0].max(), uvd[:, 1].max()
