@@ -53,7 +53,7 @@ model was measured to behave, on images it never saw, from curves built by the `
 a scout at the usual distances is not found at all, small things are mostly missed, and the detector now and
 then invents a person or an animal, which the persistence gate normally catches. An animal is reported as
 `unknown` and labelled ANIMAL, and never raises a threat alert; whether `animal` becomes the spec's eighth
-threat class is an open decision. See DECISIONS.md, "People, vehicles and animals".
+threat class is an open decision. People and animals also appear in the LiDAR picture as short-lived warm and violet returns that are never written into the map, the rover drives round a parked vehicle and keeps clear of anything that walks, and they stop for it. See DECISIONS.md, "People, vehicles and animals".
 
 ## The sixty second demo
 

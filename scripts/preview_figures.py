@@ -40,16 +40,19 @@ def main(out: str) -> None:
     # (label, kind, camera distance, camera height, azimuth of the camera round the figure, phase)
     shots = [("truck 3/4 near", "vehicle", 11.0, 1.6, 35), ("truck side", "vehicle", 11.0, 1.4, 90), ("truck rear", "vehicle", 10.0, 1.8, 180),
              ("truck far", "vehicle", 32.0, 1.6, 40), ("person near", "person", 4.5, 1.5, 30), ("person side", "person", 4.5, 1.5, 90),
-             ("person walking", "person", 5.0, 1.4, 70), ("person far", "person", 22.0, 1.6, 20), ("deer near", "animal", 5.0, 1.5, 40),
-             ("deer side", "animal", 5.0, 1.4, 90), ("deer walking", "animal", 5.5, 1.4, 60), ("deer far", "animal", 22.0, 1.6, 20)]
+             ("person walking", "person", 5.0, 1.4, 70), ("person far", "person", 22.0, 1.6, 20), ("buck near", "animal", 5.0, 1.5, 40),
+             ("buck head", "animal", 3.2, 1.5, 25), ("doe walking", "doe", 5.5, 1.4, 60), ("buck far", "animal", 22.0, 1.6, 20)]
     for i, (label, kind, dist, cam_h, az) in enumerate(shots):
         phase = 0.3 if "walking" in label else 0.0
+        style = "buck" if kind == "animal" else ""
+        if kind == "doe":
+            kind = "animal"
         a = math.radians(az)
         cam = (ox + dist * math.sin(a + math.pi), oy + dist * math.cos(a + math.pi))
         eye = (cam[0], cam[1], float(scene._ground(np.array([cam[0]]), np.array([cam[1]]))[0]) + cam_h)
         heading = math.degrees(math.atan2(ox - cam[0], oy - cam[1]))
         with scene.ctx:
-            frame = scene.render(eye=eye, heading_deg=heading, pitch_down_deg=2.0, hfov_deg=50.0, width=480, height=360, entities=[(kind, ox, oy, 0.0, phase)])
+            frame = scene.render(eye=eye, heading_deg=heading, pitch_down_deg=2.0, hfov_deg=50.0, width=480, height=360, entities=[(kind, ox, oy, 0.0, phase, style)])
         tiles.append(frame)
     cols = 4
     rows = [np.concatenate(tiles[r * cols:(r + 1) * cols], axis=1) for r in range(len(tiles) // cols)]

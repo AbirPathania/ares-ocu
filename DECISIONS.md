@@ -1315,3 +1315,42 @@ the average of the ground under its four wheels, so on ground more than a few de
 hover, which is why the level-ground rule exists. Moving things do not appear in the LiDAR cloud. A walker that
 leaves its first marker by more than 8 m is a second report. Nothing about what a real operator does with any of
 this has been tested.
+
+## The scanner sees people and animals; and the deer is a deer
+
+**Returns off moving bodies.** The LiDAR used to see only the ground truth's classes, so a person or an animal in
+front of it was invisible to it (though not to the camera, and not to the planner, which was told about them
+separately). `lidar.entity_returns` now casts the scanner's 360 rays against the outlines a horizontal beam cuts through
+each walker (`entities.LIDAR_SHAPES`: an ellipse for a person's jacket and pack, one for a deer's barrel), takes the
+first outline a ray reaches inside the 32 m range, and keeps it only if nothing that blocks a beam stands between the
+scanner and that point (the same test the dynamic-obstacle tracker uses, so what is drawn and what the planner knows
+agree). Range error is 2 cm, brightness falls with range as everywhere else, and a person's clothing and a deer's hide
+return less than rock (0.55 and 0.48 against 0.95). Because the scanner has a degree between rays, a person at 10 m
+is struck by about three of them and a broadside deer at 20 m by about three: that is how a real unit shows something
+that size, and it is why the clusters are small. A parked vehicle is not in this list: it is part of the ground
+(stamp_object), so it is mapped, drawn and remembered like a boulder.
+
+These returns are **not written into the map or the cloud.** A body that moves is not ground; written in, a person who
+crossed the lane would leave a wall along their whole path. They go to the map view's own short-lived layer
+(`add_entity_returns`): warm orange points for a person, violet for an animal, held for 2.2 s and faded, at most 600
+at once, cleared on reset. Held that long, a walker leaves the short trail a real display shows behind something that
+moves. Tests: the returns lie on the outline and come off the near face only; fewer rays strike a body the further it
+is; a body is struck by more rays side-on than head-on; nothing beyond range or behind a wall returns; a seed gives the
+same returns; they never touch the permanent cloud's pixels; they are released on time and capped; and on the real
+window a walker in view appears in the picture while the rover's own map holds no rock where they stand.
+
+**A buck, and more of a deer.** The animal is now a buck (the doe is still available as the plain "animal" drawing):
+antlers with a curved main beam, a brow tine and three more tines each side on burrs at the skull; a heavier neck
+with a darker mane; a face with a rounded forehead, pale rings round dark eyes, nostrils, a mouth line, a
+pale chin and throat patch, and ears with pale insides and a tuft that twitch as it walks; a darker line down the
+back and a paler band along the flank over the countershading; knees, the point of the hock, dew claws and a split
+hoof on every leg; a tail dark above and white beneath that flicks; a belly and chest paler than the flank. Its
+body is closed with a rounded taper at both ends (an earlier version ended in a flat cut-off cylinder, which a
+close-up showed and the previews did not). About 17 000 triangles, in 12 walking poses. Bone has its own material
+(ridged, polished at the tips). The buck's outline is taller than the doe's (1.86 m with antlers against 1.47), so
+the detector's box, the entity's size and the renderer-versus-model test all use the buck's.
+
+**Not covered.** Walkers' returns come from one ellipse each, so a person has no separate arms or legs in the scan and a
+deer's neck and head are not in it (the beam is at body height). Moving bodies do not occlude the beam for the
+ground behind them. The antlers and the face are fine at a few metres and invisible in the rover's feed, where a deer
+is a few dozen pixels tall; they are there for the day the camera is closer. The deer is made, not scanned.

@@ -664,11 +664,13 @@ class GpuScene:
 
     def _draw_entity(self, entity, shadow: bool) -> None:
         kind, x, y, heading, *rest = entity
-        frames = self._entity_frames[kind]
         phase = rest[0] if rest else 0.0
+        style = rest[1] if len(rest) > 1 else ""
+        key = f"{kind}:{style}" if style and f"{kind}:{style}" in self._entity_frames else kind
+        frames = self._entity_frames[key]
         vao, shadow_vao = frames[int(phase * len(frames)) % len(frames)]
         row = np.array([[x, y, self._entity_ground(kind, x, y, heading), -math.radians(heading), 1, 1, 1, DUST_HEIGHT_M[kind], 1, 1, 1, 0]], dtype=np.float32)
-        self._entity_buffers[kind].write(row.tobytes())
+        self._entity_buffers[key].write(row.tobytes())
         if shadow:
             shadow_vao.render(instances=1)
         else:

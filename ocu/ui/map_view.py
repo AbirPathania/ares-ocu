@@ -58,6 +58,12 @@ from ocu.ui.icons import (
 )
 from ocu.ui.launch_console import short_label
 
+#: How long a return off a moving body stays on the map, and the most held at once. Seconds of mission display, not data:
+#: the returns are not kept anywhere else.
+ENTITY_RETURN_LIFE_S = 2.2
+ENTITY_RETURN_CAP = 600
+ENTITY_RETURN_RGB = {"person": (255, 176, 60), "animal": (190, 140, 255)}
+
 #: How many pixels a metre is drawn as. The default is half what it was: a
 #: rover at speed crossed the old map too quickly to read, and showing twice
 #: the ground in the same window is the honest way to slow the picture, since
@@ -193,6 +199,8 @@ class MapView(QWidget):
         self._grid_layer_pan = QPointF(0.0, 0.0)
         self._fresh_layer_pan = QPointF(0.0, 0.0)
         self._fresh_age = 0.0
+        #: Returns off people and animals: (x, y, kind, intensity, age_s). Kept apart from the cloud on purpose.
+        self._entity_returns: list[list] = []
         self._planned_path: list[tuple[float, float]] = []
         self._planned_goal: tuple[float, float] | None = None
         self._lidar_stats: dict[str, float] = {}
@@ -332,6 +340,10 @@ class MapView(QWidget):
     def _on_radar_tick(self) -> None:
         dt = RENDER_TICK_MS / 1000.0
         self._fresh_age += dt
+        if self._entity_returns:
+            for point in self._entity_returns:
+                point[4] += dt
+            self._entity_returns = [pt for pt in self._entity_returns if pt[4] < ENTITY_RETURN_LIFE_S]
         if self._reconciled_flash > 0:
             self._reconciled_flash = max(0.0, self._reconciled_flash - dt)
         self._radar_angle = (self._radar_angle + 0.64) % 360.0
@@ -654,6 +666,16 @@ class MapView(QWidget):
         view = np.frombuffer(image.bits(), dtype=np.uint32)
         return view.reshape(image.height(), image.bytesPerLine() // 4)
 
+    def add_entity_returns(self, returns) -> None:
+        """Returns off people and animals this scan. They are drawn for a couple of seconds and let go: a body that
+        moves is not ground, and written into the cloud it would leave a wall along everywhere it walked. Kept for
+        a short time they leave the trail a real display shows behind something that moves."""
+        for x, y, kind, intensity in zip(returns.xs.tolist(), returns.ys.tolist(), returns.kinds, returns.intensities.tolist(), strict=True):
+            self._entity_returns.append([x, y, kind, intensity, 0.0])
+        if len(self._entity_returns) > ENTITY_RETURN_CAP:
+            self._entity_returns = self._entity_returns[-ENTITY_RETURN_CAP:]
+        self.update()
+
     def set_fresh_returns(self, scan) -> None:
         """Hold the newest scan brighter for a moment before it settles.
 
@@ -670,6 +692,7 @@ class MapView(QWidget):
 
 
     def clear_perception(self) -> None:
+        self._entity_returns = []
         self._perception_image.fill(QColor(0, 0, 0, 0))
         self._mapped_m2 = 0.0
         self._cloud_points = 0
@@ -745,6 +768,7 @@ class MapView(QWidget):
 
         self._draw_perception(painter)
         self._draw_fresh_returns(painter)
+        self._draw_entity_returns(painter)
         self._draw_sensor_range(painter)
         self._draw_grid(painter)
         self._draw_geofence(painter)
@@ -864,6 +888,19 @@ class MapView(QWidget):
         painter.setOpacity(fade)
         painter.drawPixmap(offset, self._fresh_layer)
         painter.setOpacity(1.0)
+
+    def _draw_entity_returns(self, painter: QPainter) -> None:
+        """Returns off people and animals: bright warm points for a person, violet for an animal, fading as they age."""
+        if not self._entity_returns:
+            return
+        painter.setPen(Qt.NoPen)
+        for x, y, kind, intensity, age in self._entity_returns:
+            fade = max(0.0, 1.0 - age / ENTITY_RETURN_LIFE_S)
+            r, g, b = ENTITY_RETURN_RGB.get(kind, (200, 200, 200))
+            painter.setBrush(QBrush(QColor(r, g, b, int(255 * fade * (0.55 + 0.45 * intensity)))))
+            centre = self._to_screen(x, y)
+            radius = 1.6 + 1.6 * fade
+            painter.drawEllipse(centre, radius, radius)
 
     def _draw_swept(self, painter: QPainter) -> None:
         """Ground the detection array has covered, at the width it covers.

@@ -52,7 +52,7 @@ from ocu.core.control_authority import ControlAuthority
 from ocu.core.flight_director import DYNAMIC_STOP_GAP_M, AircraftMode, FlightDirector, RoverMode
 from ocu.core.geofence import Geofence
 from ocu.core.detection import REPORT_FLOOR, classify, fuse, sweep
-from ocu.core.lidar import LIDAR_RANGE_M, LIDAR_SCAN_HZ, cast_scan
+from ocu.core.lidar import LIDAR_RANGE_M, LIDAR_SCAN_HZ, cast_scan, entity_returns
 from ocu.core.navigation import WAYPOINT_TOLERANCE_M
 from ocu.core.mesh_state import MeshLink, VoxelObservation, voxel_key
 from ocu.core.power import (
@@ -1005,11 +1005,11 @@ class MainWindow(QMainWindow):
             entities=self._entities_to_draw(),
         )
 
-    def _entities_to_draw(self) -> list[tuple[str, float, float, float, float]]:
+    def _entities_to_draw(self) -> list[tuple[str, float, float, float, float, str]]:
         t = self.mission_clock.clock_s
         out = []
         for e, (x, y, h) in zip(self.surface_entities, self._entity_poses(), strict=True):
-            out.append((e.kind, x, y, h, e.gait_phase(t - self._entity_hold.get(e.name, 0.0))))
+            out.append((e.kind, x, y, h, e.gait_phase(t - self._entity_hold.get(e.name, 0.0)), e.style))
         return out
 
     def closeEvent(self, event) -> None:
@@ -1270,7 +1270,18 @@ class MainWindow(QMainWindow):
             },
         )
         self.map_view.set_fresh_returns(scan)
+        self._scan_moving_bodies(rover, now)
         self._check_scout_recommendation()
+
+    def _scan_moving_bodies(self, rover, now: float) -> None:
+        """What this revolution of the scanner struck among the people and animals, drawn for a moment and not mapped."""
+        bodies = [
+            (e.kind, x, y, h, e.lidar_shapes)
+            for e, (x, y, h) in zip(self.surface_entities, self._entity_poses(), strict=True)
+            if not e.static and e.lidar_shapes
+        ]
+        if bodies:
+            self.map_view.add_entity_returns(entity_returns(self.terrain, rover.pose.x, rover.pose.y, bodies, seed=int(now * 1000)))
 
     def _tick_detection_suite(self) -> None:
         """Sweep the detection suite over whatever the rover is standing on.

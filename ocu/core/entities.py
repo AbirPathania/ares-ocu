@@ -32,6 +32,10 @@ KINDS = ("person", "vehicle", "animal")
 #: separately (dynamic_obstacles.py). Chosen, not measured.
 OBSTACLE_RADIUS_M = {"person": 0.4, "animal": 0.8, "vehicle": 2.8}
 
+#: The outlines a scanner's beam cuts: a person at chest height (jacket and pack), a deer's barrel and haunch.
+#: From the drawn figures (render/figures.py).
+LIDAR_SHAPES = {"person": [(-0.045, 0.23, 0.17)], "animal": [(-0.02, 0.17, 0.62)]}
+
 #: Distance covered in one full stride (two steps), so that the legs move as fast as the ground goes by.
 STRIDE_M = {"person": 1.45, "animal": 1.35}
 
@@ -55,6 +59,7 @@ class SurfaceEntity:
     speed_ms: float = 0.0
     heading_deg: float = 0.0  # only for something that stays put; a walker faces the way it walks
     box_offset_m: float = 0.0  # how far ahead of its position the middle of its outline lies (a deer's head is out front)
+    style: str = ""  # which drawing of its kind: "buck" is a deer with antlers
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -71,6 +76,12 @@ class SurfaceEntity:
         if self.static:
             return 0.0
         return (self.speed_ms * max(t_s, 0.0) / STRIDE_M.get(self.kind, 1.4)) % 1.0
+
+    @property
+    def lidar_shapes(self) -> list[tuple[float, float, float]]:
+        """The outline a horizontal beam cuts through this thing, as (forward offset, half-width, half-depth) ellipses.
+        A parked vehicle has none: it is part of the ground (stamp_object) and the scanner maps it as such."""
+        return LIDAR_SHAPES.get(self.kind, [])
 
     @property
     def obstacle_radius_m(self) -> float:
@@ -195,7 +206,7 @@ def default_entities(seed: int = 20261016, sweep: LaneSweep | None = None) -> li
         at tens of metres, and a case where the camera's view from the air is the harder one
       - a parked vehicle off to one side, far enough that the rover's camera barely resolves it, and away from the points
         the operator is likely to send the rover to
-      - an animal moving slowly near the first lane: not a threat, and the thing a detector most often
+      - a buck moving slowly near the first lane: not a threat, and the thing a detector most often
         invents on rocks, so seeing a real one is the contrast
     """
     sweep = sweep if sweep is not None else sweep_from_first_scan(TerrainWorld(seed=seed))
@@ -204,5 +215,5 @@ def default_entities(seed: int = 20261016, sweep: LaneSweep | None = None) -> li
     return [
         SurfaceEntity("person", "walker", 1.78, 0.54, 0.63, (sweep.at(1, 22.0, 12.0), sweep.at(1, 22.0, -4.0)), speed_ms=1.2, box_offset_m=-0.095),
         SurfaceEntity("vehicle", "parked truck", 2.20, 2.12, 5.70, (sweep.at(3, 21.0, 14.0),), heading_deg=65.0),
-        SurfaceEntity("animal", "deer", 1.47, 0.34, 2.08, (sweep.at(0, 10.0, 9.0), sweep.at(0, 16.0, 11.0), sweep.at(0, 12.0, 7.0)), speed_ms=0.5, box_offset_m=0.28),
+        SurfaceEntity("animal", "buck", 1.86, 0.38, 2.13, (sweep.at(0, 10.0, 9.0), sweep.at(0, 16.0, 11.0), sweep.at(0, 12.0, 7.0)), speed_ms=0.5, box_offset_m=0.265, style="buck"),
     ]

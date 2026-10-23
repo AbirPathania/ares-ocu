@@ -247,6 +247,83 @@ def cast_scan(
     )
 
 
+#: How much of a body's light comes back, by what it is made of: clothing and hide, not rock.
+ENTITY_REFLECTIVITY = {"person": 0.55, "animal": 0.48}
+
+#: Standard deviation of the range error on a return off a body, in metres. A real unit's is about this at these ranges.
+ENTITY_RANGE_NOISE_M = 0.02
+
+
+@dataclass(frozen=True)
+class EntityReturns:
+    """The returns off the people and animals one revolution of the scanner struck.
+
+    Kept apart from the scan: a body that moves must not be written into the map as if it were ground, so these
+    are drawn for a moment and let go. `kinds` holds "person" or "animal"."""
+
+    xs: np.ndarray
+    ys: np.ndarray
+    kinds: list[str]
+    intensities: np.ndarray
+    ranges: np.ndarray
+
+    @property
+    def point_count(self) -> int:
+        return int(self.xs.size)
+
+
+def entity_returns(
+    world: TerrainWorld,
+    origin_x: float,
+    origin_y: float,
+    bodies: list[tuple[str, float, float, float, list[tuple[float, float, float]]]],
+    range_m: float = LIDAR_RANGE_M,
+    rays: int = LIDAR_RAYS,
+    seed: int | None = None,
+) -> EntityReturns:
+    """Cast the scanner's rays against the outlines of moving bodies.
+
+    `bodies` is (kind, x, y, heading, shapes), shapes being (forward offset, half-width, half-depth) of the ellipses a
+    horizontal beam cuts through the body (a torso and pack; a barrel). A ray returns off the first outline it
+    reaches inside range, and only if nothing that blocks a beam stands between the scanner and that point: a person
+    behind a boulder returns nothing, like the boulder's own shadow.
+    """
+    rng = np.random.default_rng(seed if seed is not None else (int(origin_x * 61) ^ int(origin_y * 53)) & 0xFFFFFFFF)
+    bearing = np.arange(rays, dtype=np.float64) / rays * math.tau
+    dx, dy = np.sin(bearing), np.cos(bearing)
+    xs, ys, ks, rs = [], [], [], []
+    for kind, bx, by, heading, shapes in bodies:
+        h = math.radians(heading)
+        fwd, side = np.array([math.sin(h), math.cos(h)]), np.array([math.cos(h), -math.sin(h)])
+        nearest = np.full(rays, np.inf)
+        for offset, rx, ry in shapes:
+            cx, cy = bx + fwd[0] * offset, by + fwd[1] * offset
+            ox, oy = origin_x - cx, origin_y - cy
+            lox, loy = ox * side[0] + oy * side[1], ox * fwd[0] + oy * fwd[1]
+            ldx, ldy = dx * side[0] + dy * side[1], dx * fwd[0] + dy * fwd[1]
+            a = (ldx / rx) ** 2 + (ldy / ry) ** 2
+            b = 2.0 * (lox * ldx / rx**2 + loy * ldy / ry**2)
+            c = (lox / rx) ** 2 + (loy / ry) ** 2 - 1.0
+            disc = b * b - 4.0 * a * c
+            with np.errstate(invalid="ignore", divide="ignore"):
+                t = (-b - np.sqrt(disc)) / (2.0 * a)
+            t = np.where((disc >= 0.0) & (t > 0.0), t, np.inf)
+            nearest = np.minimum(nearest, t)
+        for k in np.nonzero(nearest <= range_m)[0]:
+            r = float(nearest[k]) + float(rng.normal(0.0, ENTITY_RANGE_NOISE_M))
+            hx, hy = origin_x + dx[k] * r, origin_y + dy[k] * r
+            if has_line_of_sight(world, origin_x, origin_y, hx, hy):
+                xs.append(hx)
+                ys.append(hy)
+                ks.append(kind)
+                rs.append(r)
+    ranges = np.array(rs, dtype=np.float64)
+    reflect = np.array([ENTITY_REFLECTIVITY.get(k, 0.5) for k in ks], dtype=np.float64)
+    falloff = 1.0 / (1.0 + ranges / RANGE_HALF_POWER_M) if ranges.size else ranges
+    intensity = np.clip(reflect * falloff * rng.uniform(0.78, 1.0, size=ranges.shape), 0.0, 1.0) if ranges.size else ranges
+    return EntityReturns(np.array(xs, dtype=np.float64), np.array(ys, dtype=np.float64), ks, intensity, ranges)
+
+
 def has_line_of_sight(
     world: TerrainWorld, from_x: float, from_y: float, to_x: float, to_y: float
 ) -> bool:

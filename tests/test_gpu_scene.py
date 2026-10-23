@@ -156,7 +156,10 @@ def test_an_entity_is_drawn_where_the_detector_model_says_its_box_is(scene, monk
     args = dict(eye=(cx, cy, eye_z), heading_deg=0.0, pitch_down_deg=3.0, hfov_deg=112.0, width=w, height=h)
     with scene.ctx:  # an earlier test in this file makes a second GL context; make this scene's the current one
         empty = scene.render(**args)
-        drawn = scene.render(**args, entities=[(kind, ex, ey, 0.0, 0.0)])
+        from ocu.core.entities import default_entities as _defaults
+
+        style = next(e for e in _defaults() if e.kind == kind).style
+        drawn = scene.render(**args, entities=[(kind, ex, ey, 0.0, 0.0, style)])
     box = _changed_box(empty, drawn)
     assert box is not None, "the entity must change the picture"
     cam = pc.CameraSpec(cx, cy, eye_z, 0.0, 3.0, 112.0, w, h, aerial=False)

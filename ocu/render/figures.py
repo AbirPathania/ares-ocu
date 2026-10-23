@@ -23,7 +23,7 @@ from functools import lru_cache
 import numpy as np
 
 # Material numbers, shared with the fragment shader.
-PAINT, GLASS, RUBBER, DARK, FABRIC, SKIN, FUR, CHROME, LAMP, HAIR = range(10)
+PAINT, GLASS, RUBBER, DARK, FABRIC, SKIN, FUR, CHROME, LAMP, HAIR, BONE = range(11)
 
 
 def _unit(v: np.ndarray) -> np.ndarray:
@@ -376,56 +376,132 @@ def person(phase: float = 0.0, height: float = 1.75) -> tuple[np.ndarray, np.nda
 # ====================================================================================== the deer
 
 HIDE_TOP, HIDE_BELLY = (0.215, 0.125, 0.062), (0.50, 0.42, 0.32)
+BONE_COLOUR = (0.43, 0.35, 0.25)
 
 
-def deer(phase: float = 0.0, height: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
-    """A doe walking: lateral-sequence gait, a countershaded coat, white rump and tail, large ears."""
+def _bezier(points, n=7):
+    p = np.asarray(points, dtype=float)
+    out = []
+    for tt in np.linspace(0.0, 1.0, n):
+        pts = p.copy()
+        while len(pts) > 1:
+            pts = pts[:-1] * (1 - tt) + pts[1:] * tt
+        out.append(pts[0])
+    return np.array(out)
+
+
+def _antler(b: Builder, base: np.ndarray, side: float, scale: float) -> None:
+    """One antler: a curved main beam sweeping up and forward, a brow tine, and tines branching off it."""
+    s_ = scale
+    beam = _bezier([base, base + np.array([side * 0.07, -0.05, 0.15]) * s_, base + np.array([side * 0.15, -0.03, 0.33]) * s_, base + np.array([side * 0.13, 0.12, 0.46]) * s_], 9)
+    ru = np.array([1.0, 0.0, 0.0])
+    stations = []
+    for i, p in enumerate(beam):
+        t = i / (len(beam) - 1)
+        d = beam[min(i + 1, len(beam) - 1)] - beam[max(i - 1, 0)]
+        d = d / max(np.linalg.norm(d), 1e-9)
+        v = _unit(np.cross(d, ru))
+        u = _unit(np.cross(d, v))
+        r = (0.027 - 0.019 * t) * s_ + 0.003
+        stations.append((p, u, v, r, r * 0.9, 2.0))
+    tube(b, stations, BONE, BONE_COLOUR, 0.95, sides=10, caps=True)
+    for f0, direction, length in ((0.0, np.array([0.0, 0.85, 0.45]), 0.24), (0.30, np.array([side * 0.25, 0.45, 0.85]), 0.24), (0.58, np.array([side * 0.20, 0.30, 0.95]), 0.22), (0.84, np.array([side * 0.12, 0.45, 0.88]), 0.16)):
+        idx = int(f0 * (len(beam) - 1))
+        origin = beam[idx]
+        tip = origin + _unit(np.asarray(direction, dtype=float)) * length * s_
+        limb(b, origin, tip, 0.017 * s_, 0.006 * s_, BONE, BONE_COLOUR, 0.95, sides=8)
+
+
+def deer(phase: float = 0.0, height: float = 1.0, buck: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    """A deer walking: lateral-sequence gait, a countershaded coat with a dark dorsal stripe, white rump, tail, throat
+    and chin, large ears with pale insides, a face with a brow and ringed eyes, jointed legs with split hooves and
+    dew claws. A buck carries antlers and a heavier neck."""
     b = Builder()
     k = height / 1.0
     f = 2.0 * math.pi * phase
-    coat = countershade(noise_tint(HIDE_TOP, 0.07, 18.0, 3.0)(np.zeros((1, 3)), None)[0], HIDE_BELLY)
     top = np.array(HIDE_TOP)
+    belly_c = np.array(HIDE_BELLY)
 
     def hide(pos, n):
-        base = countershade(top, np.array(HIDE_BELLY))(pos, n)
+        base = countershade(top, belly_c)(pos, n)
+        stripe = np.exp(-((pos[:, 0] / (0.045 * k)) ** 2)) * np.clip(n[:, 2], 0.0, 1.0) * np.clip((pos[:, 1] + 0.7 * k) / (1.3 * k), 0.0, 1.0)
+        base = base * (1.0 - 0.28 * stripe[:, None])  # a darker line down the back
+        flank = np.clip(1.0 - np.abs(pos[:, 2] - 0.66 * k) / (0.12 * k), 0.0, 1.0) * (1.0 - np.abs(n[:, 2]))
+        base = base * (1.0 + 0.10 * flank[:, None])  # a paler band along the flank
         ph = np.sin(pos[:, 0] * 31.0) * np.sin(pos[:, 1] * 23.0) * np.sin(pos[:, 2] * 37.0)
-        return np.clip(base * (1.0 + 0.07 * ph[:, None]), 0.0, 1.0)
+        return np.clip(base * (1.0 + 0.08 * ph[:, None]), 0.0, 1.0)
 
     lower = (0.16, 0.105, 0.065)
+    pale = (0.62, 0.52, 0.43)
+    white = (0.80, 0.78, 0.72)
+    dark = (0.04, 0.035, 0.032)
+    girth = 1.07 if buck else 1.0
     bob = 0.012 * k * math.cos(2 * f)
     ao = height_ao(0.0, 1.1 * k, 0.5)
 
     # barrel: deep at the chest, tucked up at the flank, with a shoulder and a haunch
     body = []
-    for y, z, ru, rv in [(-0.64, 0.84, 0.10, 0.17), (-0.44, 0.83, 0.15, 0.215), (-0.18, 0.79, 0.145, 0.21), (0.08, 0.77, 0.145, 0.215),
-                         (0.30, 0.77, 0.165, 0.255), (0.50, 0.80, 0.14, 0.235), (0.62, 0.86, 0.095, 0.18)]:
-        body.append((np.array([0.0, y * k, z * k + bob]), np.array([1.0, 0, 0]), np.array([0, 0, 1.0]), ru * k, rv * k, 2.3))
-    tube(b, body, FUR, hide, ao, sides=22, caps=True)
+    for y, z, ru, rv in [(-0.755, 0.80, 0.025, 0.04), (-0.71, 0.82, 0.075, 0.115), (-0.63, 0.85, 0.118, 0.185), (-0.44, 0.84, 0.158, 0.225), (-0.18, 0.80, 0.150, 0.212),
+                         (0.08, 0.78, 0.150, 0.212), (0.30, 0.785, 0.170, 0.262), (0.50, 0.82, 0.146, 0.235), (0.63, 0.875, 0.10, 0.185), (0.72, 0.905, 0.04, 0.09)]:
+        body.append((np.array([0.0, y * k, z * k + bob]), np.array([1.0, 0, 0]), np.array([0, 0, 1.0]), ru * k * girth, rv * k, 2.3))
+    tube(b, body, FUR, hide, ao, sides=30, caps=True)
     for sx in (-1, 1):
-        superellipsoid(b, (sx * 0.095 * k, -0.42 * k, 0.77 * k + bob), (0.13 * k, 0.34 * k, 0.36 * k), FUR, hide, ao, 2.2, 2.2, lat=10, lon=14)  # haunch
-        superellipsoid(b, (sx * 0.095 * k, 0.34 * k, 0.76 * k + bob), (0.12 * k, 0.30 * k, 0.34 * k), FUR, hide, ao, 2.2, 2.2, lat=10, lon=14)  # shoulder
-    # white rump patch and tail
-    superellipsoid(b, (0, -0.64 * k, 0.84 * k + bob), (0.17 * k, 0.12 * k, 0.24 * k), FUR, (0.78, 0.75, 0.68), 0.9, 2.2, 2.2, lat=8, lon=14)
-    superellipsoid(b, (0, -0.70 * k, 0.81 * k + bob), (0.07 * k, 0.15 * k, 0.17 * k), FUR, (0.84, 0.83, 0.80), 0.9, 2.2, 2.2, rot=rot_x(0.5), lat=8, lon=12)
-    # neck, head, muzzle
+        superellipsoid(b, (sx * 0.095 * k, -0.42 * k, 0.77 * k + bob), (0.13 * k, 0.34 * k, 0.36 * k), FUR, hide, ao, 2.2, 2.2, lat=12, lon=16)  # haunch
+        superellipsoid(b, (sx * 0.095 * k, 0.34 * k, 0.76 * k + bob), (0.12 * k * girth, 0.30 * k, 0.34 * k), FUR, hide, ao, 2.2, 2.2, lat=12, lon=16)  # shoulder
+    # belly line and a paler chest
+    superellipsoid(b, (0, 0.05 * k, 0.60 * k + bob), (0.20 * k, 0.9 * k, 0.07 * k), FUR, pale, 0.8, 2.2, 2.2, lat=8, lon=16)
+    # white rump patch, a tail that is dark above and white beneath, flicking as it walks
+    superellipsoid(b, (0, -0.66 * k, 0.84 * k + bob), (0.20 * k, 0.12 * k, 0.27 * k), FUR, (0.78, 0.75, 0.68), 0.9, 2.2, 2.2, lat=12, lon=16)
+    flick = 0.25 * math.sin(f * 2.0)
+    tail_rot = rot_x(0.55 + flick)
+    superellipsoid(b, (0, -0.71 * k, 0.80 * k + bob), (0.07 * k, 0.15 * k, 0.19 * k), FUR, (0.30, 0.18, 0.10), 0.9, 2.2, 2.2, rot=tail_rot, lat=8, lon=12)
+    superellipsoid(b, (0, -0.725 * k, 0.775 * k + bob), (0.06 * k, 0.13 * k, 0.17 * k), FUR, (0.90, 0.89, 0.86), 0.9, 2.2, 2.2, rot=tail_rot, lat=8, lon=12)
+
+    # neck, with a ruff at the throat (heavier on a buck)
     head_bob = 0.02 * k * math.sin(2 * f)
     neck_dir = np.array([0.0, 0.50, 0.34]) / math.hypot(0.50, 0.34)
     neck_v = np.array([0.0, -neck_dir[2], neck_dir[1]])
-    neck = [(np.array([0.0, (0.44 + 0.52 * t) * k, (0.88 + 0.36 * t) * k + bob + head_bob * t]), np.array([1.0, 0, 0]), neck_v, (0.100 - 0.052 * t) * k, (0.125 - 0.068 * t) * k, 2.2) for t in np.linspace(0, 1, 6)]
-    tube(b, neck, FUR, hide, ao, sides=16, caps=False)
+    nk = 1.18 if buck else 1.0
+    neck = [(np.array([0.0, (0.44 + 0.52 * t) * k, (0.88 + 0.36 * t) * k + bob + head_bob * t]), np.array([1.0, 0, 0]), neck_v, (0.100 - 0.052 * t) * k * nk, (0.125 - 0.068 * t) * k * nk, 2.2) for t in np.linspace(0, 1, 7)]
+    tube(b, neck, FUR, hide, ao, sides=22, caps=False)
+    superellipsoid(b, (0, 0.70 * k, 0.98 * k + bob), (0.15 * k * nk, 0.14 * k, 0.17 * k), FUR, (0.60, 0.50, 0.41), 0.9, 2.2, 2.2, lat=8, lon=14)  # the throat patch
+    if buck:
+        for t_, r_ in ((0.25, 0.14), (0.50, 0.12), (0.75, 0.10)):
+            superellipsoid(b, (0, (0.44 + 0.52 * t_) * k, (0.88 + 0.36 * t_) * k + bob + 0.05 * k), (0.15 * k, 0.17 * k, r_ * k), FUR, (0.20, 0.12, 0.07), 0.9, 2.2, 2.2, lat=8, lon=12)  # a mane
+
+    # head
     head_c = np.array([0.0, 1.07 * k, 1.28 * k + bob + head_bob])
     pitch = -0.35
-    superellipsoid(b, head_c, (0.135 * k, 0.24 * k, 0.16 * k), FUR, lower, 1.0, 2.2, 2.2, rot=rot_x(pitch), lat=10, lon=16)
-    muzzle_a, muzzle_b = head_c + rot_x(pitch) @ np.array([0, 0.10 * k, -0.01 * k]), head_c + rot_x(pitch) @ np.array([0, 0.25 * k, -0.035 * k])
-    limb(b, muzzle_a, muzzle_b, 0.052 * k, 0.034 * k, FUR, (0.30, 0.22, 0.16), 1.0, sides=12)
-    superellipsoid(b, muzzle_b + np.array([0, 0.012 * k, 0]), (0.052 * k, 0.04 * k, 0.04 * k), DARK, (0.04, 0.035, 0.035), 1.0, 2, 2, lat=6, lon=10)  # nose
+    R = rot_x(pitch)
+    hp = lambda dx, dy, dz: head_c + R @ (np.array([dx, dy, dz]) * k)  # noqa: E731
+    superellipsoid(b, head_c, (0.135 * k, 0.24 * k, 0.16 * k), FUR, lower, 1.0, 2.2, 2.2, rot=R, lat=14, lon=20)
+    superellipsoid(b, hp(0, 0.01, 0.075), (0.105 * k, 0.12 * k, 0.07 * k), FUR, (0.19, 0.125, 0.08), 1.0, 2.2, 2.2, rot=R, lat=8, lon=12)  # the forehead
+    muzzle_a, muzzle_b = hp(0, 0.10, -0.01), hp(0, 0.25, -0.035)
+    limb(b, muzzle_a, muzzle_b, 0.054 * k, 0.036 * k, FUR, (0.30, 0.22, 0.16), 1.0, sides=14)
+    superellipsoid(b, hp(0, 0.215, -0.012), (0.075 * k, 0.09 * k, 0.045 * k), FUR, (0.27, 0.19, 0.13), 1.0, 2.2, 2.2, rot=R, lat=8, lon=12)  # the upper lip
+    superellipsoid(b, hp(0, 0.255, -0.04), (0.052 * k, 0.04 * k, 0.04 * k), DARK, dark, 1.0, 2, 2, rot=R, lat=8, lon=12)  # nose pad
     for sx in (-1, 1):
-        superellipsoid(b, head_c + rot_x(pitch) @ np.array([sx * 0.062 * k, 0.04 * k, 0.03 * k]), (0.03 * k, 0.025 * k, 0.03 * k), GLASS, (0.02, 0.015, 0.012), 1.0, 2, 2, lat=6, lon=10)  # eyes
+        superellipsoid(b, hp(sx * 0.014, 0.27, -0.025), (0.012 * k, 0.014 * k, 0.012 * k), DARK, (0.0, 0.0, 0.0), 1.0, 2, 2, lat=5, lon=8)  # nostrils
+    superellipsoid(b, hp(0, 0.215, -0.085), (0.06 * k, 0.11 * k, 0.04 * k), FUR, white, 0.95, 2.2, 2.2, rot=R, lat=8, lon=12)  # a pale chin
+    limb(b, hp(-0.045, 0.255, -0.05), hp(-0.045, 0.16, -0.062), 0.006 * k, 0.006 * k, DARK, dark, 1.0, sides=6)  # the line of the mouth
+    limb(b, hp(0.045, 0.255, -0.05), hp(0.045, 0.16, -0.062), 0.006 * k, 0.006 * k, DARK, dark, 1.0, sides=6)
+    for sx in (-1, 1):
+        superellipsoid(b, hp(sx * 0.064, 0.045, 0.03), (0.05 * k, 0.034 * k, 0.05 * k), FUR, (0.48, 0.40, 0.32), 1.0, 2, 2, rot=R, lat=8, lon=12)  # the pale ring round the eye
+        superellipsoid(b, hp(sx * 0.068, 0.05, 0.03), (0.030 * k, 0.024 * k, 0.032 * k), GLASS, (0.015, 0.011, 0.009), 1.0, 2, 2, rot=R, lat=8, lon=12)  # the eye
+        superellipsoid(b, hp(sx * 0.052, 0.085, 0.015), (0.012 * k, 0.04 * k, 0.012 * k), DARK, (0.10, 0.07, 0.05), 1.0, 2, 2, rot=R, lat=4, lon=8)  # a dark mark below it
+        twitch = 0.07 * math.sin(3.0 * f + sx)
         ear_c = head_c + np.array([sx * 0.085 * k, -0.07 * k, 0.095 * k])
-        superellipsoid(b, ear_c, (0.045 * k, 0.085 * k, 0.17 * k), FUR, lower, 1.0, 2, 2, rot=rot_z(sx * 0.45) @ rot_x(0.2), lat=8, lon=12)
-        superellipsoid(b, ear_c + np.array([sx * 0.01 * k, 0.01 * k, 0.0]), (0.025 * k, 0.04 * k, 0.12 * k), FUR, (0.62, 0.52, 0.43), 1.0, 2, 2, rot=rot_z(sx * 0.45) @ rot_x(0.2), lat=6, lon=10)
+        er = rot_z(sx * (0.50 + twitch)) @ rot_x(0.2)
+        superellipsoid(b, ear_c, (0.048 * k, 0.09 * k, 0.185 * k), FUR, lower, 1.0, 2.2, 2.2, rot=er, lat=10, lon=14)
+        superellipsoid(b, ear_c + er @ np.array([-sx * 0.012, 0.012, 0.0]) * k, (0.030 * k, 0.05 * k, 0.14 * k), FUR, (0.70, 0.60, 0.50), 1.0, 2, 2, rot=er, lat=8, lon=12)  # the pale inside
+        superellipsoid(b, ear_c + er @ np.array([-sx * 0.012, 0.012, 0.085]) * k, (0.022 * k, 0.04 * k, 0.04 * k), FUR, (0.80, 0.75, 0.66), 1.0, 2, 2, rot=er, lat=6, lon=8)  # the tuft of hair
+    if buck:
+        for sx in (-1, 1):
+            base = hp(sx * 0.045, -0.04, 0.10)
+            _antler(b, base, float(sx), k)
+            superellipsoid(b, base, (0.05 * k, 0.05 * k, 0.04 * k), FUR, BONE_COLOUR, 1.0, 2, 2, lat=6, lon=10)  # the burr at its foot
 
-    # legs, one at a time in the order hind-left, fore-left, hind-right, fore-right
+    # legs: knee or hock, cannon, dew claws and a split hoof, in the order hind-left, fore-left, hind-right, fore-right
     def leg(x: float, y: float, z: float, offset: float, front: bool):
         ph = f + 2 * math.pi * offset
         swing = 0.36 * math.sin(ph)
@@ -435,10 +511,16 @@ def deer(phase: float = 0.0, height: float = 1.0) -> tuple[np.ndarray, np.ndarra
         knee = hip + np.array([0.0, math.sin(swing) * top_len, -math.cos(swing) * top_len])
         low_ang = swing + (-lift if front else lift * 0.8)
         fetlock = knee + np.array([0.0, math.sin(low_ang) * low_len, -math.cos(low_ang) * low_len])
-        limb(b, hip, knee, 0.055 * k, 0.034 * k, FUR, lower if front else hide, ao)
+        limb(b, hip, knee, 0.074 * k, 0.036 * k, FUR, lower if front else hide, ao)
         limb(b, knee, fetlock, 0.030 * k, 0.021 * k, FUR, lower, ao)
-        hoof_c = fetlock + np.array([0.0, 0.012 * k * math.cos(low_ang), -0.03 * k])
-        superellipsoid(b, hoof_c, (0.042 * k, 0.07 * k, 0.065 * k), DARK, (0.07, 0.06, 0.055), 0.7, 3, 3, lat=6, lon=10)
+        joint = (0.05 * k, 0.055 * k, 0.075 * k) if front else (0.045 * k, 0.07 * k, 0.085 * k)
+        superellipsoid(b, knee + np.array([0, 0.0 if front else -0.012 * k, 0]), joint, FUR, lower, ao, 2.2, 2.2, lat=8, lon=12)  # the knee, or the point of the hock
+        superellipsoid(b, fetlock + np.array([0, 0, 0.01 * k]), (0.036 * k, 0.04 * k, 0.04 * k), FUR, lower, ao, 2, 2, lat=6, lon=10)
+        for dx in (-0.016, 0.016):
+            superellipsoid(b, fetlock + np.array([dx * k, -0.03 * k * math.cos(low_ang), -0.012 * k]), (0.012 * k, 0.022 * k, 0.018 * k), DARK, (0.07, 0.06, 0.055), 0.7, 2, 2, lat=5, lon=8)  # dew claws
+        toe_c = fetlock + np.array([0.0, 0.012 * k * math.cos(low_ang), -0.03 * k])
+        for dx in (-0.013, 0.013):
+            superellipsoid(b, toe_c + np.array([dx * k, 0, 0]), (0.024 * k, 0.07 * k, 0.062 * k), DARK, (0.07, 0.06, 0.055), 0.7, 3, 3, lat=6, lon=10)  # the two halves of the hoof
 
     leg(-0.085, -0.48, 0.70, 0.0, False)
     leg(-0.085, 0.38, 0.68, 0.25, True)
@@ -457,4 +539,5 @@ def build_all() -> dict[str, list[tuple[np.ndarray, np.ndarray]]]:
         "vehicle": [truck()],
         "person": [person(i / GAIT_FRAMES) for i in range(GAIT_FRAMES)],
         "animal": [deer(i / GAIT_FRAMES) for i in range(GAIT_FRAMES)],
+        "animal:buck": [deer(i / GAIT_FRAMES, buck=True) for i in range(GAIT_FRAMES)],
     }

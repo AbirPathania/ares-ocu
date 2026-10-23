@@ -405,6 +405,10 @@ void main() {
             specAmt = 1.0; specPow = 120.0; reflAmt = 0.42 * (1.0 - dust); fresAmt = 0.4;
         } else if (mat == 8) {     // a lamp lens
             specAmt = 1.2; specPow = 150.0; reflAmt = 0.25; fresAmt = 0.5; emit = 0.12;
+        } else if (mat == 10) {    // antler: ridged bone, polished at the tips
+            albedo *= 0.8 + 0.4 * vnoise3(v_world * vec3(80.0, 80.0, 24.0));
+            albedo = mix(albedo, dirt, dust * 0.2);
+            specAmt = 0.22; specPow = 24.0; soft = 0.2;
         } else {                   // hair
             soft = 0.4; specAmt = 0.25; specPow = 14.0;
         }
