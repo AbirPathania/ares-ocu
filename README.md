@@ -156,3 +156,4 @@ real decision from the team, not this build's placeholder.
 | Negative obstacles | Real. A hole stops the wheels and not the beam, so it is found by the drive stereo pair within 8 m rather than by the scanner, and once mapped it is not unlearned |
 | The rover's terrain map | Real. Built only from simulated LiDAR returns, with occlusion: unscanned ground stays unknown and obstacles cast shadows that close as the rover drives around them |
 | Mission theme | Generic hazard sweep, never labeled minefield |
+| Guns | Not modelled. The camera detector here is simulated from measured curves for people, vehicles and animals only. The separate gun model in the perception repository (decisions 47 and 48) was measured on web photographs, says nothing about a rover, and is not used here |
