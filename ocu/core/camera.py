@@ -445,6 +445,86 @@ class CameraRig:
         self._ray_cache[key] = cached
         return cached
 
+    def resolve_view(
+        self,
+        x: float,
+        y: float,
+        camera_z: float,
+        heading_deg: float,
+        width: int,
+        height: int,
+        fov_deg: float,
+        pitch_down_deg: float,
+        max_range_m: float = 140.0,
+    ) -> dict:
+        """What every pixel's ray meets first, by the rule `_render` uses for occlusion, without painting anything.
+
+        Returns flat arrays of length width x height (row-major): `painted` (the ray met ground or something standing
+        on it), `depth` (horizontal distance to what it met, inf where nothing), `kind` (-1 sky, 0 ground, 1 tree,
+        2 rock, 3 scrub), `hx`, `hy`, `hz` (where it met it), and each pixel's `azimuth` (from the heading) and `elevation`.
+        A camera that is not the visible one, such as the thermal imager, reads the same scene through this.
+        """
+        azimuth, elevation, bin_azimuth, bin_of = self._pixel_rays(width, height, fov_deg, pitch_down_deg)
+        heading = math.radians(heading_deg)
+        depths = []
+        distance = 0.6
+        while distance < max_range_m:
+            distance += max(self._cell * NEAR_STEP_CELLS, distance * FAR_STEP_FRACTION)
+            depths.append(distance)
+        depth = np.array(depths, dtype=np.float32)[:, None]
+        step = np.diff(depth[:, 0], prepend=depth[0, 0] - self._cell)[:, None]
+        ray_bearing = heading + bin_azimuth
+        sx = x + np.sin(ray_bearing)[None, :] * depth
+        sy = y + np.cos(ray_bearing)[None, :] * depth
+        sample = self._bilerp(self._relief, sx, sy)
+        ground_z = sample[..., 0]
+        heights = sample[..., 1:]
+        standing = heights.max(axis=-1)
+        angle_top = np.arctan2(ground_z + standing - camera_z, depth)
+        angle_base = np.arctan2(ground_z - camera_z, depth)
+        reach = np.maximum.accumulate(angle_top, axis=0)
+        flat_bins = bin_of.ravel()
+        flat_elev = elevation.ravel()
+        samples, rays = reach.shape
+        separation = 4.0
+        offsets = np.arange(rays, dtype=np.float64) * separation
+        ordered = (reach.astype(np.float64) + offsets[None, :]).T.ravel()
+        found = np.searchsorted(ordered, flat_elev.astype(np.float64) + flat_bins * separation)
+        owner = found - flat_bins * samples
+        painted = owner < samples
+        owner = np.clip(owner, 0, samples - 1)
+
+        n = width * height
+        out_depth = np.full(n, np.inf, dtype=np.float32)
+        kind = np.full(n, -1, dtype=np.int8)
+        hx, hy, hz = np.zeros(n, np.float32), np.zeros(n, np.float32), np.zeros(n, np.float32)
+        pix = np.nonzero(painted)[0]
+        k, j, e = owner[pix], flat_bins[pix], flat_elev[pix]
+        d = depth[k, 0]
+        on_object = e > angle_base[k, j]
+        out_depth[pix] = d
+        pix_az = azimuth.ravel()[pix]
+        bearing = heading + pix_az
+        ground = ~on_object
+        if ground.any():
+            gk, gj, ge = k[ground], j[ground], e[ground]
+            tan_e = np.tan(ge)
+            tan_e = np.where(np.abs(tan_e) < 1e-4, -1e-4, tan_e)
+            ray_d = np.clip((ground_z[gk, gj] - camera_z) / tan_e, d[ground] - step[gk, 0], d[ground] + step[gk, 0])
+            gp = pix[ground]
+            kind[gp] = 0
+            hx[gp] = x + np.sin(bearing[ground]) * ray_d
+            hy[gp] = y + np.cos(bearing[ground]) * ray_d
+            hz[gp] = ground_z[gk, gj]
+        if on_object.any():
+            ok, oj, oe = k[on_object], j[on_object], e[on_object]
+            op = pix[on_object]
+            kind[op] = 1 + np.argmax(heights[ok, oj], axis=-1)  # 1 tree, 2 rock, 3 scrub
+            hx[op], hy[op] = sx[ok, oj], sy[ok, oj]
+            hz[op] = camera_z + d[on_object] * np.tan(oe)
+        return {"painted": painted, "depth": out_depth, "kind": kind, "hx": hx, "hy": hy, "hz": hz,
+                "azimuth": azimuth.ravel(), "elevation": flat_elev, "heading": heading}
+
     def _render(
         self,
         x: float,
