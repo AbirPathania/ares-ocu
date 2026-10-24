@@ -53,7 +53,9 @@ from ocu.ui.icons import (
     draw_friendly_air,
     draw_friendly_ground,
     draw_hostile,
+    draw_neutral,
     draw_threat_glyph,
+    glyph_key,
     draw_unknown_contact,
 )
 from ocu.ui.launch_console import short_label
@@ -62,6 +64,8 @@ from ocu.ui.launch_console import short_label
 #: the returns are not kept anywhere else.
 ENTITY_RETURN_LIFE_S = 2.2
 ENTITY_RETURN_CAP = 600
+CONTACT_COLOR = "#6F8CA3"  # a contact: not a threat, so nothing here is red or amber
+CONTACT_RADIUS = 6.0
 ENTITY_RETURN_RGB = {"person": (255, 176, 60), "animal": (190, 140, 255)}
 
 #: How many pixels a metre is drawn as. The default is half what it was: a
@@ -163,6 +167,7 @@ class MapView(QWidget):
         # being bridged by a line across ground nobody swept.
         self._swept: list[list[tuple[float, float]]] = []
         self._detections: list[dict] = []
+        self._threat_filter = None
         self._detection_by_key: dict[tuple, dict] = {}
         self._holdings: dict[tuple, set[str]] = {}
         self._mesh_rover = 0
@@ -542,6 +547,15 @@ class MapView(QWidget):
     def set_selected(self, unit_id: str | None) -> None:
         self._selected_unit = unit_id
         self.update()
+
+    def set_threat_filter(self, threat_filter) -> None:
+        """The operator's choice of classes. A detection outside it is drawn as a quiet contact."""
+        self._threat_filter = threat_filter
+        self.update()
+
+    def _is_threat(self, d: dict) -> bool:
+        """Confirmed means the operator already decided, and a decision stands whatever the filter says."""
+        return self._threat_filter is None or d.get("confirmed") or self._threat_filter.is_threat(d)
 
     def add_detection(self, detection: dict) -> None:
         """One marker per voxel, not per observation. Four sensors hitting the
@@ -1186,7 +1200,10 @@ class MapView(QWidget):
         for index, d in enumerate(self._detections):
             center = self._to_screen(d["x"], d["y"])
             confidence = d.get("confidence", 0.0)
-            threat_type = d.get("type", "unknown")
+            threat_type = glyph_key(d)
+            if not self._is_threat(d):
+                self._draw_contact(painter, center, d, threat_type, index)
+                continue
 
             if d.get("confirmed"):
                 color = CONFIRMED_COLOR
@@ -1244,6 +1261,20 @@ class MapView(QWidget):
             painter.drawText(
                 QRectF(center.x() - 60, center.y() + offset, 120, 13), Qt.AlignHCenter, label
             )
+
+    def _draw_contact(self, painter: QPainter, center: QPointF, d: dict, glyph: str, index: int) -> None:
+        """A detection the operator has not chosen to treat as a threat: small, grey-blue, no ring and no pulse."""
+        color = QColor(CONTACT_COLOR)
+        painter.setPen(QPen(color, 1.2))
+        painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 28)))
+        draw_neutral(painter, center, CONTACT_RADIUS)
+        painter.setBrush(Qt.NoBrush)
+        draw_threat_glyph(painter, center, CONTACT_RADIUS * 1.15, glyph)
+        painter.setPen(QPen(QColor(CONTACT_COLOR).lighter(120)))
+        painter.setFont(QFont("Menlo", 7))
+        painter.drawText(
+            QRectF(center.x() - 60, center.y() + CONTACT_RADIUS + 2 + (index % 3) * 10, 120, 12), Qt.AlignHCenter, str(d.get("label") or glyph).upper()
+        )
 
     def _draw_formation_preview(self, painter: QPainter) -> None:
         """Show the formation before it is committed, section 6.2.

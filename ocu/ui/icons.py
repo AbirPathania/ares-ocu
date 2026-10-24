@@ -12,6 +12,15 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QFont, QPainter, QPainterPath, QPolygonF
 
 
+def glyph_key(item: dict) -> str:
+    """The glyph a detection or a listed threat is drawn with. The spec's enum has no animal class, so an animal is an
+    `unknown` with the label kept; it still gets its own shape rather than the question mark."""
+    threat_type = item.get("type", "unknown")
+    if threat_type == "unknown" and str(item.get("label", "")).lower() == "animal":
+        return "animal"
+    return threat_type
+
+
 def draw_threat_glyph(painter: QPainter, center: QPointF, radius: float, threat_type: str) -> None:
     """Draws inside a circle of the given radius, centered on center. Caller
     sets the pen/brush color; this only lays out the shape.
@@ -45,6 +54,25 @@ def draw_threat_glyph(painter: QPainter, center: QPointF, radius: float, threat_
         rect = QRectF(center.x() - r * 1.3, center.y() - r * 0.8, r * 2.6, r * 1.6)
         painter.drawRoundedRect(rect, 2, 2)
         painter.drawLine(rect.topLeft() + QPointF(0, r * 0.5), rect.topRight() + QPointF(0, r * 0.5))
+
+    elif threat_type == "animal":
+        # A deer in profile, facing right: body, neck, head with an ear, antlers, four legs, a tail.
+        body = QRectF(center.x() - r * 1.2, center.y() - r * 0.35, r * 1.8, r * 0.85)
+        painter.drawEllipse(body)
+        neck_base = QPointF(center.x() + r * 0.55, center.y() - r * 0.15)
+        head = QPointF(center.x() + r * 1.05, center.y() - r * 0.85)
+        painter.drawLine(neck_base, head)
+        painter.drawEllipse(head, r * 0.24, r * 0.2)
+        painter.drawLine(head + QPointF(-r * 0.12, -r * 0.18), head + QPointF(-r * 0.3, -r * 0.5))  # ear
+        for dx in (0.0, 0.18):  # antlers: a main beam with a tine
+            base = head + QPointF(-r * 0.05 + dx * r, -r * 0.2)
+            tip = base + QPointF(r * (0.05 + dx), -r * 0.62)
+            painter.drawLine(base, tip)
+            painter.drawLine(base + (tip - base) * 0.55, base + (tip - base) * 0.55 + QPointF(r * 0.22, -r * 0.1))
+        for dx in (-1.0, -0.65, 0.2, 0.5):
+            hip = QPointF(center.x() + dx * r, center.y() + r * 0.45)
+            painter.drawLine(hip, hip + QPointF(0, r * 0.75))
+        painter.drawLine(QPointF(center.x() - r * 1.2, center.y() - r * 0.1), QPointF(center.x() - r * 1.45, center.y() - r * 0.3))  # tail
 
     elif threat_type == "disturbed_soil":
         for dx, dy in ((-r, -r * 0.3), (0, r * 0.4), (r, -r * 0.2), (-r * 0.4, r), (r * 0.5, r * 0.9)):
@@ -96,6 +124,11 @@ def draw_unknown_contact(painter: QPainter, center: QPointF, size: float) -> Non
     for dx, dy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
         path.addEllipse(QPointF(center.x() + dx * offset, center.y() + dy * offset), lobe, lobe)
     painter.drawPath(path.simplified())
+
+
+def draw_neutral(painter: QPainter, center: QPointF, size: float) -> None:
+    """MIL-STD-2525 neutral: a square. A contact the operator has not chosen to treat as a threat."""
+    painter.drawRect(QRectF(center.x() - size, center.y() - size, size * 2, size * 2))
 
 
 def draw_hostile(painter: QPainter, center: QPointF, size: float) -> None:

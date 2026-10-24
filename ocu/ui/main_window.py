@@ -74,6 +74,7 @@ from ocu.ui.alert_banner import AlertBanner
 from ocu.core.aerial import scout_sighting
 from ocu.core.dynamic_obstacles import DynamicObstacles
 from ocu.core.entities import default_entities, settle_entities, stamp_static_entities
+from ocu.core.threat_filter import ThreatFilter
 from ocu.core.vision import PERCEPTION_HZ, THREAT_TYPE, CameraSpec, ConfirmationGate, ContactRegistry, PerceptionSensor
 from ocu.core.camera import CameraRig
 from ocu.core.occlusion import occlusion_bearing
@@ -85,6 +86,7 @@ from ocu.ui.labels import sensor_list, short_label
 from ocu.ui.map_view import MapView
 from ocu.ui.theme import GUTTER, PANEL_PAD, SECTION_GAP
 from ocu.ui.widgets import make_styled_combo
+from ocu.ui.threat_filter_bar import ThreatFilterBar
 from ocu.ui.threat_panel import ThreatPanel
 
 TRICOPTER_IDS = ["tricopter-1", "tricopter-2", "tricopter-3"]
@@ -400,7 +402,11 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(GUTTER, PANEL_PAD, PANEL_PAD, PANEL_PAD)
         layout.setSpacing(GUTTER)
 
+        self.threat_filter = ThreatFilter()
+        self.threat_filter_bar = ThreatFilterBar(self.threat_filter)
+        layout.addWidget(self.threat_filter_bar)
         self.threat_panel = ThreatPanel()
+        self.threat_panel.set_filter(self.threat_filter)
         layout.addWidget(self.threat_panel, stretch=3)
 
         # The context panel is as tall as its tallest page, and on a short
@@ -521,6 +527,8 @@ class MainWindow(QMainWindow):
         self.map_view.destinationPlaced.connect(self._on_destination_placed)
         self.map_view.destinationCleared.connect(self._on_destination_cleared)
 
+        self.map_view.set_threat_filter(self.threat_filter)
+        self.threat_filter_bar.changed.connect(self._on_threat_classes_changed)
         self.threat_panel.threatSelected.connect(self._on_threat_selected)
         self.threat_panel.confirmRequested.connect(self._on_alert_confirmed)
         self.threat_panel.rejectRequested.connect(self._on_alert_rejected)
@@ -1512,7 +1520,8 @@ class MainWindow(QMainWindow):
             shown = [t for t in self.camera_gate.tracks if t.sensor_id == unit_id and t.hits and t.hits[-1] == frame]
             if feed is not None:
                 feed.set_detections([
-                    {"box": t.box, "kind": t.kind, "label": t.kind, "score": t.scores[-1], "confirmed": t.confirmed} for t in shown
+                    {"box": t.box, "kind": t.kind, "label": t.kind, "score": t.scores[-1], "confirmed": t.confirmed,
+                     "threat": self.threat_filter.is_threat({"type": THREAT_TYPE[t.kind], "label": t.kind})} for t in shown
                 ])
             for track in shown:
                 if not track.confirmed:
@@ -1531,7 +1540,7 @@ class MainWindow(QMainWindow):
                     {
                         "x": contact.x, "y": contact.y, "confidence": track.confidence, "type": THREAT_TYPE[track.kind], "label": track.kind,
                         "sensor": "camera", "sensors": ["camera"], "source": "rover" if unit_id == "rover" else "aircraft",
-                        "source_id": unit_id, "informational": track.kind == "animal",
+                        "source_id": unit_id,
                     }
                 )
 
@@ -1954,19 +1963,21 @@ class MainWindow(QMainWindow):
             # Found, logged on the vehicle, and not reported until the fleet
             # is allowed to talk again.
             return
+        is_threat = self.threat_filter.is_threat(detection)
         self.map_view.add_detection(detection)
         self.threat_panel.add_detection(detection)
+        self.threat_filter_bar.set_contacts(self.threat_panel.contact_counts())
         if source == "rover":
             self.context_panel.rover_panel.sensors.register_hit(detection.get("sensor", ""))
         self.event_log.log(
             self.mission_clock.clock_s,
-            f"{threat_label} at ({x:.0f}, {y:.0f}) \u00b7 {confidence:.2f} \u00b7 "
+            f"{'' if is_threat else 'Contact \u00b7 '}{threat_label} at ({x:.0f}, {y:.0f}) \u00b7 {confidence:.2f} \u00b7 "
             + sensor_list(detection.get("sensors", [])),
             key=f"contact:{round(x, 1)}:{round(y, 1)}",
-            level="caution" if confidence >= 0.5 else "info",
+            level="caution" if is_threat and confidence >= 0.5 else "info",
         )
         key = (round(x, 2), round(y, 2))
-        if confidence >= ALERT_CONFIDENCE_THRESHOLD and key not in self._escalated and not detection.get("informational"):
+        if is_threat and confidence >= ALERT_CONFIDENCE_THRESHOLD and key not in self._escalated:
             self._escalated.add(key)
             self.alert_banner.show_alert(detection)
             self.event_log.log(
@@ -1974,6 +1985,15 @@ class MainWindow(QMainWindow):
                 f"ALERT \u00b7 {threat_label} at ({x:.0f}, {y:.0f}) \u00b7 {confidence:.2f}, operator decision required",
                 level="threat",
             )
+
+    def _on_threat_classes_changed(self) -> None:
+        """The operator chose different classes: markers, cards and boxes all follow at once."""
+        self.map_view.set_threat_filter(self.threat_filter)
+        self.threat_panel.refresh_filter()
+        self.threat_filter_bar.set_contacts(self.threat_panel.contact_counts())
+        self.event_log.log(
+            self.mission_clock.clock_s, f"Treating as threats: {self.threat_filter.summary()}", level="info"
+        )
 
     def _on_alert_confirmed(self, detection: dict) -> None:
         self.alert_banner.dismiss_for(detection)

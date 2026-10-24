@@ -232,6 +232,8 @@ class SimulatedCameraFeed(QWidget):
         painter.end()
 
     DETECTION_COLORS = {"person": "#E5484D", "vehicle": "#4DA3FF", "animal": "#B58CFF"}
+    #: A box round something the operator has not chosen to treat as a threat: thin and muted.
+    CONTACT_BOX_COLOR = "#7F93A3"
 
     def _draw_detections(self, painter: QPainter, rect: QRectF, source: QRectF, crop: QRectF) -> None:
         """The detector's boxes, mapped through the same crop the picture is drawn with."""
@@ -247,9 +249,10 @@ class SimulatedCameraFeed(QWidget):
                 (u1 - u0) * source.width() * sx,
                 (v1 - v0) * source.height() * sy,
             )
-            color = QColor(self.DETECTION_COLORS.get(d.get("kind", ""), "#E4EBF1"))
+            threat = d.get("threat", True)
+            color = QColor(self.DETECTION_COLORS.get(d.get("kind", ""), "#E4EBF1") if threat else self.CONTACT_BOX_COLOR)
             pen = QPen(color)
-            pen.setWidthF(1.6 if d.get("confirmed") else 1.0)
+            pen.setWidthF((1.6 if d.get("confirmed") else 1.0) if threat else 0.8)
             if not d.get("confirmed"):
                 pen.setStyle(Qt.DashLine)
             painter.setPen(pen)

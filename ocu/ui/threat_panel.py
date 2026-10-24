@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWi
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD
 from ocu.core.mesh_state import voxel_key
+from ocu.core.threat_filter import group_of
 from ocu.ui.theme import (
     BACKGROUND,
     CAUTION,
@@ -33,7 +34,7 @@ from ocu.ui.theme import (
     TEXT_FAINT,
     THREAT,
 )
-from ocu.ui.icons import draw_threat_glyph
+from ocu.ui.icons import draw_threat_glyph, glyph_key
 from ocu.ui.labels import sensor_list
 from ocu.ui.motion import FAST_MS, Reveal
 
@@ -158,7 +159,7 @@ class ThreatCard(QWidget):
         glyph_center = QPointF(rect.left() + 22, rect.top() + CARD_HEIGHT / 2)
         painter.setPen(QPen(status_color, 1.4))
         painter.setBrush(Qt.NoBrush)
-        draw_threat_glyph(painter, glyph_center, 11, self.threat.get("type", "unknown"))
+        draw_threat_glyph(painter, glyph_center, 11, glyph_key(self.threat))
 
         text_left = rect.left() + 42
         painter.setPen(QPen(TEXT))
@@ -233,6 +234,7 @@ class ThreatPanel(QWidget):
         self._threats: dict[tuple, dict] = {}
         self._cards: dict[tuple, ThreatCard] = {}
         self._selected_key: tuple | None = None
+        self._filter = None  # the operator's choice of classes; None shows everything
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -259,6 +261,31 @@ class ThreatPanel(QWidget):
         layout.addWidget(scroll, stretch=1)
         self._refresh_header()
 
+    def set_filter(self, threat_filter) -> None:
+        self._filter = threat_filter
+        self.refresh_filter()
+
+    def _shown(self, threat: dict) -> bool:
+        """A threat is listed if its class is on, or the operator already confirmed it: a decision stands."""
+        return self._filter is None or threat["status"] == "CONFIRMED" or self._filter.is_threat(threat)
+
+    def refresh_filter(self) -> None:
+        for key, card in self._cards.items():
+            shown = self._shown(self._threats[key])
+            if shown and not card.isVisible():
+                card.arrive()
+            card.setVisible(shown)
+        self._refresh_header()
+
+    def contact_counts(self) -> dict[str, int]:
+        """Detections held back as quiet contacts, by class."""
+        counts: dict[str, int] = {}
+        for threat in self._threats.values():
+            if not self._shown(threat):
+                group = group_of(threat)
+                counts[group] = counts.get(group, 0) + 1
+        return counts
+
     def add_detection(self, detection: dict) -> dict:
         """Fold one detection into the threat at its voxel, creating it if new."""
         key = voxel_key(detection["x"], detection["y"], 0.0)
@@ -282,7 +309,9 @@ class ThreatPanel(QWidget):
             card.rejectRequested.connect(self.rejectRequested.emit)
             self._cards[key] = card
             self._list_layout.insertWidget(self._list_layout.count() - 1, card)
-            card.arrive()
+            card.setVisible(self._shown(threat))
+            if self._shown(threat):
+                card.arrive()
 
         reported = detection.get("sensors") or (
             [detection["sensor"]] if detection.get("sensor") else []
@@ -299,6 +328,13 @@ class ThreatPanel(QWidget):
         self._cards[key].threat = threat
         self._cards[key]._sync_actions()
         self._cards[key].update()
+        # A threat's type can change after it is first listed (a first hit reads `unknown`, a better one `mine`), and
+        # with it whether the operator's choice of classes includes it.
+        card, shown = self._cards[key], self._shown(threat)
+        if shown != card.isVisible():
+            card.setVisible(shown)
+            if shown:
+                card.arrive()
         self._refresh_header()
         return threat
 
@@ -328,17 +364,18 @@ class ThreatPanel(QWidget):
         self.threatSelected.emit(threat)
 
     def _refresh_header(self) -> None:
-        pending = sum(1 for t in self._threats.values() if t["status"] == "PENDING")
-        confirmed = sum(1 for t in self._threats.values() if t["status"] == "CONFIRMED")
-        parts = [f"THREATS  {len(self._threats)}"]
+        shown = [t for t in self._threats.values() if self._shown(t)]
+        pending = sum(1 for t in shown if t["status"] == "PENDING")
+        confirmed = sum(1 for t in shown if t["status"] == "CONFIRMED")
+        parts = [f"THREATS  {len(shown)}"]
         if pending:
             parts.append(f"{pending} PENDING")
         if confirmed:
             parts.append(f"{confirmed} CONFIRMED")
         self.header.setText("   ".join(parts))
-        self.empty_label.setVisible(not self._threats)
+        self.empty_label.setVisible(not shown)
 
         # Only claim the height the list actually needs, so an empty threat
         # list does not hold open a blank third of the right column.
-        count = len(self._threats)
+        count = len(shown)
         self.setMaximumHeight(56 if count == 0 else min(count * (CARD_HEIGHT + 3) + 34, 430))

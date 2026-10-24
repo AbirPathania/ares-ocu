@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD, DEFAULT_ALERT_CONFIRM_TIMEOUT_S
-from ocu.ui.icons import draw_threat_glyph
+from ocu.ui.icons import draw_threat_glyph, glyph_key
 from ocu.ui.motion import Reveal
 
 TICK_MS = 100
@@ -188,10 +188,10 @@ class AlertBanner(QWidget):
         self.title_label.setText("CONTACT \u00b7 READS INERT" if inert else "THREAT ALERT")
         self.confirm_btn.setText("CONFIRM THREAT")
         self.reject_btn.setText("CLEAR AS INERT" if inert else "REJECT")
-        self.badge.set_detection(threat_type, confidence)
+        self.badge.set_detection(glyph_key(detection), confidence)
         source = detection.get("source_id", detection.get("source", "unknown"))
         self.message_label.setText(
-            f"{threat_type.upper()}   CONF {confidence:.2f}/{ALERT_CONFIDENCE_THRESHOLD:.2f}"
+            f"{str(detection.get('label') or threat_type).replace('_', ' ').upper()}   CONF {confidence:.2f}/{ALERT_CONFIDENCE_THRESHOLD:.2f}"
             f"   ({x:.0f}, {y:.0f}) m   SRC {source}"
         )
         self._update_countdown_label()

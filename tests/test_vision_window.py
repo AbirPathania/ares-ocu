@@ -69,9 +69,9 @@ def test_a_vehicle_is_reported_as_a_vehicle_and_an_animal_as_unknown_never_as_a_
     assert all(t in ("person", "vehicle", "unknown", "mine", "ied", "disturbed_soil", "safe_object") for t in types)
 
 
-def test_an_animal_never_raises_a_threat_alert_but_a_person_does(window):
-    window._on_detection({"x": 5.0, "y": 5.0, "confidence": 0.95, "type": "unknown", "label": "animal", "sensors": ["camera"], "source": "rover", "source_id": "rover", "informational": True})
-    assert not window._escalated, "a contact is logged and drawn; it does not demand a decision"
+def test_an_animal_raises_no_alert_by_default_but_a_person_does(window):
+    window._on_detection({"x": 5.0, "y": 5.0, "confidence": 0.95, "type": "unknown", "label": "animal", "sensors": ["camera"], "source": "rover", "source_id": "rover"})
+    assert not window._escalated, "animals are off in the operator's threat classes: a contact is logged and drawn, and demands no decision"
     window._on_detection({"x": 7.0, "y": 7.0, "confidence": 0.95, "type": "person", "label": "person", "sensors": ["camera"], "source": "rover", "source_id": "rover"})
     assert (7.0, 7.0) in window._escalated
 
