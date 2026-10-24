@@ -139,3 +139,18 @@ def test_a_scout_sees_finer_ground_than_the_rover_does_at_the_same_range():
     assert ts.SCOUT_THERMAL.width < ts.ROVER_THERMAL.width
     assert ts.SCOUT_THERMAL.ifov_rad > ts.ROVER_THERMAL.ifov_rad, "a coarser pixel, but it is looking down from above"
     assert ts.ROVER_THERMAL.netd_k == ts.SCOUT_THERMAL.netd_k == 0.050
+
+
+def test_looking_only_where_a_body_could_be_loses_nothing(scene):
+    """The imager tests each body against a window of rays instead of every pixel. The window must be lossless."""
+    _, _, _, imager = scene
+    bodies = [person(2.0, 9.0), SurfaceEntity("animal", "a", 1.5, 0.45, 1.5, ((-4.0, 15.0),), heading_deg=110.0),
+              SurfaceEntity("vehicle", "v", 2.2, 2.12, 5.7, ((7.0, 22.0),), heading_deg=70.0)]
+    poses = [(e.path[0][0], e.path[0][1], e.heading_deg) for e in bodies]
+    z = ts.ROVER_THERMAL_HEIGHT_M
+    for sensor, pitch in ((ts.ROVER_THERMAL, 3.0), (ts.SCOUT_THERMAL, 18.0)):
+        fast = imager.render(sensor, 0.0, 0.0, z, 0.0, pitch, NIGHT, bodies, poses, rng=np.random.default_rng(2), prune=True)
+        full = imager.render(sensor, 0.0, 0.0, z, 0.0, pitch, NIGHT, bodies, poses, rng=np.random.default_rng(2), prune=False)
+        assert np.array_equal(fast.entity, full.entity), "the same pixels belong to the same bodies"
+        assert np.allclose(fast.temp_c, full.temp_c)
+        assert (fast.entity >= 0).sum() > 100

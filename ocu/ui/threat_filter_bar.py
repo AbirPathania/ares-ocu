@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ocu.core.constants import IRREVERSIBLE_COMMAND_HOLD_S
 from ocu.core.threat_filter import GROUPS, GUARDED, LABELS, UNAVAILABLE, ThreatFilter
@@ -33,7 +33,8 @@ class ThreatChip(QWidget):
         self._timer.setInterval(HOLD_TICK_MS)
         self._timer.timeout.connect(self._advance_hold)
         self.setFixedHeight(CHIP_HEIGHT)
-        self.setMinimumWidth(len(LABELS[group]) * 8 + 18)
+        self.setMinimumWidth(len(LABELS[group]) * 6 + 12)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor if group not in UNAVAILABLE else Qt.ForbiddenCursor)
         if group in UNAVAILABLE:
             self.setToolTip(f"{LABELS[group]}: {UNAVAILABLE[group]}")
@@ -128,17 +129,19 @@ class ThreatFilterBar(QWidget):
         self.caption.setObjectName("sectionLabel")
         outer.addWidget(self.caption)
 
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
+        # Three to a row, so the strip fits the narrowest the column can be (six in a row needed 470 px and overlapped)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(4)
         self.chips: dict[str, ThreatChip] = {}
-        for group in GROUPS:
+        for i, group in enumerate(GROUPS):
             chip = ThreatChip(group, threat_filter.is_enabled(group))
             chip.toggled.connect(self._on_chip)
             self.chips[group] = chip
-            row.addWidget(chip)
-        row.addStretch(1)
-        outer.addLayout(row)
+            grid.addWidget(chip, i // 3, i % 3)
+        for column in range(3):
+            grid.setColumnStretch(column, 1)
+        outer.addLayout(grid)
 
         self.contacts = QLabel("")
         self.contacts.setObjectName("mutedNote")

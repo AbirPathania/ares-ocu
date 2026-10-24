@@ -74,6 +74,8 @@ from ocu.ui.alert_banner import AlertBanner
 from ocu.core.aerial import scout_sighting
 from ocu.core.dynamic_obstacles import DynamicObstacles
 from ocu.core.entities import default_entities, settle_entities, stamp_static_entities
+from ocu.core.thermal_display import to_rgb
+from ocu.core.thermal_system import ThermalSystem
 from ocu.core.threat_filter import ThreatFilter
 from ocu.core.vision import PERCEPTION_HZ, THREAT_TYPE, CameraSpec, ConfirmationGate, ContactRegistry, PerceptionSensor
 from ocu.core.camera import CameraRig
@@ -184,6 +186,10 @@ CAMERA_TICK_MS = 60
 #: live tile is redrawn every tick and the picture moves smoothly, instead of one
 #: tile per tick.
 GPU_CAMERA_TICK_MS = 40
+#: The thermal mosaic is written once a second of mission time, and a thermal tile is redrawn four times a second at most.
+THERMAL_MAP_HZ = 1.0
+IR_FEED_PERIOD_S = 0.25
+THERMAL_POLL_MS = 400
 
 
 
@@ -306,6 +312,15 @@ class MainWindow(QMainWindow):
         # and rendering all four at once would stall the display every time
         # it happened. Each tile still refreshes about three times a second.
         self.camera_rig = CameraRig(self.terrain)
+        # The day's thermal field takes seconds to solve (or a moment to load), so it is built on a thread when infrared is
+        # first wanted, and until it is ready the map and the tiles say so.
+        self.thermal = ThermalSystem(self.camera_rig, self.target_field.targets)
+        self._thermal_frame = -1
+        self._thermal_cameras = 0
+        self._ir_feed_last: dict[str, float] = {}
+        self._thermal_poll = QTimer(self)
+        self._thermal_poll.setInterval(THERMAL_POLL_MS)
+        self._thermal_poll.timeout.connect(self._poll_thermal_build)
         self._camera_turn = 0
         self._gpu_worker = None
         #: Vehicles already acted on for a low battery, so it is done once and said once.
@@ -527,6 +542,12 @@ class MainWindow(QMainWindow):
         self.map_view.destinationPlaced.connect(self._on_destination_placed)
         self.map_view.destinationCleared.connect(self._on_destination_cleared)
 
+        self.map_view.layerChanged.connect(self._on_layer_changed)
+        self.map_view.paletteRequested.connect(self._on_palette_requested)
+        self.map_view.holdRequested.connect(self._on_hold_requested)
+        self.map_view.timeShiftRequested.connect(self._on_time_shift)
+        for feed in self.camera_feeds.values():
+            feed.irToggled.connect(self._on_feed_ir_toggled)
         self.map_view.set_threat_filter(self.threat_filter)
         self.threat_filter_bar.changed.connect(self._on_threat_classes_changed)
         self.threat_panel.threatSelected.connect(self._on_threat_selected)
@@ -776,6 +797,7 @@ class MainWindow(QMainWindow):
         self._tick_detection_suite()
         self._tick_aerial_detection()
         self._tick_vision()
+        self._tick_thermal()
 
         for unit_id, event in events:
             self._handle_director_event(unit_id, event)
@@ -910,6 +932,11 @@ class MainWindow(QMainWindow):
         live = self._cameras_on()
         if not live:
             return
+        for unit_id in [u for u in live if self.camera_feeds[u].ir_mode]:
+            self._render_ir_feed(unit_id)  # a tile set to infrared is drawn by the thermal camera, not the visible one
+        live = [u for u in live if not self.camera_feeds[u].ir_mode]
+        if not live:
+            return
 
         if self._gpu_worker is not None and not self._gpu_worker.resolved:
             return  # still building the scene: no stand-in picture while it does
@@ -1021,6 +1048,7 @@ class MainWindow(QMainWindow):
         return out
 
     def closeEvent(self, event) -> None:
+        self.thermal.stop_background()
         if self._gpu_worker is not None:
             self._gpu_worker.stop()
             self._gpu_worker = None
@@ -1543,6 +1571,105 @@ class MainWindow(QMainWindow):
                         "source_id": unit_id,
                     }
                 )
+
+    # --- thermal imagery -------------------------------------------------------------------------------
+
+    def warm_thermal(self) -> None:
+        """Start getting the day's thermal field now, so that infrared is ready when it is first asked for."""
+        if self.thermal.ready:
+            return
+        self.thermal.start_background()
+        self._thermal_poll.start()
+
+    def _poll_thermal_build(self) -> None:
+        if self.thermal.poll():
+            self._thermal_poll.stop()
+            self._thermal_frame = -1
+            self._tick_thermal()
+        self._refresh_thermal_view()
+
+    def _ir_wanted(self) -> bool:
+        return self.map_view.layer != "lidar" or any(f.ir_mode for f in self.camera_feeds.values())
+
+    def _on_layer_changed(self, layer: str) -> None:
+        if layer != "lidar":
+            self.warm_thermal()
+        self._thermal_frame = -1
+        self._tick_thermal()
+        self._refresh_thermal_view()
+
+    def _on_feed_ir_toggled(self, unit_id: str, on: bool) -> None:
+        if on:
+            self.warm_thermal()
+        self._ir_feed_last.pop(unit_id, None)
+        self._thermal_frame = -1
+
+    def _on_palette_requested(self) -> None:
+        self.thermal.cycle_palette()
+        self._refresh_thermal_view()
+
+    def _on_hold_requested(self) -> None:
+        held = self.thermal.toggle_hold()
+        self.event_log.log(self.mission_clock.clock_s, "Thermal gain held at the present levels" if held else "Thermal gain automatic", level="info")
+        self._refresh_thermal_view()
+
+    def _on_time_shift(self, hours: float) -> None:
+        self.thermal.shift_hours(hours)
+        hour = self.thermal.local_hour(self.mission_clock.clock_s)
+        self.event_log.log(
+            self.mission_clock.clock_s,
+            f"Thermal time of day set to {int(hour):02d}:{int((hour % 1.0) * 60):02d} local solar time. What was imaged earlier "
+            "keeps the temperatures it had then.",
+            level="info",
+        )
+        self._thermal_frame = -1
+        self._tick_thermal()
+        self._refresh_thermal_view()
+
+    def _refresh_thermal_view(self) -> None:
+        lo, hi = self.thermal.level_range()
+        clock = self.mission_clock.clock_s
+        self.map_view.set_thermal_view(
+            map=self.thermal.map, palette=self.thermal.palette, lo=lo, hi=hi, hour=self.thermal.local_hour(clock), now_s=clock,
+            ready=self.thermal.ready, progress=self.thermal.progress, hold=self.thermal.hold_range is not None, cameras=self._thermal_cameras,
+        )
+
+    def _tick_thermal(self) -> None:
+        """Image the ground with every thermal camera that is running and write it into the mosaic, once a second.
+
+        The cameras are powered when infrared is wanted (the layer or a tile is switched to it); when it is not, nothing
+        is imaged and the mosaic does not grow. The mosaic is shared over the link, so a cut link stops it.
+        """
+        if not self.thermal.ready or not self._ir_wanted() or not self._comms.telemetry:
+            return
+        frame = int(self.mission_clock.clock_s * THERMAL_MAP_HZ)
+        if frame == self._thermal_frame:
+            return
+        self._thermal_frame = frame
+        entities, poses = self.surface_entities, self._entity_poses()
+        running = 0
+        for unit_id in self._cameras_on():
+            pose = self.units[unit_id].pose
+            self.thermal.observe(unit_id, pose.x, pose.y, pose.z, pose.heading, self.mission_clock.clock_s, entities, poses)
+            running += 1
+        self._thermal_cameras = running
+        self._refresh_thermal_view()
+
+    def _render_ir_feed(self, unit_id: str) -> None:
+        feed = self.camera_feeds[unit_id]
+        if not self.thermal.ready:
+            return
+        import time
+
+        now = time.monotonic()
+        if now - self._ir_feed_last.get(unit_id, 0.0) < IR_FEED_PERIOD_S:
+            return
+        self._ir_feed_last[unit_id] = now
+        pose = self.units[unit_id].pose
+        frame = self.thermal.look(unit_id, pose.x, pose.y, pose.z, pose.heading, self.mission_clock.clock_s, self.surface_entities, self._entity_poses())
+        lo, hi = self.thermal.level_range(frame.temp_c, frame.painted)
+        feed.set_frame(to_rgb(frame.temp_c, lo, hi, self.thermal.palette), ir=True)
+        feed.set_ir_scale(lo, hi, self.thermal.palette, f"LWIR {frame.sensor.width}x{frame.sensor.height}")
 
     def _tick_power(self, dt_s: float) -> None:
         """Integrate every battery from what that unit is actually doing.
@@ -2097,6 +2224,9 @@ class MainWindow(QMainWindow):
         self.dynamic_obstacles.clear()
         self._entity_hold.clear()
         self._vision_frame = -1
+        self.thermal.map.clear()
+        self.thermal.hour_offset_h = 0.0
+        self._thermal_frame = -1
         for feed in self.camera_feeds.values():
             feed.set_detections([])
         self._last_reported.clear()

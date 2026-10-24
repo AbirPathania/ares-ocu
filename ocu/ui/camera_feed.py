@@ -16,7 +16,7 @@ says which, instead of going blank as though the feed had failed.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
@@ -27,7 +27,14 @@ LINK_COLORS = {
 }
 
 
+IR_CHIP = QRectF(0, 0, 26, 14)  # size of the visible / infrared toggle in a tile's top right corner
+IR_COLOR = QColor("#F0A23C")
+GROUND_BIAS = 0.8  # how far toward the bottom of a thermal frame the crop sits when the tile is wider than the frame
+
+
 class SimulatedCameraFeed(QWidget):
+    irToggled = Signal(str, bool)  # unit id, whether the tile now shows infrared
+
     def __init__(self, unit_id: str, label: str, parent=None) -> None:
         super().__init__(parent)
         self.unit_id = unit_id
@@ -42,6 +49,10 @@ class SimulatedCameraFeed(QWidget):
         self._clearing = False  # an aircraft still beside the rover's deck
         self._clearing_threshold = 0.0
         self._detections: list[dict] = []  # boxes from the detector, in the frame's own 0..1 coordinates
+        self._ir = False  # the tile is set to show the thermal camera
+        self._ir_frame = False  # and the frame held is a thermal one
+        self._ir_scale: tuple[float, float, str] | None = None  # black and white levels (degrees C) and the palette
+        self._ir_note = ""
 
         # A 16:9 feed wants height, and the left column has it: the roster
         # below is a fixed stack of four cards, so whatever is left belongs
@@ -89,8 +100,44 @@ class SimulatedCameraFeed(QWidget):
             int(min(max(self.height() * ratio, 40), 440)),
         )
 
-    def set_frame(self, rgb: np.ndarray) -> None:
-        """Show a rendered frame. `rgb` is (height, width, 3) uint8."""
+    @property
+    def ir_mode(self) -> bool:
+        return self._ir
+
+    def set_ir(self, on: bool) -> None:
+        """Switch the tile between the visible camera and the thermal one. The frame of the other kind is dropped, so a
+        picture from the wrong camera is never held on screen while the right one is being drawn."""
+        if on != self._ir:
+            self._ir = on
+            self._ir_frame = False
+            self._frame = None
+            self._ir_scale = None
+        self.update()
+
+    def set_ir_scale(self, lo: float, hi: float, palette: str, note: str = "") -> None:
+        self._ir_scale = (lo, hi, palette)
+        self._ir_note = note
+
+    def _chip_rect(self) -> QRectF:
+        return QRectF(self.width() - IR_CHIP.width() - 5, 3, IR_CHIP.width(), IR_CHIP.height())
+
+    def mousePressEvent(self, event) -> None:
+        if self._active and not self._emcon and self._chip_rect().contains(event.position()):
+            self._ir = not self._ir
+            self._ir_frame = False
+            self._frame = None
+            self._ir_scale = None
+            self.update()
+            self.irToggled.emit(self.unit_id, self._ir)
+            return
+        super().mousePressEvent(event)
+
+    def set_frame(self, rgb: np.ndarray, ir: bool = False) -> None:
+        """Show a rendered frame. `rgb` is (height, width, 3) uint8. A frame from the camera the tile is not set to
+        show (a visible one arriving late for a tile that has been switched to infrared) is ignored."""
+        if ir != self._ir:
+            return
+        self._ir_frame = ir
         frame = np.ascontiguousarray(rgb)
         height, width, _ = frame.shape
         # copy(): QImage borrows the array's memory, which will not outlive it.
@@ -164,7 +211,18 @@ class SimulatedCameraFeed(QWidget):
 
         link_color = LINK_COLORS.get(self._link_state, QColor("#666666"))
 
-        if self._frame is not None:
+        if self._frame is not None and self._ir_frame:
+            # Thermal: fill the tile's width and show the part of the sensor's frame that matters. The top of a forward-looking
+            # thermal frame is sky, so the crop is weighted toward the ground at the bottom rather than centred.
+            painter.fillRect(rect, QColor("#05070A"))
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+            source = QRectF(self._frame.rect())
+            scale = max(rect.width() / source.width(), rect.height() / source.height())
+            shown_w, shown_h = rect.width() / scale, rect.height() / scale
+            crop = QRectF((source.width() - shown_w) / 2, (source.height() - shown_h) * GROUND_BIAS, shown_w, shown_h)
+            painter.drawImage(rect, self._frame, crop)
+            self._draw_ir_scale(painter, rect)
+        elif self._frame is not None:
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
             # Fill the tile and crop, rather than letterbox: a thin black bar
             # above and below a 2.7:1 tile is a lot of its height.
@@ -225,11 +283,41 @@ class SimulatedCameraFeed(QWidget):
         telemetry_rect = QRectF(5, rect.height() - 14, rect.width() - 10, 12)
         painter.setFont(QFont("Menlo", 7))
         painter.setPen(QPen(QColor(0, 0, 0, 170)))
-        painter.drawText(telemetry_rect.translated(1, 1), Qt.AlignLeft, self._telemetry)
+        text = f"{self._telemetry}  {self._ir_note}" if self._ir and self._ir_note else self._telemetry
+        painter.drawText(telemetry_rect.translated(1, 1), Qt.AlignLeft, text)
         painter.setPen(QPen(QColor("#C3CED8")))
-        painter.drawText(telemetry_rect, Qt.AlignLeft, self._telemetry)
+        painter.drawText(telemetry_rect, Qt.AlignLeft, text)
 
+        self._draw_ir_chip(painter)
         painter.end()
+
+    def _draw_ir_chip(self, painter: QPainter) -> None:
+        """The small IR toggle in the corner: lit when the tile shows the thermal camera."""
+        chip = self._chip_rect()
+        painter.setBrush(QColor(240, 162, 60, 70) if self._ir else QColor(8, 12, 16, 150))
+        painter.setPen(QPen(IR_COLOR if self._ir else QColor("#4F5B68"), 1))
+        painter.drawRoundedRect(chip, 3, 3)
+        painter.setFont(QFont("DIN Condensed", 7 + 2, QFont.Bold))
+        painter.setPen(QPen(IR_COLOR if self._ir else QColor("#8796A4")))
+        painter.drawText(chip, Qt.AlignCenter, "IR")
+
+    def _draw_ir_scale(self, painter: QPainter, shown: QRectF) -> None:
+        """A thin colour scale down the right of the thermal frame, with its two levels in degrees C."""
+        if self._ir_scale is None:
+            return
+        from ocu.core.thermal_display import LUTS
+
+        lo, hi, palette = self._ir_scale
+        bar = QRectF(shown.right() - 7, shown.top() + 20, 5, max(shown.height() - 40, 10))
+        lut = LUTS[palette]
+        steps = max(int(bar.height()), 2)
+        for i in range(steps):
+            r, g, b = lut[int((1.0 - i / (steps - 1)) * 255)]
+            painter.fillRect(QRectF(bar.left(), bar.top() + i * bar.height() / steps, bar.width(), bar.height() / steps + 0.6), QColor(int(r), int(g), int(b)))
+        painter.setFont(QFont("Menlo", 6))
+        painter.setPen(QPen(QColor("#E4EBF1")))
+        painter.drawText(QRectF(bar.left() - 32, bar.top() - 11, 40, 10), Qt.AlignRight, f"{hi:.0f}\u00b0")
+        painter.drawText(QRectF(bar.left() - 32, bar.bottom() + 1, 40, 10), Qt.AlignRight, f"{lo:.0f}\u00b0")
 
     DETECTION_COLORS = {"person": "#E5484D", "vehicle": "#4DA3FF", "animal": "#B58CFF"}
     #: A box round something the operator has not chosen to treat as a threat: thin and muted.

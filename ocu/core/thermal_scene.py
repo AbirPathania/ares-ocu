@@ -33,6 +33,12 @@ class ThermalSensor:
         """What one pixel subtends, across the frame's width."""
         return math.radians(self.hfov_deg) / self.width
 
+    def binned(self, factor: int) -> ThermalSensor:
+        """The same sensor with factor x factor pixels averaged into one: fewer, larger pixels, and the noise of an
+        average of factor squared of them."""
+        return ThermalSensor(f"{self.name} (binned {factor}x{factor})", self.width // factor, self.height // factor, self.hfov_deg,
+                             self.netd_k / factor, self.blur_px / factor)
+
 
 ROVER_THERMAL = ThermalSensor("rover mast thermal", 320, 256, 50.0, 0.050, 0.6)
 SCOUT_THERMAL = ThermalSensor("scout thermal", 160, 120, 57.0, 0.050, 0.6)
@@ -246,7 +252,7 @@ class ThermalImager:
         return self._skin_cache[1]
 
     def render(self, sensor: ThermalSensor, x: float, y: float, camera_z: float, heading_deg: float, pitch_down_deg: float,
-               hour: float, entities=(), poses=(), rng: np.random.Generator | None = None, max_range_m: float = 140.0) -> ThermalFrame:
+               hour: float, entities=(), poses=(), rng: np.random.Generator | None = None, max_range_m: float = 140.0, prune: bool = True) -> ThermalFrame:
         field, site = self.field, self.field.site
         w, h = sensor.width, sensor.height
         hits = self.rig.resolve_view(x, y, camera_z, heading_deg, w, h, sensor.hfov_deg, pitch_down_deg, max_range_m)
@@ -294,26 +300,43 @@ class ThermalImager:
         h_conv = float(site.convection(hour))
         for index, (entity, pose) in enumerate(zip(entities, poses, strict=False)):
             ex, ey, eh = pose[0], pose[1], pose[2]
-            if math.hypot(ex - x, ey - y) > max_range_m + 5.0:
+            distance = math.hypot(ex - x, ey - y)
+            if distance > max_range_m + 5.0:
                 continue
             z_ground = self.rig.elevation_at(ex, ey)
             heading_rad = math.radians(eh)
             fwd = (math.sin(heading_rad), math.cos(heading_rad))
             facing = (x - ex) * fwd[0] + (y - ey) * fwd[1] > 0.0
             a, b = max(entity.length_m, 0.2) / 2.0, max(entity.width_m, 0.2) / 2.0
+            # only rays that could reach this body: a window of bearing and elevation round it, not every pixel
+            reach = math.hypot(a, b) * 1.6 + abs(entity.box_offset_m) + 0.7
+            if prune and distance <= reach:
+                continue
+            half_width = math.asin(min(1.0, reach / max(distance, 1e-6))) + 0.02
+            to_body = math.atan2(ex - x, ey - y)
+            swing = (bearing - to_body + math.pi) % (2.0 * math.pi) - math.pi
+            near, far = max(distance - reach, 0.5), distance + reach
+            low = min(math.atan2(z_ground - camera_z, near), math.atan2(z_ground - camera_z, far)) - 0.02
+            high = max(math.atan2(z_ground + entity.height_m - camera_z, near), math.atan2(z_ground + entity.height_m - camera_z, far)) + 0.02
+            window = (np.abs(swing) < half_width) & (elev > low) & (elev < high) if prune else np.ones(n, dtype=bool)
+            sub = np.nonzero(window)[0]
+            if sub.size == 0:
+                continue
+            sub_dir = direction[sub]
             for band in body_bands(entity, air_c, sun_el, beam, diffuse, h_conv, facing):
-                t, z, nx, ny, cap = _band_hits(origin, direction, (ex + fwd[0] * entity.box_offset_m, ey + fwd[1] * entity.box_offset_m), heading_rad,
+                t, z, nx, ny, cap = _band_hits(origin, sub_dir, (ex + fwd[0] * entity.box_offset_m, ey + fwd[1] * entity.box_offset_m), heading_rad,
                                                 z_ground, entity.height_m, band, a, b)
-                closer = t < nearest
+                closer = t < nearest[sub]
                 if closer.any():
                     face_flux = beam * math.cos(max(sun_el, 0.0)) * np.clip(nx * sun_dir[0] + ny * sun_dir[1], 0.0, None) + diffuse / 2.0
                     flux = np.where(cap, horizontal_flux, face_flux)
-                    surface_c[closer] = band_temperature(band, flux[closer], air_c, sky_lw, h_conv)
-                    emissivity[closer] = band.emissivity
-                    reflected_k[closer] = air_k - UPRIGHT_REFLECTED_DEPRESSION_K
-                    nearest[closer] = t[closer]
-                    entity_index[closer] = index
-                    painted = painted | closer
+                    hit = sub[closer]
+                    surface_c[hit] = band_temperature(band, flux[closer], air_c, sky_lw, h_conv)
+                    emissivity[hit] = band.emissivity
+                    reflected_k[hit] = air_k - UPRIGHT_REFLECTED_DEPRESSION_K
+                    nearest[hit] = t[closer]
+                    entity_index[hit] = index
+                    painted[hit] = True
 
         # radiometry: what leaves the surface, what the air in between adds and takes
         apparent_k = tp.RADIOMETER.apparent_k(surface_c + tp.KELVIN, emissivity, reflected_k)

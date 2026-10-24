@@ -52,8 +52,32 @@ model was measured to behave, on images it never saw, from curves built by the `
 (`ocu/data/detector_curves.json`). Those measurements are unflattering and are kept that way: a person seen from
 a scout at the usual distances is not found at all, small things are mostly missed, and the detector now and
 then invents a person or an animal, which the persistence gate normally catches. An animal is reported as
-`unknown` and labelled ANIMAL, and never raises a threat alert; whether `animal` becomes the spec's eighth
-threat class is an open decision. People and animals also appear in the LiDAR picture as short-lived warm and violet returns that are never written into the map, the rover drives round a parked vehicle and keeps clear of anything that walks, and they stop for it. See DECISIONS.md, "People, vehicles and animals".
+`unknown` and labelled ANIMAL; whether `animal` becomes the spec's eighth threat class is an open decision, and whether it
+raises an alert is the operator's choice (next section). People and animals also appear in the LiDAR picture as short-lived warm and violet returns that are never written into the map, the rover drives round a parked vehicle and keeps clear of anything that walks, and they stop for it. See DECISIONS.md, "People, vehicles and animals".
+
+## What counts as a threat is the operator's choice
+
+A strip at the top of the threat list, **TREAT AS A THREAT**, has a chip for Mines / IEDs, Arms, People, Vehicles,
+Animals and Other. A class that is on raises alerts and is listed. A class that is off is a **contact**: drawn small and
+quiet on the map and as a thin muted box on the feed, logged at the quietest level, counted in the strip, and still
+shared with the fleet and still avoided by the rover. Defaults are Mines / IEDs and People. Switching Mines / IEDs off
+takes the same two-second hold as an irreversible command; the other chips are one click. **Arms is shown, disabled,
+because no weapon detector is wired into this build.** See DECISIONS.md, "The operator chooses what counts as a threat".
+
+## Infrared
+
+The **LAYER** button on the map cycles LIDAR, IR and LIDAR + IR, and every camera tile has an **IR** chip. The infrared is a
+physical simulation, not a recoloured picture: a heat-conduction model under every half-metre cell, driven by the sun
+at its real position for 34 degrees north on 20 October, the clear sky, the wind and the air temperature, with the
+shadows of rocks and trees, so that the same ground is warm at 10:00, hot at 13:00, and cold at night while rocks glow;
+buried objects are columns of their own, so a shallow disturbance shows faintly and changes sign twice a day; people,
+deer and the truck are drawn from their own surfaces (skin, clothing and coat; painted metal and glass that reflect the
+cold sky); and a camera adds band radiance, atmosphere, blur and its own noise (the sensor suite's candidate mast camera,
+320 x 256, and the scouts' 160 x 120, both 50 mK). The map's infrared is a mosaic of what the thermal cameras have actually
+seen, as the LiDAR cloud is, and it fades as it ages. The operator picks the palette, the gain, and the time of day.
+It is checked against analytic solutions and known behaviour and **is not validated against a real site**; see DECISIONS.md,
+"Thermal imagery", for the model, the eleven checks, the two predictions that were wrong and the one change made after a
+check failed. At night the visible feed still shows daylight, and nothing about it is claimed.
 
 ## The sixty second demo
 
@@ -155,5 +179,7 @@ real decision from the team, not this build's placeholder.
 | Terrain ground truth | Generated from a fixed seed. A plausible piece of ground, not a real place. Rock is individual boulders up to 3.6 m, and washouts are cut where water runs |
 | Negative obstacles | Real. A hole stops the wheels and not the beam, so it is found by the drive stereo pair within 8 m rather than by the scanner, and once mapped it is not unlearned |
 | The rover's terrain map | Real. Built only from simulated LiDAR returns, with occlusion: unscanned ground stays unknown and obstacles cast shadows that close as the rover drives around them |
+| Infrared | A physical simulation with textbook material values, checked against analytic solutions and not validated against a real site. The mosaic holds only what thermal cameras have seen. The visible feeds do not follow the time of day chosen for it |
+| Threat classes | The operator's choice per class; a class that is off is a quiet contact that is still shared and still avoided |
 | Mission theme | Generic hazard sweep, never labeled minefield |
 | Guns | Not modelled. The camera detector here is simulated from measured curves for people, vehicles and animals only. The separate gun model in the perception repository (decisions 47 and 48) was measured on web photographs, says nothing about a rover, and is not used here |

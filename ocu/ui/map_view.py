@@ -31,6 +31,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QRadialGradient,
 )
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
@@ -146,6 +147,10 @@ class MapView(QWidget):
     bayLaunchRequested = Signal()  # operator clicked a docked slot in the rover's bay
     destinationPlaced = Signal(float, float)  # operator clicked a point on the map to go to
     destinationCleared = Signal()
+    layerChanged = Signal(str)  # "lidar", "ir" or "both": which picture of the ground the map shows
+    paletteRequested = Signal()
+    holdRequested = Signal()
+    timeShiftRequested = Signal(float)  # hours
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -168,6 +173,10 @@ class MapView(QWidget):
         self._swept: list[list[tuple[float, float]]] = []
         self._detections: list[dict] = []
         self._threat_filter = None
+        self._layer = "lidar"
+        self._thermal: dict | None = None  # what the thermal layer draws: the mosaic, the levels, the clock
+        self._thermal_image: QImage | None = None
+        self._thermal_key = None
         self._detection_by_key: dict[tuple, dict] = {}
         self._holdings: dict[tuple, set[str]] = {}
         self._mesh_rover = 0
@@ -300,7 +309,73 @@ class MapView(QWidget):
         toolbar.addWidget(self.destination_btn)
         self._refresh_destination_button()
 
+        self.layer_btn = QPushButton()
+        self.layer_btn.setObjectName("layerButton")
+        self.layer_btn.setToolTip("Which picture of the ground the map shows: the LiDAR scan, the thermal mosaic, or both")
+        self.layer_btn.clicked.connect(self._cycle_layer)
+        toolbar.addWidget(self.layer_btn)
+        self._refresh_layer_button()
+
         layout.addLayout(toolbar)
+
+        # The thermal controls: palette, gain, and the time of day, which matters more to what infrared shows than anything
+        self.ir_row = QWidget()
+        ir_layout = QHBoxLayout(self.ir_row)
+        ir_layout.setContentsMargins(0, 0, 0, 0)
+        ir_layout.setSpacing(6)
+        self.palette_btn = QPushButton("IRON")
+        self.palette_btn.setToolTip("Palette: white-hot, black-hot or iron")
+        self.palette_btn.clicked.connect(self.paletteRequested.emit)
+        self.gain_btn = QPushButton("GAIN AUTO")
+        self.gain_btn.setToolTip("Automatic gain follows the ground that has been seen; HOLD keeps the present levels")
+        self.gain_btn.clicked.connect(self.holdRequested.emit)
+        self.time_back_btn = QPushButton("\u2212 1 H")
+        self.time_back_btn.clicked.connect(lambda: self.timeShiftRequested.emit(-1.0))
+        self.time_label = QPushButton("LOCAL --:--")
+        self.time_label.setEnabled(False)
+        self.time_fwd_btn = QPushButton("+ 1 H")
+        self.time_fwd_btn.clicked.connect(lambda: self.timeShiftRequested.emit(1.0))
+        for w in (self.palette_btn, self.gain_btn, self.time_back_btn, self.time_label, self.time_fwd_btn):
+            ir_layout.addWidget(w)
+        layout.addWidget(self.ir_row)
+        self.ir_row.setVisible(False)
+
+    # --- the thermal layer ---
+
+    @property
+    def layer(self) -> str:
+        return self._layer
+
+    def set_layer(self, layer: str) -> None:
+        if layer not in ("lidar", "ir", "both"):
+            raise ValueError(f"unknown map layer {layer!r}")
+        self._layer = layer
+        self._refresh_layer_button()
+        self.ir_row.setVisible(layer != "lidar")
+        self._cloud_dirty = True
+        self.update()
+        self.layerChanged.emit(layer)
+
+    def _cycle_layer(self) -> None:
+        self.set_layer({"lidar": "ir", "ir": "both", "both": "lidar"}[self._layer])
+
+    def _refresh_layer_button(self) -> None:
+        self.layer_btn.setText({"lidar": "LAYER  LIDAR", "ir": "LAYER  IR", "both": "LAYER  LIDAR + IR"}[self._layer])
+        self.layer_btn.setProperty("state", "idle" if self._layer == "lidar" else "set")
+        self.layer_btn.style().unpolish(self.layer_btn)
+        self.layer_btn.style().polish(self.layer_btn)
+
+    def set_thermal_view(self, **state) -> None:
+        """What the thermal layer needs to draw itself: `map` (the mosaic), `palette`, `lo` and `hi`, `hour` (local solar
+        time), `now_s`, `ready` and `progress` of the day's field, `hold` (levels held by the operator) and `cameras`
+        (how many thermal cameras are running)."""
+        self._thermal = state
+        self.palette_btn.setText({"white_hot": "WHITE-HOT", "black_hot": "BLACK-HOT", "iron": "IRON"}.get(state.get("palette", "iron"), "IRON"))
+        self.gain_btn.setText("GAIN HOLD" if state.get("hold") else "GAIN AUTO")
+        hour = state.get("hour")
+        if hour is not None:
+            self.time_label.setText(f"LOCAL {int(hour):02d}:{int((hour % 1.0) * 60):02d}")
+        self.update()
 
     # --- destination: where the operator sends the rover ---
 
@@ -780,8 +855,12 @@ class MapView(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), QColor("#0A0E12"))
 
-        self._draw_perception(painter)
-        self._draw_fresh_returns(painter)
+        if self._layer in ("lidar", "both"):
+            self._draw_perception(painter)
+        if self._layer in ("ir", "both"):
+            self._draw_thermal(painter)
+        if self._layer in ("lidar", "both"):
+            self._draw_fresh_returns(painter)
         self._draw_entity_returns(painter)
         self._draw_sensor_range(painter)
         self._draw_grid(painter)
@@ -802,11 +881,87 @@ class MapView(QWidget):
         self._draw_scale_bar(painter)
         self._draw_mesh_banner(painter)
         self._draw_notices(painter)
+        if self._layer != "lidar":
+            self._draw_thermal_legend(painter)
         if self._stale:
             self._draw_stale_overlay(painter)
         self._draw_cursor_readout(painter)
 
         painter.end()
+
+    def _draw_thermal(self, painter: QPainter) -> None:
+        """The thermal mosaic, blitted like the LiDAR cloud, with heat contacts on top. Ground no camera has covered is
+        left dark."""
+        state = self._thermal
+        if state is None or not state.get("ready") or state.get("map") is None:
+            return
+        mosaic = state["map"]
+        key = (mosaic.version, round(state["lo"], 1), round(state["hi"], 1), state["palette"], int(state["now_s"] // 5.0))
+        if key != self._thermal_key or self._thermal_image is None:
+            rgba = mosaic.rgba(state["lo"], state["hi"], state["palette"], state["now_s"])
+            as_rows = np.ascontiguousarray(rgba.transpose(1, 0, 2)[::-1])  # [x, y] with y up -> rows from the top
+            height, width = as_rows.shape[:2]
+            self._thermal_image = QImage(as_rows.data, width, height, 4 * width, QImage.Format_RGBA8888).copy()
+            self._thermal_key = key
+        painter.save()
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        if self._layer == "both":
+            painter.setOpacity(0.8)
+        top_left = self._to_screen(-mosaic.half_extent_m, mosaic.half_extent_m)
+        bottom_right = self._to_screen(mosaic.half_extent_m, -mosaic.half_extent_m)
+        painter.drawImage(QRectF(top_left, bottom_right), self._thermal_image)
+        painter.restore()
+        for contact in mosaic.contacts:
+            age = state["now_s"] - contact.seen_s
+            fade = max(0.0, 1.0 - age / 2.5)
+            r, g, b = mosaic.contact_colour(contact, state["lo"], state["hi"], state["palette"])
+            centre = self._to_screen(contact.x, contact.y)
+            radius = max(contact.radius_m * self._scale * 1.6, 7.0)
+            glow = QRadialGradient(centre, radius * 2.2)
+            glow.setColorAt(0.0, QColor(r, g, b, int(235 * fade)))
+            glow.setColorAt(0.45, QColor(r, g, b, int(120 * fade)))
+            glow.setColorAt(1.0, QColor(r, g, b, 0))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(glow))
+            painter.drawEllipse(centre, radius * 2.2, radius * 2.2)
+
+    def _draw_thermal_legend(self, painter: QPainter) -> None:
+        """A colour scale in degrees C down the right of the map, what it is, and how much of it is yet to be seen."""
+        state = self._thermal
+        painter.save()
+        painter.setFont(QFont("Menlo", 8))
+        if state is None or not state.get("ready"):
+            progress = 0.0 if state is None else state.get("progress", 0.0)
+            painter.setPen(QPen(QColor("#F0A23C")))
+            painter.drawText(QRectF(0, self.height() / 2 - 20, self.width(), 40), Qt.AlignCenter, f"THERMAL MODEL COMPUTING  {progress * 100:.0f}%")
+            painter.restore()
+            return
+        from ocu.core.thermal_display import LUTS, scale_ticks
+
+        lo, hi, palette = state["lo"], state["hi"], state["palette"]
+        bar = QRectF(self.width() - 46, 120.0, 12.0, max(self.height() - 300.0, 80.0))
+        steps = max(int(bar.height()), 2)
+        lut = LUTS[palette]
+        for i in range(steps):
+            r, g, b = lut[int((1.0 - i / (steps - 1)) * 255)]
+            painter.fillRect(QRectF(bar.left(), bar.top() + i * bar.height() / steps, bar.width(), bar.height() / steps + 0.6), QColor(int(r), int(g), int(b)))
+        painter.setPen(QPen(QColor("#4F5B68"), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(bar)
+        painter.setPen(QPen(QColor("#C6D0DA")))
+        for position, degrees in scale_ticks(lo, hi):
+            y = bar.bottom() - position * bar.height()
+            painter.drawLine(QPointF(bar.left() - 3, y), QPointF(bar.left(), y))
+            painter.drawText(QRectF(bar.left() - 44, y - 6, 40, 12), Qt.AlignRight, f"{degrees:.0f}")
+        painter.setFont(QFont("DIN Condensed", 8 + 3, QFont.Bold))
+        painter.setPen(QPen(QColor("#F0A23C")))
+        painter.drawText(QRectF(bar.left() - 70, bar.top() - 34, 110, 14), Qt.AlignRight, "THERMAL \u00b7 \u00b0C")
+        painter.setFont(QFont("Menlo", 7))
+        painter.setPen(QPen(QColor("#8796A4")))
+        seen = state["map"].seen_fraction * 100.0 if state.get("map") is not None else 0.0
+        painter.drawText(QRectF(bar.left() - 96, bar.bottom() + 6, 136, 12), Qt.AlignRight, f"LWIR 8-14 \u00b5m  {state.get('cameras', 0)} cam")
+        painter.drawText(QRectF(bar.left() - 96, bar.bottom() + 18, 136, 12), Qt.AlignRight, f"{seen:.1f}% of ground seen")
+        painter.restore()
 
     def _draw_perception(self, painter: QPainter) -> None:
         """The map the rover has built, blitted in one call.
@@ -1509,6 +1664,7 @@ class MapView(QWidget):
         divergence on trust. The counts make it checkable: two replicas, how
         many voxels each holds, and how many must cross for them to agree.
         """
+        drop = self.ir_row.height() + 8.0 if self.ir_row.isVisible() else 0.0  # clear of the thermal controls' row
         if self._link_cut:
             headline = "LINK CUT — MAPS DIVERGING"
             detail = (
@@ -1527,7 +1683,7 @@ class MapView(QWidget):
             painter.setPen(QPen(QColor(124, 136, 145, 170)))
             painter.setFont(QFont("Menlo", 8))
             painter.drawText(
-                QRectF(0, 52, self.width(), 14),
+                QRectF(0, 52 + drop, self.width(), 14),
                 Qt.AlignCenter,
                 f"MESH SYNCED · {self._mesh_rover} voxels on both replicas",
             )
@@ -1535,7 +1691,7 @@ class MapView(QWidget):
 
         # Below the toolbar row, which occupies the top-left corner.
         width, height = 430.0, 44.0
-        rect = QRectF((self.width() - width) / 2, 46, width, height)
+        rect = QRectF((self.width() - width) / 2, 46 + drop, width, height)
         painter.setPen(QPen(accent, 1))
         painter.setBrush(QBrush(box))
         painter.drawRoundedRect(rect, 3, 3)

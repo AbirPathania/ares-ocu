@@ -49,6 +49,7 @@ def main() -> int:
     window.enable_gpu_cameras()
     window.resize(opening_size(app))
     window.show()
+    window.warm_thermal()  # infrared is ready by the time it is asked for
 
     return app.exec()
 
