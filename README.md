@@ -44,7 +44,7 @@ delta count showing exactly how much crossed the link.
 
 ## People, vehicles and animals
 
-Three things stand or walk on the ground: a person, a parked vehicle and a deer-sized animal. The rover's
+Four things stand or walk on the ground: a person, a parked vehicle, a buck and an ibex. The rover's
 camera and the scouts' cameras run a **simulated** detector over them, drawn as boxes on the feeds (dashed
 until a detection has persisted, solid once it has) and reported to the threat panel, the map and the log only
 once confirmed. **No neural network runs in this application.** The detector behaves the way a real trained
@@ -74,7 +74,9 @@ buried objects are columns of their own, so a shallow disturbance shows faintly 
 deer and the truck are drawn from their own surfaces (skin, clothing and coat; painted metal and glass that reflect the
 cold sky); and a camera adds band radiance, atmosphere, blur and its own noise (the sensor suite's candidate mast camera,
 320 x 256, and the scouts' 160 x 120, both 50 mK). The map's infrared is a mosaic of what the thermal cameras have actually
-seen, as the LiDAR cloud is, and it fades as it ages. The operator picks the palette, the gain, and the time of day.
+seen, as the LiDAR cloud is, and it fades as it ages. The operator picks the palette, the gain, and the time of day. The
+day is solved the first time infrared is wanted, in a process of its own (about 12 s on an M1), and kept in
+`~/.cache/ares-ocu`; from then on it loads in a fraction of a second.
 It is checked against analytic solutions and known behaviour and **is not validated against a real site**; see DECISIONS.md,
 "Thermal imagery", for the model, the eleven checks, the two predictions that were wrong and the one change made after a
 check failed. At night the visible feed still shows daylight, and nothing about it is claimed.
