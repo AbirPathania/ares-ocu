@@ -42,7 +42,7 @@ def run_frames(window, frames):
 
 
 def test_the_window_starts_with_one_of_each_kind_and_a_camera_detector(window):
-    assert sorted(e.kind for e in window.surface_entities) == ["animal", "person", "vehicle"]
+    assert sorted(e.kind for e in window.surface_entities) == ["animal", "animal", "person", "vehicle"], "a person, a vehicle, and two kinds of animal"
     run_frames(window, 3)  # runs without error at the start of a mission
 
 

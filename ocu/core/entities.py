@@ -215,5 +215,7 @@ def default_entities(seed: int = 20261016, sweep: LaneSweep | None = None) -> li
     return [
         SurfaceEntity("person", "walker", 1.78, 0.54, 0.63, (sweep.at(1, 22.0, 12.0), sweep.at(1, 22.0, -4.0)), speed_ms=1.2, box_offset_m=-0.095),
         SurfaceEntity("vehicle", "parked truck", 2.20, 2.12, 5.70, (sweep.at(3, 21.0, 14.0),), heading_deg=65.0),
-        SurfaceEntity("animal", "buck", 1.86, 0.38, 2.13, (sweep.at(0, 10.0, 9.0), sweep.at(0, 16.0, 11.0), sweep.at(0, 12.0, 7.0)), speed_ms=0.5, box_offset_m=0.265, style="buck"),
+        SurfaceEntity("animal", "buck", 1.91, 0.72, 2.14, (sweep.at(0, 10.0, 9.0), sweep.at(0, 16.0, 11.0), sweep.at(0, 12.0, 7.0)), speed_ms=0.5, box_offset_m=0.27, style="buck"),
+        # an ibex, the animal of this country, on the ground the other side of the lanes: shorter, stockier and with a scimitar horn
+        SurfaceEntity("animal", "ibex", 1.61, 0.52, 1.64, (sweep.at(1, 13.0, -9.0), sweep.at(1, 18.0, -11.0), sweep.at(1, 15.0, -7.5)), speed_ms=0.35, box_offset_m=0.215, style="ibex"),
     ]

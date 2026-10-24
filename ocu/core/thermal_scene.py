@@ -307,7 +307,8 @@ class ThermalImager:
             heading_rad = math.radians(eh)
             fwd = (math.sin(heading_rad), math.cos(heading_rad))
             facing = (x - ex) * fwd[0] + (y - ey) * fwd[1] > 0.0
-            a, b = max(entity.length_m, 0.2) / 2.0, max(entity.width_m, 0.2) / 2.0
+            # an animal's width is taken across its antlers or horns, which are not its body
+            a, b = max(entity.length_m, 0.2) / 2.0, max(min(entity.width_m, 0.5) if entity.kind == "animal" else entity.width_m, 0.2) / 2.0
             # only rays that could reach this body: a window of bearing and elevation round it, not every pixel
             reach = math.hypot(a, b) * 1.6 + abs(entity.box_offset_m) + 0.7
             if prune and distance <= reach:

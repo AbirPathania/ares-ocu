@@ -168,3 +168,40 @@ def test_obstacle_radii_are_in_the_planners_hands_and_sensible():
     from ocu.core.entities import OBSTACLE_RADIUS_M
 
     assert OBSTACLE_RADIUS_M["person"] < OBSTACLE_RADIUS_M["animal"] < OBSTACLE_RADIUS_M["vehicle"]
+
+
+# ---- the animals
+
+def test_there_are_two_kinds_of_animal_in_the_default_field():
+    from ocu.core.entities import default_entities
+
+    animals = [e for e in default_entities() if e.kind == "animal"]
+    assert sorted(e.style for e in animals) == ["buck", "ibex"]
+    assert all(e.height_m > 1.2 and e.length_m > 1.4 for e in animals)
+
+
+def test_an_ibex_is_stockier_shorter_bodied_and_has_horns_not_antlers():
+    import numpy as np
+
+    from ocu.render import figures
+
+    buck = figures.deer(0.0, buck=True)[0][:, :3]
+    ibex = figures.deer(0.0, height=figures.IBEX_HEIGHT, species="ibex")[0][:, :3]
+    assert np.ptp(ibex[:, 1]) < 0.85 * np.ptp(buck[:, 1]), "shorter in the body"
+    assert 1.4 <= np.ptp(ibex[:, 1]) <= 1.8, "about the length of an ibex, head and body"
+    assert ibex[:, 2].max() < buck[:, 2].max(), "and lower"
+    assert np.ptp(ibex[:, 0]) > 0.45, "stockier across the barrel and horns"
+    # the horns sweep back over the shoulders: the highest points are behind the head, not above and ahead of it as antlers are
+    top = ibex[ibex[:, 2] > ibex[:, 2].max() - 0.05]
+    assert top[:, 1].mean() < ibex[:, 1].max() - 0.5
+
+
+def test_the_figures_are_built_for_every_animal_style_in_the_default_field():
+    from ocu.core.entities import default_entities
+    from ocu.render import figures
+
+    frames = figures.build_all()
+    for e in default_entities():
+        key = f"{e.kind}:{e.style}" if e.style else e.kind
+        assert key in frames, f"{e.name} has no figure"
+        assert len(frames[key]) == (1 if e.kind == "vehicle" else figures.GAIT_FRAMES), "a truck has one pose; a person or an animal a stride"

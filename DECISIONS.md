@@ -1559,3 +1559,33 @@ picture is wrong; this is stated here and not hidden. The sky is a clear one, al
 objects, no rain, snow or fog, and no wind gusts. The engine of the parked truck is cold. The scale of the signature of a
 buried object is a model's, not a measurement's. The tests in `test_thermal_physics.py`, `test_thermal_scene.py`,
 `test_thermal_map.py`, `test_thermal_system.py` and `test_thermal_window.py` hold all of the above.
+
+## The animals: antlers that read as antlers, an ibex, and a glyph
+
+**What was wrong.** At working distance the buck's antlers were two tall thin spikes, which read as a gazelle's horns, and
+the console drew every animal with the question mark of an unclassified contact, because the spec's enum has no animal
+class. There was also one animal in a country whose animal is not a deer.
+
+**What changed.**
+
+- **The buck's antlers** spread into a V and branch: a thicker main beam (3.6 cm at the burr), five tines each side, the
+  brow tine forward and the crown at the top. The buck is now 1.91 m tall and 0.72 m across the antlers (it was 0.38 m
+  across), and its recorded outline follows, so the detector's box and the picture still agree.
+- **An ibex**, the Siberian ibex that lives in this kind of ground: a stocky, short-bodied animal (1.64 m long against the
+  deer's 2.14, 0.52 m across the barrel and horns), a pale grey-brown coat with a lighter belly and darker legs, short
+  ears, a dark short tail, a beard, and heavy flattened horns that sweep up and far back in a scimitar with a transverse
+  ridge every few centimetres. It is built on the deer's skeleton and gait, then made shorter in the leg and body and
+  wider across, with its own horns and beard added afterwards so that they are not squashed. About 15 000 triangles, in
+  12 walking poses. It walks a slow path on the far side of the lanes.
+- **A glyph**: a deer in profile for the map marker, the threat card and the alert badge, in place of the question mark.
+  The label still says ANIMAL.
+- **The thermal model** takes an animal's body width as at most half a metre, so a buck's antlers are not drawn as warm
+  body.
+
+**Tests.** The renderer-versus-model box test now runs for the buck and the ibex as well as the person and the truck (the
+drawn animal is where the detector model says its box is); the ibex is shorter-bodied, lower and wider than the buck and its
+horns sweep behind its head; every style in the default field has a figure with the right number of poses; and the window
+starts with one person, one vehicle and two animals.
+
+**Not covered.** The ibex does not climb: it walks the same flat ground as the deer. Its horns are two tubes with a ridge
+profile, not a keratin sheath with growth rings and a worn tip. A herd of one is not a herd.
