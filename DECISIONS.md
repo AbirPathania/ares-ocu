@@ -1402,3 +1402,93 @@ raises an alert like a person does.
 threat does; that a contact is not in the threat list but is on the map and in the log; that it is still shared into the
 mesh and still an obstacle to the rover; that turning a class on and off re-draws; the two-second hold on Mines and IEDs
 and the single click on the others; and that Arms cannot be switched on.
+
+## Thermal imagery: a physical model, not a palette
+
+**What was asked.** An infrared view on the map: the thermal signature of everything, low to high, as in real life.
+That is a request for physics, so what follows is written before it is built, with the checks it will be held to.
+
+**The principle that decides the design.** Thermal imagery is not a recolouring of the visible scene. A surface's
+infrared brightness depends on its temperature, its emissivity and what it reflects, and the temperature is the result
+of an energy balance that depends on the time of day. The same ground is hot at 14:00 and nearly invisible at dawn; a
+rock that is cooler than sand at noon is warmer at night; a buried object shows only when the soil above it heats or
+cools at a different rate, and it vanishes twice a day when the two cross. The model therefore has a clock, a sun, a sky
+and a ground that stores heat, and the picture is what a camera would record of that.
+
+**Where it comes from (and what is NOT claimed).** This is a **simulation of physics with textbook parameters**, checked
+against analytic solutions and against well known qualitative behaviour. It is not validated against radiometric
+measurements of a real site, and the material properties are typical published values, not values measured here.
+
+### The model
+
+- **Ground temperature.** A one-dimensional heat-conduction column under every half-metre cell, six layers (1, 2, 4, 8,
+  16 and 32 cm) with an implicit solver, forced at the surface by an energy balance: absorbed sunlight
+  `(1 - albedo) x (beam x cos(incidence) x not-in-shadow + sky diffuse)`, absorbed sky long-wave
+  (Swinbank clear sky, `5.31e-13 T^6`), emitted long-wave `eps sigma T^4`, convection `h (T - T_air)` with
+  `h = 5.7 + 3.8 x wind`, and a latent term for vegetation (a fixed share of the absorbed sunlight). Slope and aspect
+  change the sunlight each cell receives; rock, trees and bushes cast shadows computed from the same height field the
+  cameras draw, at the sun's real position. Two days are run to settle, then one day is stored every ten minutes.
+- **Sun and sky.** Solar position from latitude and day of year; clear-sky beam and diffuse sunlight from the Hottel
+  model with an altitude correction. Site: **34 degrees north, 3 500 m, 20 October** (the visible camera's fixed sun, 42
+  degrees up and 150 degrees round, is what that date gives at about 10:40), clear sky, air temperature 6 degrees C mean
+  with a 9 K swing peaking at 15:00, wind 3 m/s. These are choices for a high-altitude border region, not data.
+- **Materials** (textbook values; albedo, emissivity, conductivity, volumetric heat capacity): dry soil 0.30, 0.95, 0.30,
+  1.3e6; compacted track 0.28, 0.95, 0.60, 1.5e6; low scrub 0.20, 0.98, 0.20, 0.9e6 with a small latent share; rock
+  0.25, 0.93, 2.8, 2.2e6; trees and bushes as a thin canopy with a larger latent share; pothole as sheltered bare soil.
+  Thermal inertia `sqrt(k rho c)` is therefore about 620 for soil and 2 480 for rock.
+- **Buried objects.** A mine or IED is a column of its own, in the same sun and shadow as the ground round it, with
+  loosened fill above it (lower conductivity) and, for a metal case, a slab of high conductivity at its depth. The
+  surface difference it produces falls away with depth the way the daily temperature wave does (the wave's damping
+  depth in this soil is about 10 cm), so a device 30 cm down is invisible to a thermal camera and one at 3 cm is
+  faintly visible near dawn and dusk. A one-dimensional column ignores sideways heat flow, which flatters a small
+  metal object; that is stated, not corrected.
+- **Things that stand on the ground.** A person, a deer and a truck are drawn from their own surfaces: skin, clothing and
+  hair; coat, face and legs; painted sheet metal and glass. A body's temperature follows the air and the sun (a coat is
+  warmer than the air, a truck's roof is hotter than the ground at noon and colder than the sky-facing ground at night,
+  an engine that has been off for hours is not hot). Ground-truth temperatures are set from the air temperature and the
+  sunlight at that moment.
+- **The camera.** Radiance in the 8 to 14 micron band from Planck's law, emissivity and reflected sky (the clear sky is
+  far colder than the air in that band), atmospheric transmission with distance, a small optical blur, and noise equal to
+  the sensor's noise-equivalent temperature difference. Rover: the mast camera of the sensor suite, 320 by 256, 50 degrees
+  across, 50 mK (CANDIDATE, from `ares-perception`'s sensor record). Scouts: 160 by 120, 57 degrees across, 50 mK (also
+  CANDIDATE). The image is resolved by the same rays and occlusion as the visible feed, so a rock hides what is behind it
+  in infrared as in light.
+- **Display.** A thermal camera has no colour. Brightness is the apparent temperature between two levels set by an
+  automatic gain control (the 1st and 99th percentile of the frame) or by the operator, shown through one of three
+  palettes (white-hot, black-hot, iron), with a scale in degrees Celsius beside it. The operator picks the local time of
+  day.
+
+### What the map shows
+
+The map's infrared layer is a mosaic of what the thermal cameras have actually seen, exactly as the LiDAR cloud is a
+mosaic of what the scanner has seen: unseen ground is dark, and each cell keeps the temperature it had when it was last
+imaged, fading as it goes stale (the ground changes; the picture does not until it is seen again). The rover's camera
+sits less than a metre off the ground, so it sees ground usefully only within about 25 m (beyond that a pixel covers
+metres along the line of sight); a scout looking down sees detail close to the ground it flies over. People, animals and
+vehicles are drawn as live heat blobs for the moment they are in a frame, never accumulated into the mosaic (a walker
+would leave a streak). The camera feeds can be switched to infrared.
+
+### Checks it will be held to (written before the code)
+
+| # | Check | Passes if |
+|---|---|---|
+| V1 | Heat is conserved by the solver (an insulated column with no forcing) | total heat changes by less than 1e-9 relative over a day |
+| V2 | Conduction against the analytic answer: a medium driven at the surface by a daily temperature wave | the wave's amplitude at one damping depth is within 5 percent of `A e^-1`, and its phase lags by `z/delta` within 0.1 rad |
+| V3 | Clear-sky sunlight at 3 500 m | global horizontal 800 to 1 000 W/m2 with the sun 50 degrees up; zero at night; beam falls as the sun drops |
+| V4 | Dry ground, 20 October, 34 degrees north | peak surface temperature 25 to 45 degrees C between 12:00 and 14:30; minimum 3 to 9 K below the air minimum before dawn |
+| V5 | Rock against soil | rock's peak is lower by at least 3 K; rock is warmer by at least 2 K between 02:00 and 05:00; the two cross twice a day |
+| V6 | Shadow | a cell in a boulder's shadow is at least 5 K cooler than a lit one beside it in the late morning |
+| V7 | A disturbed-soil patch 3 cm down | largest difference from undisturbed ground between 0.5 and 4 K, changes sign twice a day; at 30 cm the largest difference is under 0.15 K |
+| V8 | A person at 6 degrees C air | exposed skin 24 to 34 degrees C, clothing 8 to 20; the person is warmer than the ground at night and not at midday |
+| V9 | Planck | the band radiance table inverts to within 1 mK; integrated over all wavelengths it gives `sigma T^4 / pi` within 0.5 percent |
+| V10 | Camera noise | the standard deviation of a uniform scene's apparent temperature is the NETD within 10 percent |
+| V11 | Atmosphere | transmission at 100 m is above 0.97 |
+
+### What this cannot say
+
+It cannot say what a particular real minefield looks like: real soil moisture, vegetation, recent weather and how long a
+device has been buried change a thermal signature by more than the model's own error, and that is why mine detection by
+infrared is done with ground-penetrating radar and metal detection and not by thermal alone. It does not model rain,
+snow, wind-driven cooling gusts, fog, smoke, or a sun that moves in the visible camera (the visible feeds keep their fixed
+late-morning light whatever time of day is chosen for infrared: at night the picture in the visible feed is wrong and
+is labelled so in the panel). Animals and people are two or three part models, not anatomical ones.
