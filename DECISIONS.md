@@ -433,6 +433,10 @@ tiles carry no such label on screen, as they did not before this change. The
 views are rendered rather than recorded, and nothing on screen says so. That
 is a presentation decision, and it is Abir's, not this file's.
 
+**Decided (2026-10-24, Abir): no on-screen label.** The camera tiles stay unlabelled. The README's "What's real and
+what's simulated" table says in words that the feeds are rendered from the simulated world and are not recorded footage,
+and that is where the disclosure lives.
+
 **Not modelled.** Lens distortion, exposure adaptation, motion blur, rain or
 dust on the lens. The aircraft's own shadow and the other aircraft are not
 drawn into its frame. The rover is drawn into an aircraft's frame when it is
