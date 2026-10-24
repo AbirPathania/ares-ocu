@@ -1358,3 +1358,47 @@ the detector's box, the entity's size and the renderer-versus-model test all use
 deer's neck and head are not in it (the beam is at body height). Moving bodies do not occlude the beam for the
 ground behind them. The antlers and the face are fine at a few metres and invisible in the rover's feed, where a deer
 is a few dozen pixels tall; they are there for the day the camera is closer. The deer is made, not scanned.
+
+## The operator chooses what counts as a threat
+
+**What was wrong.** Every detection was dressed as a threat: a parked truck raised an alert that wanted a decision, a
+deer sat in the threat list with a red marker, and a person walking on the lane did the same. An operator clearing
+ground for mines does not want to be asked about vehicles and animals, and one watching a border does. What counts as
+a threat is the operator's call, not the software's.
+
+**What is built.** A strip of chips at the top of the threat list, **TREAT AS A THREAT**: Mines and IEDs, Arms, People,
+Vehicles, Animals, Other. A class that is on behaves as before. A class that is off becomes a **contact**:
+
+- it raises no alert and asks for no decision, and is not in the threat list;
+- it is still drawn on the map, as a small quiet marker with a dim label (no red, no pulse, no ring), and on the camera
+  feed as a thin muted box;
+- it is still logged, at the quietest level, as a contact, and a count of contacts sits in the strip;
+- it is **still avoided**: the rover keeps clear of a vehicle or an animal exactly as before, because what the operator
+  chooses to be told about and what the rover drives into are separate questions;
+- it is **still shared**: the map between rover and scouts holds every observation, because the filter is the
+  operator's own view, not the fleet's record.
+
+Changing a chip re-draws everything at once: markers become contacts or threats, cards leave or enter the list, and a
+line in the log records the new choice. A contact turned into a threat is listed as PENDING; an alert is raised only for
+a detection that arrives after the change, not retroactively.
+
+**Defaults.** Mines and IEDs, Arms and People on; Vehicles, Animals and Other off. This is a choice for a clearance and
+border role (the one the operator in the request named), not a measurement.
+
+**Mines and IEDs are guarded.** Turning them off takes the same two-second hold that an irreversible command does
+(section 10): a chip clicked off by accident would silence the most dangerous class in the product. Turning them on is
+a plain click. Nothing guards the other classes.
+
+**Arms has no source.** No weapon detector is wired into this build. The perception work measured one on web photographs
+(perception decisions 47 and 48), and that says nothing about a rover's camera at range, so there is no honest simulated
+detection rate to give it. The chip is shown, disabled, and says why; the plumbing treats an `arms` class like any other
+the day a source exists.
+
+**The animal alert rule changes.** Until now an animal was reported but never raised as an alert, whatever the
+operator wanted. It is now an ordinary class: off by default, and if the operator turns Animals on, a confident animal
+raises an alert like a person does.
+
+**Tests.** The classification of every detection type into a class; the defaults; that a contact raises no alert and a
+threat does; that a contact is not in the threat list but is on the map and in the log; that it is still shared into the
+mesh and still an obstacle to the rover; that turning a class on and off re-draws; the two-second hold on Mines and IEDs
+and the single click on the others; and that Arms cannot be switched on.
