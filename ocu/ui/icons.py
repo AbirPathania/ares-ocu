@@ -55,6 +55,18 @@ def draw_threat_glyph(painter: QPainter, center: QPointF, radius: float, threat_
         painter.drawRoundedRect(rect, 2, 2)
         painter.drawLine(rect.topLeft() + QPointF(0, r * 0.5), rect.topRight() + QPointF(0, r * 0.5))
 
+    elif threat_type == "weapon":
+        # a figure with a slung weapon: the barrel up over the shoulder, the stock down past the hip, so that it
+        # reads as a rifle rather than as outstretched arms at the size a map marker is drawn
+        painter.drawEllipse(center + QPointF(-r * 0.12, -r * 0.74), r * 0.38, r * 0.38)
+        painter.drawLine(center + QPointF(-r * 0.12, -r * 0.34), center + QPointF(-r * 0.12, r * 0.92))
+        painter.drawLine(center + QPointF(-r * 0.12, r * 0.30), center + QPointF(-r * 0.72, r * 1.05))
+        painter.drawLine(center + QPointF(-r * 0.12, r * 0.30), center + QPointF(r * 0.42, r * 1.05))
+        muzzle, stock = center + QPointF(r * 1.12, -r * 1.06), center + QPointF(-r * 0.38, r * 0.72)
+        painter.drawLine(stock, muzzle)
+        painter.drawLine(stock, stock + QPointF(-r * 0.34, r * 0.16))  # the butt
+        painter.drawLine(center + QPointF(r * 0.30, -r * 0.30), center + QPointF(r * 0.18, r * 0.02))  # the magazine
+
     elif threat_type == "animal":
         # A deer in profile, facing right: body, neck, head with an ear, antlers, four legs, a tail.
         body = QRectF(center.x() - r * 1.2, center.y() - r * 0.35, r * 1.8, r * 0.85)

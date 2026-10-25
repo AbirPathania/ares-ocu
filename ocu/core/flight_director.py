@@ -47,6 +47,7 @@ from ocu.core.constants import (
     ROVER_STATIONARY_SPEED_MS,
     ROVER_MIN_COMMAND_SPEED_MS,
     ROVER_SURVEY_SPEED_MS,
+    ROVER_COMMAND_CEILING_MS,
     ROVER_TOP_SPEED_MS,
     ROVER_TURN_ACCEL_DEG_S2,
     ROVER_TURN_RATE_DEG_S,
@@ -185,7 +186,7 @@ def tricopter_limits() -> MotionLimits:
 
 def rover_limits() -> MotionLimits:
     return MotionLimits(
-        max_speed_ms=ROVER_TOP_SPEED_MS,
+        max_speed_ms=ROVER_COMMAND_CEILING_MS,  # the operator's ceiling; the published figure is ROVER_TOP_SPEED_MS
         max_accel_ms2=ROVER_ACCEL_MS2,
         max_decel_ms2=ROVER_DECEL_MS2,
         max_yaw_rate_deg_s=ROVER_TURN_RATE_DEG_S,

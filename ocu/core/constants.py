@@ -17,6 +17,13 @@ ROVER_MISSION_AVG_POWER_W = 143.0
 ROVER_WHEEL_COUNT = 6
 ROVER_TOP_SPEED_MS = ROVER_TOP_SPEED_KMH / 3.6
 
+#: The top of the operator's speed control. **Above the published platform figure on purpose**: the baseline gives
+#: 15 km/h (4.2 m/s) as ARES-G's transit speed, and this console lets the operator command up to 8 m/s so that
+#: crossing ground at a demonstration does not take real time. Anything above ROVER_TOP_SPEED_MS is marked on the
+#: display as past the published figure, and the power model stays calibrated to 15 km/h whatever is commanded, so
+#: endurance above it is not a prediction. A console control, not a claim about the vehicle.
+ROVER_COMMAND_CEILING_MS = 8.0
+
 ARES_A_MASS_G = 102.0
 ARES_A_CRUISE_ENDURANCE_MIN_LOW = 10.0
 ARES_A_CRUISE_ENDURANCE_MIN_HIGH = 12.0

@@ -117,12 +117,15 @@ def test_a_camera_box_is_muted_for_a_contact_and_normal_for_a_threat(window):
     assert all(b["threat"] is True for b in window.camera_feeds["rover"]._detections)
 
 
-def test_the_chips_show_the_defaults_and_arms_cannot_be_switched_on(window):
+def test_the_chips_show_the_defaults_and_every_one_of_them_says_what_drives_it(window):
     chips = window.threat_filter_bar.chips
-    assert {g for g, c in chips.items() if c.on} == {"explosives", "people"}
+    assert {g for g, c in chips.items() if c.on} == {"explosives", "arms", "people"}
+    for group, chip in chips.items():
+        assert "Found by" in chip.toolTip(), f"{group} does not say where its detections come from"
     QTest.mouseClick(chips["arms"], Qt.LeftButton)
-    assert not chips["arms"].on and not window.threat_filter.is_enabled("arms")
-    assert chips["arms"].toolTip(), "and it says why"
+    assert not chips["arms"].on and not window.threat_filter.is_enabled("arms"), "arms is a working control now"
+    QTest.mouseClick(chips["arms"], Qt.LeftButton)
+    assert chips["arms"].on
 
 
 def test_a_plain_click_switches_people_off_but_mines_need_the_hold(window, monkeypatch):

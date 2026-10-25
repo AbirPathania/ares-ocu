@@ -39,6 +39,7 @@ from pathlib import Path
 import numpy as np
 
 CURVES_PATH = Path(__file__).resolve().parent.parent / "data" / "detector_curves.json"
+WEAPON_CURVES_PATH = Path(__file__).resolve().parent.parent / "data" / "weapon_curves.json"
 
 #: Frames of detector output per second of mission time. An allocation: the real rate depends on hardware that
 #: has not been chosen. The measured model ran at several frames a second on a laptop GPU.
@@ -69,9 +70,29 @@ POSITION_SIGMA_PX = 2.0
 #: Bearing and range at which an invented detection can appear, relative to the camera.
 FALSE_RANGE_M = (8.0, 35.0)
 
+# ---------------------------------------------------------------- the weapon stage (decisions 47 and 48)
+
+#: The weapon model was measured on photographs, where a gun fills a good share of the picture. On a whole rover
+#: frame a rifle at 20 m is a fraction of a percent, far below anything measured, so running it on the frame is
+#: not something any number supports. It runs instead on the crop around a person the first detector has already
+#: found, enlarged, which is the size regime that was measured and how a real system would deploy it.
+#:
+#: Enlarging cannot invent detail: below this many pixels across in the original frame there is nothing in the
+#: crop to enlarge. An allocation, not a measurement.
+MIN_WEAPON_PIXELS = 12.0
+
+#: A weapon call needs this many hits in the last CONFIRM_WINDOW frames of a confirmed person track, for the same
+#: reason a person needs three: one frame of a classifier is not a report. Chosen, not measured.
+WEAPON_HITS = 2
+
 
 @lru_cache(maxsize=1)
 def load_curves(path: str = str(CURVES_PATH)) -> dict:
+    return json.loads(Path(path).read_text())
+
+
+@lru_cache(maxsize=1)
+def load_weapon_curves(path: str = str(WEAPON_CURVES_PATH)) -> dict:
     return json.loads(Path(path).read_text())
 
 
@@ -197,6 +218,31 @@ def median_score(kind: str, share: float) -> float:
     return float(best["median_score_when_found"])
 
 
+def weapon_share(weapon_m: tuple[float, float], entity) -> float:
+    """A carried weapon's area as a share of the crop around the person, which is the image the model is given.
+
+    Both are taken at their real sizes rather than from the projection: the crop is the person's box, so the ratio
+    does not depend on how far away they are. How far away they are decides whether the crop has any detail left
+    (MIN_WEAPON_PIXELS), which is a separate question.
+    """
+    person_area = max(entity.height_m * entity.width_m, 1e-6)
+    return float(weapon_m[0] * weapon_m[1] / person_area)
+
+
+def weapon_probability(weapon_kind: str, share: float) -> float:
+    """Measured recall of the weapon model at that share of the crop (decision 48, arm B)."""
+    curves = load_weapon_curves()["curves"]
+    if weapon_kind not in curves:
+        return 0.0
+    return recall_at(curves[weapon_kind]["bins"], share)
+
+
+def weapon_score(weapon_kind: str, share: float) -> float:
+    bins = load_weapon_curves()["curves"][weapon_kind]["bins"]
+    best = min((b for b in bins if b.get("median_score_when_found")), key=lambda b: abs(math.log(max(share, 1e-3)) - math.log(math.sqrt(max(b["share_lo"], 1e-3) * b["share_hi"]))))
+    return float(best["median_score_when_found"])
+
+
 # ---------------------------------------------------------------- one sensor, one frame
 
 
@@ -209,6 +255,7 @@ class Detection:
     box: tuple[float, float, float, float]  # u0, v0, u1, v1
     false_alarm: bool = False  # known to the simulation, never shown to an operator
     truth: str = ""
+    weapon: str = ""  # what the second stage called on this person's crop, if it fired
 
 
 def _rng(seed: int, *parts) -> np.random.Generator:
@@ -240,6 +287,9 @@ class PerceptionSensor:
         self.floor = float(curves["operating_threshold"])
         self.false_per_frame = float(curves["false_alarms"]["person_or_animal_per_frame"])
         self.false_scores = curves.get("false_alarm_scores") or [self.floor + 0.05]
+        weapons = load_weapon_curves()
+        self.weapon_floor = float(weapons["operating_threshold"])
+        self.weapon_false_per_crop = float(weapons["false_alarms"]["per_image"])
 
     def observe(self, sensor_id: str, cam: CameraSpec, entities, poses, rig, frame: int) -> list[Detection]:
         """Everything this camera reports in one frame: found entities, and now and then an invented one."""
@@ -255,11 +305,32 @@ class PerceptionSensor:
             score = min(max(median_score(entity.kind, ap.share) + rng.uniform(-SCORE_SPREAD, SCORE_SPREAD), self.floor), MAX_CONFIDENCE)
             gz = rig.elevation_at(pose[0], pose[1])
             gx, gy = ground_position(cam, ap.box[3], (ap.box[0] + ap.box[2]) / 2.0, gz, rng)
-            out.append(Detection(entity.kind, float(score), gx, gy, ap.box, False, entity.name))
+            out.append(Detection(entity.kind, float(score), gx, gy, ap.box, False, entity.name, self._weapon_call(entity, ap, cam, rng)))
         rng = _rng(self.seed, sensor_id, "false", frame)
         if rng.random() < self.false_per_frame:
             out.append(self._invented(cam, rig, rng))
         return out
+
+    def _weapon_call(self, entity, ap: Appearance, cam: CameraSpec, rng: np.random.Generator) -> str:
+        """The second stage on this person's crop: what it calls, or "" for nothing.
+
+        Only people are cropped, only when the crop still has detail, and the rate at which it calls a weapon on
+        someone carrying nothing is the measured rate on photographs of people holding ordinary objects.
+        """
+        if entity.kind != "person":
+            return ""
+        carried = getattr(entity, "carrying", "")
+        if carried:
+            pixels = entity.weapon_size_m[0] / max(ap.slant_m, 1e-3) / math.radians(cam.hfov_deg) * cam.width_px
+            if pixels < MIN_WEAPON_PIXELS:
+                return ""
+            if rng.random() < weapon_probability(carried, weapon_share(entity.weapon_size_m, entity)):
+                return carried
+            return ""
+        # someone carrying nothing: the measured false rate, and what it calls is the class it confuses most
+        if rng.random() < self.weapon_false_per_crop:
+            return "long_gun"
+        return ""
 
     def _invented(self, cam: CameraSpec, rig, rng: np.random.Generator) -> Detection:
         r = rng.uniform(*FALSE_RANGE_M)
@@ -289,10 +360,19 @@ class Track:
     confirmed: bool = False
     box: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     truths: list[str] = field(default_factory=list)
+    weapons: list[str] = field(default_factory=list)  # what the second stage called on each hit, "" for nothing
 
     @property
     def confidence(self) -> float:
         return float(np.mean(self.scores[-CONFIRM_WINDOW:])) if self.scores else 0.0
+
+    @property
+    def weapon(self) -> str:
+        """The weapon class this track is carrying, once enough recent frames agree. "" until then."""
+        recent = [w for w in self.weapons[-CONFIRM_WINDOW:] if w]
+        if len(recent) < WEAPON_HITS:
+            return ""
+        return max(set(recent), key=recent.count)
 
     @property
     def is_false(self) -> bool:
@@ -339,6 +419,7 @@ class ConfirmationGate:
             best.hits.append(frame)
             best.scores.append(d.score)
             best.truths.append(d.truth)
+            best.weapons.append(d.weapon)
             recent = [h for h in best.hits if h > frame - self.window]
             if not best.confirmed and len(recent) >= self.hits:
                 best.confirmed = True
@@ -386,3 +467,8 @@ class ContactRegistry:
 #: How a detector's kind maps onto the spec's threat_type enum. There is no animal class, and the eighth class is
 #: an open decision (DECISIONS.md), so an animal is reported as `unknown` with its label kept.
 THREAT_TYPE = {"person": "person", "vehicle": "vehicle", "animal": "unknown"}
+
+#: A person the weapon stage has called on is reported as `weapon`, not `person`: it is one contact, one marker, and
+#: the class an operator filters on is the armed one.
+WEAPON_THREAT_TYPE = "weapon"
+WEAPON_LABELS = {"long_gun": "armed person \u00b7 long gun", "handgun": "armed person \u00b7 handgun"}

@@ -42,12 +42,15 @@ def main(out: str) -> None:
              ("truck far", "vehicle", 32.0, 1.6, 40), ("person near", "person", 4.5, 1.5, 30), ("person side", "person", 4.5, 1.5, 90),
              ("person walking", "person", 5.0, 1.4, 70), ("person far", "person", 22.0, 1.6, 20), ("buck near", "animal", 5.0, 1.5, 40),
              ("buck head", "animal", 3.2, 1.5, 25), ("doe walking", "doe", 5.5, 1.4, 60), ("buck far", "animal", 22.0, 1.6, 20),
-             ("ibex near", "ibex", 5.0, 1.4, 40), ("ibex side", "ibex", 5.5, 1.3, 90), ("ibex head", "ibex", 3.0, 1.5, 25), ("ibex walking", "ibex", 6.0, 1.4, 60)]
+             ("ibex near", "ibex", 5.0, 1.4, 40), ("ibex side", "ibex", 5.5, 1.3, 90), ("ibex head", "ibex", 3.0, 1.5, 25), ("ibex walking", "ibex", 6.0, 1.4, 60),
+             ("armed near", "armed", 4.5, 1.5, 35), ("armed side", "armed", 4.5, 1.5, 90), ("armed walking", "armed", 5.0, 1.4, 70), ("armed at 20 m", "armed", 20.0, 1.6, 55)]
     for i, (label, kind, dist, cam_h, az) in enumerate(shots):
         phase = 0.3 if "walking" in label else 0.0
-        style = "buck" if kind == "animal" else "ibex" if kind == "ibex" else ""
+        style = {"animal": "buck", "ibex": "ibex", "armed": "armed"}.get(kind, "")
         if kind in ("doe", "ibex"):
             kind = "animal"
+        if kind == "armed":
+            kind = "person"
         a = math.radians(az)
         cam = (ox + dist * math.sin(a + math.pi), oy + dist * math.cos(a + math.pi))
         eye = (cam[0], cam[1], float(scene._ground(np.array([cam[0]]), np.array([cam[1]]))[0]) + cam_h)

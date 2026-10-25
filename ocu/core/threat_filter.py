@@ -35,14 +35,31 @@ TYPES_IN = {
 #: Groups that can only be switched off deliberately: silencing them by accident is the dangerous mistake.
 GUARDED = frozenset({"explosives"})
 
-#: Groups with no source in this build, and why. They cannot be switched on.
-UNAVAILABLE = {
-    "arms": "No weapon detector is wired into this build. The one measured so far was tested on web photographs only "
-    "and says nothing about a rover's camera at range.",
+#: Groups with no source in this build, and why. They cannot be switched on. Empty: every class has a source.
+UNAVAILABLE: dict[str, str] = {}
+
+#: What each class is driven by, shown to the operator so that nothing on this strip is a black box.
+SOURCES = {
+    "explosives": "ground-penetrating radar, pulse induction, magnetic gradiometer and vapour, fused",
+    "arms": "a weapon model run on the crop around a person the camera has already found (perception decisions 47 and 48, web photographs only)",
+    "people": "the camera detector, from measured curves",
+    "vehicles": "the camera detector, from measured curves",
+    "animals": "the camera detector, from measured curves",
+    "other": "anything a sensor reports that none of the above classifies",
 }
 
 #: A clearance and border role: the explosives, weapons and people it is there for. A choice, not a measurement.
 DEFAULT_ENABLED = frozenset({"explosives", "arms", "people"})
+
+
+#: A later, more specific classification of the same contact replaces the earlier one whatever its confidence:
+#: the weapon stage runs on a person the camera has already found, so "armed" is never a competing guess, it is
+#: the same contact described better.
+_REPLACES = {"weapon": {"person", "unknown"}}
+
+
+def replaces(new_type: str, old_type: str) -> bool:
+    return old_type in _REPLACES.get(new_type, ())
 
 
 def group_of(detection: dict) -> str:

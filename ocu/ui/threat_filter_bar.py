@@ -12,7 +12,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QGridLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ocu.core.constants import IRREVERSIBLE_COMMAND_HOLD_S
-from ocu.core.threat_filter import GROUPS, GUARDED, LABELS, UNAVAILABLE, ThreatFilter
+from ocu.core.threat_filter import GROUPS, GUARDED, LABELS, SOURCES, UNAVAILABLE, ThreatFilter
 from ocu.ui.theme import HAIRLINE, TEXT, TEXT_DIM, TEXT_FAINT, THREAT
 
 CHIP_HEIGHT = 24
@@ -36,12 +36,15 @@ class ThreatChip(QWidget):
         self.setMinimumWidth(len(LABELS[group]) * 6 + 12)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor if group not in UNAVAILABLE else Qt.ForbiddenCursor)
+        source = SOURCES.get(group, "")
         if group in UNAVAILABLE:
             self.setToolTip(f"{LABELS[group]}: {UNAVAILABLE[group]}")
-        elif group in GUARDED:
-            self.setToolTip(f"{LABELS[group]}. Switching this off takes a {IRREVERSIBLE_COMMAND_HOLD_S:.0f} second hold.")
         else:
-            self.setToolTip(f"Treat {LABELS[group].lower()} as threats")
+            guard = f"\nSwitching this off takes a {IRREVERSIBLE_COMMAND_HOLD_S:.0f} second hold." if group in GUARDED else ""
+            self.setToolTip(
+                f"{LABELS[group]}\nOn: raises alerts and is listed as a threat.\n"
+                f"Off: still drawn, logged, shared and avoided, but quietly, as a contact.\nFound by {source}.{guard}"
+            )
 
     @property
     def on(self) -> bool:

@@ -42,7 +42,9 @@ from ocu.core.constants import (
     CAMERA_ON_ALTITUDE_M,
     ROVER_AUTO_RETURN_BATTERY_PCT,
     ROVER_MIN_COMMAND_SPEED_MS,
+    ROVER_COMMAND_CEILING_MS,
     ROVER_SURVEY_SPEED_MS,
+    ROVER_TOP_SPEED_KMH,
     ROVER_TOP_SPEED_MS,
     TRICOPTER_AUTO_DOCK_BATTERY_PCT,
     TRICOPTER_MIN_LAUNCH_BATTERY_PCT,
@@ -77,7 +79,7 @@ from ocu.core.entities import default_entities, settle_entities, stamp_static_en
 from ocu.core.thermal_display import to_rgb
 from ocu.core.thermal_system import ThermalSystem
 from ocu.core.threat_filter import ThreatFilter
-from ocu.core.vision import PERCEPTION_HZ, THREAT_TYPE, CameraSpec, ConfirmationGate, ContactRegistry, PerceptionSensor
+from ocu.core.vision import PERCEPTION_HZ, THREAT_TYPE, WEAPON_LABELS, WEAPON_THREAT_TYPE, CameraSpec, ConfirmationGate, ContactRegistry, PerceptionSensor
 from ocu.core.camera import CameraRig
 from ocu.core.occlusion import occlusion_bearing
 from ocu.ui.camera_feed import SimulatedCameraFeed
@@ -134,12 +136,12 @@ DESTINATION_LANE = "DESTINATION"
 def slider_to_pace(position: int) -> float:
     """Slider position to the rover's speed ceiling in m/s."""
     t = max(0, min(position, PACE_SLIDER_STEPS)) / PACE_SLIDER_STEPS
-    return ROVER_MIN_COMMAND_SPEED_MS + (ROVER_TOP_SPEED_MS - ROVER_MIN_COMMAND_SPEED_MS) * t * t
+    return ROVER_MIN_COMMAND_SPEED_MS + (ROVER_COMMAND_CEILING_MS - ROVER_MIN_COMMAND_SPEED_MS) * t * t
 
 
 def pace_to_slider(speed_ms: float) -> int:
     """The inverse, to the nearest position."""
-    span = ROVER_TOP_SPEED_MS - ROVER_MIN_COMMAND_SPEED_MS
+    span = ROVER_COMMAND_CEILING_MS - ROVER_MIN_COMMAND_SPEED_MS
     t = math.sqrt(max(0.0, min((speed_ms - ROVER_MIN_COMMAND_SPEED_MS) / span, 1.0)))
     return round(t * PACE_SLIDER_STEPS)
 
@@ -508,7 +510,9 @@ class MainWindow(QMainWindow):
         self.pace_slider.setToolTip(
             "Speed.\n"
             "The most the rover will drive at, in any mode: sweeping, going to a\n"
-            "destination, returning to base or under the sticks."
+            f"destination, returning to base or under the sticks. The published\n"
+            f"platform figure is {ROVER_TOP_SPEED_KMH:.0f} km/h ({ROVER_TOP_SPEED_MS:.1f} m/s); the control goes to\n"
+            f"{ROVER_COMMAND_CEILING_MS:.0f} m/s and marks anything above it."
         )
         self.pace_slider.valueChanged.connect(self._on_pace_changed)
         layout.addWidget(self.pace_slider)
@@ -1548,8 +1552,9 @@ class MainWindow(QMainWindow):
             shown = [t for t in self.camera_gate.tracks if t.sensor_id == unit_id and t.hits and t.hits[-1] == frame]
             if feed is not None:
                 feed.set_detections([
-                    {"box": t.box, "kind": t.kind, "label": t.kind, "score": t.scores[-1], "confirmed": t.confirmed,
-                     "threat": self.threat_filter.is_threat({"type": THREAT_TYPE[t.kind], "label": t.kind})} for t in shown
+                    {"box": t.box, "kind": "weapon" if t.weapon else t.kind, "label": "armed" if t.weapon else t.kind,
+                     "score": t.scores[-1], "confirmed": t.confirmed,
+                     "threat": self.threat_filter.is_threat(self._reported_as(t))} for t in shown
                 ])
             for track in shown:
                 if not track.confirmed:
@@ -1566,7 +1571,7 @@ class MainWindow(QMainWindow):
                     )
                 self._on_detection(
                     {
-                        "x": contact.x, "y": contact.y, "confidence": track.confidence, "type": THREAT_TYPE[track.kind], "label": track.kind,
+                        "x": contact.x, "y": contact.y, "confidence": track.confidence, **self._reported_as(track),
                         "sensor": "camera", "sensors": ["camera"], "source": "rover" if unit_id == "rover" else "aircraft",
                         "source_id": unit_id,
                     }
@@ -1670,6 +1675,14 @@ class MainWindow(QMainWindow):
         lo, hi = self.thermal.level_range(frame.temp_c, frame.painted)
         feed.set_frame(to_rgb(frame.temp_c, lo, hi, self.thermal.palette), ir=True)
         feed.set_ir_scale(lo, hi, self.thermal.palette, f"LWIR {frame.sensor.width}x{frame.sensor.height}")
+
+    @staticmethod
+    def _reported_as(track) -> dict:
+        """How a confirmed track is classified. A person the weapon stage has called on is one contact reported as
+        armed, not a person and a weapon side by side (core/vision.py)."""
+        if track.weapon:
+            return {"type": WEAPON_THREAT_TYPE, "label": WEAPON_LABELS.get(track.weapon, "armed person")}
+        return {"type": THREAT_TYPE[track.kind], "label": track.kind}
 
     def _tick_power(self, dt_s: float) -> None:
         """Integrate every battery from what that unit is actually doing.
@@ -2199,10 +2212,17 @@ class MainWindow(QMainWindow):
 
     def _on_pace_changed(self, *_args) -> None:
         speed = self.flight_director.set_commanded_speed(slider_to_pace(self.pace_slider.value()))
-        self.pace_value.setText(f"{speed:.1f} m/s" if speed < 10 else f"{speed:.0f} m/s")
-        # Sweeping at a crawl and driving across the map are different jobs;
-        # name which one the slider is sitting at.
-        self.pace_value.setToolTip(f"{speed * 3.6:.1f} km/h")
+        over = speed > ROVER_TOP_SPEED_MS + 1e-6
+        self.pace_value.setText(f"{speed:.1f} m/s")
+        # Past the platform's published top speed the figure is marked, because the vehicle is not claimed to do it
+        # and the endurance beside it is still calibrated to 15 km/h.
+        self.pace_value.setProperty("state", "over" if over else "")
+        self.pace_value.style().unpolish(self.pace_value)
+        self.pace_value.style().polish(self.pace_value)
+        self.pace_value.setToolTip(
+            f"{speed * 3.6:.1f} km/h"
+            + (f"\nPast the published {ROVER_TOP_SPEED_KMH:.0f} km/h: a console ceiling, not a vehicle figure." if over else "")
+        )
 
     def _on_reset_clicked(self) -> None:
         self.mission_clock.reset()

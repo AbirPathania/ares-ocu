@@ -18,7 +18,6 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import random
 
 from PySide6.QtCore import QPointF, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import (
@@ -27,13 +26,12 @@ from PySide6.QtGui import (
     QFont,
     QImage,
     QPainter,
-    QPainterPath,
     QPen,
     QPixmap,
     QPolygonF,
     QRadialGradient,
 )
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ocu.core.constants import (
     ALERT_CONFIDENCE_THRESHOLD,
@@ -41,7 +39,7 @@ from ocu.core.constants import (
     TETHER_LIMIT_M,
 )
 from ocu.core.lidar import LIDAR_RANGE_M
-from ocu.core.terrain import CELL_SIZE_M, WORLD_HALF_EXTENT_M, Terrain
+from ocu.core.terrain import WORLD_HALF_EXTENT_M, Terrain
 from ocu.ui.theme import (
     GRID,
     GRID_MAJOR,
@@ -50,6 +48,7 @@ from ocu.ui.theme import (
     UNIT_TINTS,
 )
 from ocu.core.mesh_state import voxel_key
+from ocu.core.threat_filter import replaces
 from ocu.ui.icons import (
     draw_friendly_air,
     draw_friendly_ground,
@@ -112,7 +111,6 @@ RENDER_TICK_MS = 16
 #: its reported position within a simulation tick, long enough to smooth the
 #: step between two of them.
 POSE_SMOOTHING_S = 0.055
-TERRAIN_SEED = 20260930
 BAY_SLOT_ORDER = ["tricopter-1", "tricopter-2", "tricopter-3"]
 
 UNIT_COLORS = dict(UNIT_TINTS)
@@ -137,6 +135,32 @@ CLICK_SLOP_PX = 4.0
 FOLLOW_MARGIN = 0.22
 FOLLOW_SMOOTHING_S = 0.5
 FOLLOW_QUIET_S = 4.0
+
+
+#: What a marker is called on the map. The threat list has room for "armed person . long gun"; a marker sitting
+#: among other markers has room for one word, and a label long enough to run across the rover is worse than a
+#: short one. The full name stays on the card and in the log.
+MAP_LABELS = {"weapon": "ARMED", "disturbed_soil": "SOIL", "safe_object": "INERT", "unknown": "UNKNOWN"}
+MAP_LABEL_WIDTH = 150.0
+
+
+def map_label(detection: dict) -> str:
+    threat_type = glyph_key(detection)
+    if threat_type in MAP_LABELS:
+        return MAP_LABELS[threat_type]
+    return str(detection.get("label") or threat_type).replace("_", " ").upper()
+
+
+def _captioned(caption: str, control: QWidget) -> QVBoxLayout:
+    """A control under a small caption, the way the panels on the right name their values."""
+    column = QVBoxLayout()
+    column.setContentsMargins(0, 0, 0, 0)
+    column.setSpacing(1)
+    label = QLabel(caption)
+    label.setObjectName("controlCaption")
+    column.addWidget(label)
+    column.addWidget(control)
+    return column
 
 
 class MapView(QWidget):
@@ -244,7 +268,6 @@ class MapView(QWidget):
         self._pan_start = QPointF()
         self._pan_origin = QPointF()
 
-        self._terrain = self._generate_terrain()
         self._radar_angle = 0.0
         self._radar_timer = QTimer(self)
         self._radar_timer.setInterval(RENDER_TICK_MS)
@@ -252,38 +275,6 @@ class MapView(QWidget):
         self._radar_timer.start()
 
         self._build_link_controls()
-
-    def _generate_terrain(self) -> list[dict]:
-        rng = random.Random(TERRAIN_SEED)
-        features = []
-        for _ in range(26):
-            features.append(
-                {
-                    "kind": "vegetation",
-                    "x": rng.uniform(-15, 45),
-                    "y": rng.uniform(-25, 25),
-                    "r": rng.uniform(1.5, 5.0),
-                }
-            )
-        for _ in range(14):
-            features.append(
-                {
-                    "kind": "rock",
-                    "x": rng.uniform(-15, 45),
-                    "y": rng.uniform(-25, 25),
-                    "r": rng.uniform(0.8, 2.2),
-                }
-            )
-        for _ in range(5):
-            features.append(
-                {
-                    "kind": "contour",
-                    "x": rng.uniform(-10, 40),
-                    "y": rng.uniform(-20, 20),
-                    "r": rng.uniform(8.0, 18.0),
-                }
-            )
-        return features
 
     def _build_link_controls(self) -> None:
         layout = QVBoxLayout(self)
@@ -311,32 +302,72 @@ class MapView(QWidget):
 
         self.layer_btn = QPushButton()
         self.layer_btn.setObjectName("layerButton")
-        self.layer_btn.setToolTip("Which picture of the ground the map shows: the LiDAR scan, the thermal mosaic, or both")
+        self.layer_btn.setToolTip(
+            "What the map draws the ground with.\n"
+            "LIDAR: the scan the rover has built, as a point cloud.\n"
+            "THERMAL: the heat picture the thermal cameras have built.\n"
+            "LIDAR + THERMAL: both, the heat picture over the scan."
+        )
         self.layer_btn.clicked.connect(self._cycle_layer)
         toolbar.addWidget(self.layer_btn)
         self._refresh_layer_button()
 
         layout.addLayout(toolbar)
 
-        # The thermal controls: palette, gain, and the time of day, which matters more to what infrared shows than anything
+        # The thermal controls. Each is a caption and a value, as the panels on the right are, because a row of bare
+        # words ("GAIN", "IRON") tells an operator who has not used a thermal camera nothing at all.
         self.ir_row = QWidget()
         ir_layout = QHBoxLayout(self.ir_row)
-        ir_layout.setContentsMargins(0, 0, 0, 0)
-        ir_layout.setSpacing(6)
+        ir_layout.setContentsMargins(0, 2, 0, 0)
+        ir_layout.setSpacing(14)
+
+        heading = QLabel("THERMAL")
+        heading.setObjectName("sectionLabel")
+        ir_layout.addWidget(heading)
+
         self.palette_btn = QPushButton("IRON")
-        self.palette_btn.setToolTip("Palette: white-hot, black-hot or iron")
+        self.palette_btn.setObjectName("thermalControl")
+        self.palette_btn.setToolTip(
+            "The colours warm and cold are drawn in. A thermal camera has no colour of its own:\n"
+            "IRON is the usual black-red-yellow-white scale, WHITE-HOT and BLACK-HOT are plain grey."
+        )
         self.palette_btn.clicked.connect(self.paletteRequested.emit)
-        self.gain_btn = QPushButton("GAIN AUTO")
-        self.gain_btn.setToolTip("Automatic gain follows the ground that has been seen; HOLD keeps the present levels")
+        ir_layout.addLayout(_captioned("COLOUR", self.palette_btn))
+
+        self.gain_btn = QPushButton("AUTO")
+        self.gain_btn.setObjectName("thermalControl")
+        self.gain_btn.setToolTip(
+            "Which two temperatures are drawn as darkest and brightest.\n"
+            "AUTO follows the ground that has been imaged, so the picture always uses the whole scale.\n"
+            "LOCKED keeps the present two, so that a hot thing entering the view does not darken everything else.\n"
+            "The two temperatures are always printed beside the colour bar."
+        )
         self.gain_btn.clicked.connect(self.holdRequested.emit)
-        self.time_back_btn = QPushButton("\u2212 1 H")
-        self.time_back_btn.clicked.connect(lambda: self.timeShiftRequested.emit(-1.0))
-        self.time_label = QPushButton("LOCAL --:--")
-        self.time_label.setEnabled(False)
-        self.time_fwd_btn = QPushButton("+ 1 H")
-        self.time_fwd_btn.clicked.connect(lambda: self.timeShiftRequested.emit(1.0))
-        for w in (self.palette_btn, self.gain_btn, self.time_back_btn, self.time_label, self.time_fwd_btn):
-            ir_layout.addWidget(w)
+        ir_layout.addLayout(_captioned("BRIGHTNESS", self.gain_btn))
+
+        self.time_back_btn = QPushButton("\u2039")
+        self.time_fwd_btn = QPushButton("\u203a")
+        self.time_label = QLabel("--:--")
+        self.time_label.setObjectName("thermalClock")
+        self.time_label.setAlignment(Qt.AlignCenter)
+        for button, hours in ((self.time_back_btn, -1.0), (self.time_fwd_btn, 1.0)):
+            button.setObjectName("thermalControl")
+            button.setFixedWidth(22)
+            button.clicked.connect(lambda _=False, h=hours: self.timeShiftRequested.emit(h))
+        clock = QWidget()
+        clock_row = QHBoxLayout(clock)
+        clock_row.setContentsMargins(0, 0, 0, 0)
+        clock_row.setSpacing(3)
+        for widget in (self.time_back_btn, self.time_label, self.time_fwd_btn):
+            clock_row.addWidget(widget)
+        self.ir_row.setToolTip("")
+        clock.setToolTip(
+            "Local solar time at the site, in one-hour steps. Infrared depends on it more than on anything else:\n"
+            "the same ground is hot in the afternoon and colder than the rocks before dawn.\n"
+            "Ground already imaged keeps the temperatures it had when it was imaged."
+        )
+        ir_layout.addLayout(_captioned("TIME OF DAY", clock))
+        ir_layout.addStretch(1)
         layout.addWidget(self.ir_row)
         self.ir_row.setVisible(False)
 
@@ -360,7 +391,7 @@ class MapView(QWidget):
         self.set_layer({"lidar": "ir", "ir": "both", "both": "lidar"}[self._layer])
 
     def _refresh_layer_button(self) -> None:
-        self.layer_btn.setText({"lidar": "LAYER  LIDAR", "ir": "LAYER  IR", "both": "LAYER  LIDAR + IR"}[self._layer])
+        self.layer_btn.setText({"lidar": "MAP  LIDAR", "ir": "MAP  THERMAL", "both": "MAP  LIDAR + THERMAL"}[self._layer])
         self.layer_btn.setProperty("state", "idle" if self._layer == "lidar" else "set")
         self.layer_btn.style().unpolish(self.layer_btn)
         self.layer_btn.style().polish(self.layer_btn)
@@ -371,10 +402,14 @@ class MapView(QWidget):
         (how many thermal cameras are running)."""
         self._thermal = state
         self.palette_btn.setText({"white_hot": "WHITE-HOT", "black_hot": "BLACK-HOT", "iron": "IRON"}.get(state.get("palette", "iron"), "IRON"))
-        self.gain_btn.setText("GAIN HOLD" if state.get("hold") else "GAIN AUTO")
+        held = bool(state.get("hold"))
+        self.gain_btn.setText("LOCKED" if held else "AUTO")
+        self.gain_btn.setProperty("state", "held" if held else "")
+        self.gain_btn.style().unpolish(self.gain_btn)
+        self.gain_btn.style().polish(self.gain_btn)
         hour = state.get("hour")
         if hour is not None:
-            self.time_label.setText(f"LOCAL {int(hour):02d}:{int((hour % 1.0) * 60):02d}")
+            self.time_label.setText(f"{int(hour):02d}:{int((hour % 1.0) * 60):02d}")
         self.update()
 
     # --- destination: where the operator sends the rover ---
@@ -643,10 +678,15 @@ class MapView(QWidget):
             entry = dict(detection, confirmed=False)
             self._detection_by_key[key] = entry
             self._detections.append(entry)
-        elif detection.get("confidence", 0.0) > existing.get("confidence", 0.0):
-            existing["confidence"] = detection["confidence"]
-            existing["type"] = detection.get("type", existing.get("type", "unknown"))
-            existing["label"] = detection.get("label", existing.get("label"))
+        else:
+            new_type = detection.get("type", existing.get("type", "unknown"))
+            if detection.get("confidence", 0.0) > existing.get("confidence", 0.0):
+                existing["confidence"] = detection["confidence"]
+                existing["type"] = new_type
+                existing["label"] = detection.get("label", existing.get("label"))
+            if replaces(new_type, existing.get("type", "unknown")):
+                existing["type"] = new_type
+                existing["label"] = detection.get("label", existing.get("label"))
         self.update()
 
     def confirm_detection(self, x: float, y: float) -> None:
@@ -933,13 +973,18 @@ class MapView(QWidget):
         if state is None or not state.get("ready"):
             progress = 0.0 if state is None else state.get("progress", 0.0)
             painter.setPen(QPen(QColor("#F0A23C")))
-            painter.drawText(QRectF(0, self.height() / 2 - 20, self.width(), 40), Qt.AlignCenter, f"THERMAL MODEL COMPUTING  {progress * 100:.0f}%")
+            painter.drawText(QRectF(0, self.height() / 2 - 26, self.width(), 18), Qt.AlignCenter, f"BUILDING THE DAY'S HEAT MODEL   {progress * 100:.0f}%")
+            painter.setPen(QPen(QColor("#8796A4")))
+            painter.drawText(QRectF(0, self.height() / 2 - 4, self.width(), 16), Qt.AlignCenter,
+                             "Sun, sky, wind and ground, hour by hour. Done once, then kept.")
             painter.restore()
             return
         from ocu.core.thermal_display import LUTS, scale_ticks
 
         lo, hi, palette = state["lo"], state["hi"], state["palette"]
-        bar = QRectF(self.width() - 46, 120.0, 12.0, max(self.height() - 300.0, 80.0))
+        # below the toolbar and the thermal controls, so the bar's own heading is not drawn behind them
+        top = self._controls_bottom() + 86.0  # under the compass, which sits under the controls
+        bar = QRectF(self.width() - 46, top, 12.0, max(self.height() - top - 170.0, 80.0))
         steps = max(int(bar.height()), 2)
         lut = LUTS[palette]
         for i in range(steps):
@@ -1263,27 +1308,6 @@ class MapView(QWidget):
                 painter.drawText(QRectF(3, y + 2, 60, 11), Qt.AlignLeft, f"{world_y:+.0f}N")
             y += step
 
-    def _draw_terrain(self, painter: QPainter) -> None:
-        """Contour rings only.
-
-        The soft filled blobs this replaces were decoration: they carried no
-        elevation, no trafficability, nothing an operator could act on, and
-        coloured ground competes with the status palette. Contours at least
-        read as terrain without pretending to be survey data.
-        """
-        painter.setBrush(Qt.NoBrush)
-        pen = QPen(TERRAIN_CONTOUR)
-        pen.setWidth(1)
-        painter.setPen(pen)
-        for feature in self._terrain:
-            if feature["kind"] != "contour":
-                continue
-            center = self._to_screen(feature["x"], feature["y"])
-            for ring in range(3):
-                radius_px = (feature["r"] - ring * 2.5) * self._scale
-                if radius_px > 4:
-                    painter.drawEllipse(center, radius_px, radius_px)
-
     def _draw_tether_ring(self, painter: QPainter) -> None:
         """The UWB tether, section 2. Aircraft never work outside this ring, so
         it is drawn as a standing boundary rather than only when something
@@ -1409,12 +1433,12 @@ class MapView(QWidget):
             # icons, and a scout hovering over its own detection collided with them.
             painter.setPen(QPen(QColor("#C6D0DA")))
             painter.setFont(QFont("Menlo", 8))
-            label = f"{str(d.get('label') or threat_type).upper()} {confidence:.2f}"
+            label = f"{map_label(d)} {confidence:.2f}"
             # Contacts on a swept lane cluster along it, so labels are
             # stepped to stop them stacking on one another.
             offset = radius + 3 + (index % 3) * 12
             painter.drawText(
-                QRectF(center.x() - 60, center.y() + offset, 120, 13), Qt.AlignHCenter, label
+                QRectF(center.x() - MAP_LABEL_WIDTH / 2, center.y() + offset, MAP_LABEL_WIDTH, 13), Qt.AlignHCenter, label
             )
 
     def _draw_contact(self, painter: QPainter, center: QPointF, d: dict, glyph: str, index: int) -> None:
@@ -1428,7 +1452,7 @@ class MapView(QWidget):
         painter.setPen(QPen(QColor(CONTACT_COLOR).lighter(120)))
         painter.setFont(QFont("Menlo", 7))
         painter.drawText(
-            QRectF(center.x() - 60, center.y() + CONTACT_RADIUS + 2 + (index % 3) * 10, 120, 12), Qt.AlignHCenter, str(d.get("label") or glyph).upper()
+            QRectF(center.x() - MAP_LABEL_WIDTH / 2, center.y() + CONTACT_RADIUS + 2 + (index % 3) * 10, MAP_LABEL_WIDTH, 12), Qt.AlignHCenter, map_label(d)
         )
 
     def _draw_formation_preview(self, painter: QPainter) -> None:
@@ -1601,8 +1625,16 @@ class MapView(QWidget):
         painter.setBrush(QBrush(QColor("#E8EDF2")))
         painter.drawEllipse(handle, 6.0, 6.0)
 
+    def _controls_bottom(self) -> float:
+        """The y below the map's own controls: the toolbar, and the thermal row when it is shown. Everything the map
+        draws for itself sits under this, so a wider toolbar never covers the compass or the colour bar."""
+        bottom = float(self.layer_btn.geometry().bottom())
+        if self.ir_row.isVisible():
+            bottom = max(bottom, float(self.ir_row.geometry().bottom()))
+        return bottom + 6.0
+
     def _draw_north_indicator(self, painter: QPainter) -> None:
-        x, y = self.width() - 34, 34
+        x, y = self.width() - 34, self._controls_bottom() + 22.0
         painter.setPen(QPen(QColor("#7B8794"), 1))
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(QPointF(x, y), 16, 16)
@@ -1664,7 +1696,7 @@ class MapView(QWidget):
         divergence on trust. The counts make it checkable: two replicas, how
         many voxels each holds, and how many must cross for them to agree.
         """
-        drop = self.ir_row.height() + 8.0 if self.ir_row.isVisible() else 0.0  # clear of the thermal controls' row
+        drop = self._controls_bottom() - 46.0  # clear of the toolbar and the thermal controls
         if self._link_cut:
             headline = "LINK CUT — MAPS DIVERGING"
             detail = (

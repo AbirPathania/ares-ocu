@@ -161,7 +161,7 @@ class RoverPanel(QWidget):
         title.setObjectName("panelTitle")
         layout.addWidget(title)
 
-        self.speed = Readout("SPEED", "0.0", f"/ {ROVER_TOP_SPEED_KMH:.1f} km/h")
+        self.speed = Readout("SPEED", "0.0", f"/ {ROVER_TOP_SPEED_KMH:.1f} km/h published")
         self.heading = Readout("HEADING", "0°")
         self.power = Readout("POWER DRAW", f"{ROVER_COMPUTE_LOAD_W:.0f}", "W")
         self.endurance = Readout("ENDURANCE", "\u2014")

@@ -380,6 +380,11 @@ QLabel#paceValue {
     background-color: #12181c; border: 1px solid #283340; padding: 4px 0px;
 }
 
+/* Past the platform's published top speed: the operator can command it, and the figure says it is past. */
+QLabel#paceValue[state="over"] {
+    color: #E8B04A; border-color: #6B5A2A; background-color: #221C10;
+}
+
 QSlider#paceSlider { min-height: 22px; }
 QSlider#paceSlider::groove:horizontal {
     height: 4px; background: #283340; border-radius: 2px;
@@ -392,6 +397,28 @@ QSlider#paceSlider::handle:horizontal {
     background: #8FC9E8; border: 1px solid #17344A; border-radius: 7px;
 }
 QSlider#paceSlider::handle:horizontal:hover { background: #BFE3F5; }
+
+/* The map's ground-layer control and the thermal row beneath it. */
+QPushButton#layerButton[state="set"] {
+    background-color: #241A10; border-color: #6B5121; color: #F0A23C;
+}
+QLabel#controlCaption {
+    font-family: "DIN Condensed"; font-size: 11px; letter-spacing: 1px;
+    color: #6F8396; padding: 0px 2px;
+}
+QPushButton#thermalControl {
+    font-family: "DIN Condensed"; font-size: 13px; letter-spacing: 1px;
+    background-color: #12181c; border: 1px solid #283340; color: #C6D0DA;
+    padding: 3px 9px; min-height: 17px;
+}
+QPushButton#thermalControl:hover { background-color: #1A2228; border-color: #3A4756; }
+QPushButton#thermalControl[state="held"] {
+    background-color: #241A10; border-color: #6B5121; color: #F0A23C;
+}
+QLabel#thermalClock {
+    font-family: "Menlo"; font-size: 12px; color: #E4EBF1;
+    background-color: #12181c; border: 1px solid #283340; padding: 3px 6px;
+}
 
 QPushButton#destinationButton {
     background-color: #2A2314; border-color: #6B5A2A; color: #E8B04A;

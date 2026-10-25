@@ -139,7 +139,7 @@ def _flat_site(scene):
     return best[1], best[2]
 
 
-@pytest.mark.parametrize("name,distance", [("walker", 7.0), ("parked truck", 12.0), ("buck", 6.0), ("ibex", 6.0)])
+@pytest.mark.parametrize("name,distance", [("walker", 7.0), ("armed walker", 7.0), ("parked truck", 12.0), ("buck", 6.0), ("ibex", 6.0)])
 def test_an_entity_is_drawn_where_the_detector_model_says_its_box_is(scene, monkeypatch, name, distance):
     """The simulated detector's box (core/vision.py) and the picture have to agree, or the overlay lies."""
     from ocu.core import vision as pc
@@ -173,7 +173,8 @@ def test_an_entity_is_drawn_where_the_detector_model_says_its_box_is(scene, monk
             return True
 
     proto = next(e for e in default_entities() if e.name == name)
-    ent = SurfaceEntity(kind, "x", proto.height_m, proto.width_m, proto.length_m, ((ex, ey),), box_offset_m=proto.box_offset_m)
+    ent = SurfaceEntity(kind, "x", proto.height_m, proto.width_m, proto.length_m, ((ex, ey),), box_offset_m=proto.box_offset_m,
+                        carrying=proto.carrying, style=proto.style)
     ap = pc.appearance(cam, ent, (ex, ey, 0.0), Rig())
     assert ap is not None
     model_h = (ap.box[3] - ap.box[1]) * h

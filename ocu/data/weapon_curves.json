@@ -1,0 +1,105 @@
+{
+ "model": "gun_lr0.0001_hn",
+ "model_checkpoint_sha256": null,
+ "operating_threshold": 0.5843090282211304,
+ "decisions": [
+  47,
+  48
+ ],
+ "iou": 0.5,
+ "size_is": "weapon box area as a share of the image the model is given, which in the OCU is the crop around a detected person, not the whole frame",
+ "stage": "second stage on a person: the person detector finds someone, the frame is cropped to their box and enlarged, and this model runs on the crop",
+ "curves": {
+  "handgun": {
+   "source": "Open Images photographs, 98 test images by photographers absent from training (decision 48, arm B)",
+   "boxes": 29,
+   "bins": [
+    {
+     "share_lo": 0.22,
+     "share_hi": 1.01,
+     "n": 26,
+     "recall": 0.7692307692307693,
+     "recall_ci95": [
+      0.5794807424804321,
+      0.8896630031632332
+     ],
+     "median_score_when_found": 0.9291167855262756
+    }
+   ]
+  },
+  "long_gun": {
+   "source": "Open Images photographs, 98 test images by photographers absent from training (decision 48, arm B)",
+   "boxes": 141,
+   "bins": [
+    {
+     "share_lo": 0.0,
+     "share_hi": 0.0194,
+     "n": 10,
+     "recall": 0.2,
+     "recall_ci95": [
+      0.056680947980693314,
+      0.5098431532792765
+     ],
+     "median_score_when_found": 0.6795786619186401
+    },
+    {
+     "share_lo": 0.0194,
+     "share_hi": 0.0625,
+     "n": 21,
+     "recall": 0.38095238095238093,
+     "recall_ci95": [
+      0.20750767797982506,
+      0.5912170418449848
+     ],
+     "median_score_when_found": 0.6871095299720764
+    },
+    {
+     "share_lo": 0.0625,
+     "share_hi": 0.12,
+     "n": 17,
+     "recall": 0.6470588235294118,
+     "recall_ci95": [
+      0.4129996672121182,
+      0.826905138560951
+     ],
+     "median_score_when_found": 0.7004378437995911
+    },
+    {
+     "share_lo": 0.12,
+     "share_hi": 0.22,
+     "n": 19,
+     "recall": 0.3684210526315789,
+     "recall_ci95": [
+      0.19149272376273843,
+      0.5896084250184328
+     ],
+     "median_score_when_found": 0.7395297288894653
+    },
+    {
+     "share_lo": 0.22,
+     "share_hi": 1.01,
+     "n": 74,
+     "recall": 0.33783783783783783,
+     "recall_ci95": [
+      0.24046456345536177,
+      0.4512170052688164
+     ],
+     "median_score_when_found": 0.7461994290351868
+    }
+   ]
+  }
+ },
+ "false_alarms": {
+  "per_image": 0.024390243902439025,
+  "images": 574,
+  "source": "photographs of a person holding a bat, racket, phone, camera, tripod or instrument and no gun; every false alarm was looked at by eye and none was a gun (decision 48)",
+  "rover_frames_with_a_false_weapon": 0,
+  "rover_frames": 144
+ },
+ "caveats": [
+  "measured on web photographs of guns, not on a rover's camera: a crop from a camera 20 m away, enlarged, is blurrier than a photograph, so these recalls are an upper bound",
+  "handgun rests on a few dozen boxes, so its curve is wide; the intervals are in the bins",
+  "a control trained on randomly placed boxes still scored 0.26 to 0.44 AP50 on this data (decision 47), so a share of the apparent skill is recognising a gun photograph rather than locating the gun",
+  "nothing was measured at night, in thermal, from the air, or on a gun that is not being carried in the open"
+ ]
+}

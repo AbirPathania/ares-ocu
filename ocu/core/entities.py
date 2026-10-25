@@ -59,13 +59,26 @@ class SurfaceEntity:
     speed_ms: float = 0.0
     heading_deg: float = 0.0  # only for something that stays put; a walker faces the way it walks
     box_offset_m: float = 0.0  # how far ahead of its position the middle of its outline lies (a deer's head is out front)
-    style: str = ""  # which drawing of its kind: "buck" is a deer with antlers
+    style: str = ""  # which drawing of its kind: "buck" is a deer with antlers, "armed" a person carrying a long gun
+    carrying: str = ""  # "long_gun", "handgun" or nothing: what a person is carrying in the open
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
             raise ValueError(f"unknown entity kind {self.kind!r}")
         if not self.path:
             raise ValueError("an entity needs at least one position")
+        if self.carrying and self.carrying not in self.WEAPON_SIZE_M:
+            raise ValueError(f"unknown weapon {self.carrying!r}")
+        if self.carrying and self.kind != "person":
+            raise ValueError("only a person carries a weapon")
+
+    #: The weapons a person can carry, as (length, height) in metres: a service rifle and a pistol. Used for the share
+    #: of the person's crop the weapon fills, which is what the measured weapon curve is indexed by.
+    WEAPON_SIZE_M = {"long_gun": (1.00, 0.16), "handgun": (0.21, 0.14)}
+
+    @property
+    def weapon_size_m(self) -> tuple[float, float]:
+        return self.WEAPON_SIZE_M.get(self.carrying, (0.0, 0.0))
 
     @property
     def static(self) -> bool:
@@ -214,6 +227,9 @@ def default_entities(seed: int = 20261016, sweep: LaneSweep | None = None) -> li
     # which is what a person drawing a box round it would draw.
     return [
         SurfaceEntity("person", "walker", 1.78, 0.54, 0.63, (sweep.at(1, 22.0, 12.0), sweep.at(1, 22.0, -4.0)), speed_ms=1.2, box_offset_m=-0.095),
+        # someone carrying a rifle in the open, walking across the lanes ahead: the case the Arms class exists for
+        SurfaceEntity("person", "armed walker", 1.79, 1.00, 0.68, (sweep.at(2, 17.0, -10.0), sweep.at(2, 24.0, 6.0)), speed_ms=1.1, box_offset_m=-0.098,
+                      style="armed", carrying="long_gun"),
         SurfaceEntity("vehicle", "parked truck", 2.20, 2.12, 5.70, (sweep.at(3, 21.0, 14.0),), heading_deg=65.0),
         SurfaceEntity("animal", "buck", 1.91, 0.72, 2.14, (sweep.at(0, 10.0, 9.0), sweep.at(0, 16.0, 11.0), sweep.at(0, 12.0, 7.0)), speed_ms=0.5, box_offset_m=0.27, style="buck"),
         # an ibex, the animal of this country, on the ground the other side of the lanes: shorter, stockier and with a scimitar horn

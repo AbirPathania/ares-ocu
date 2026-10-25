@@ -1589,3 +1589,86 @@ starts with one person, one vehicle and two animals.
 
 **Not covered.** The ibex does not climb: it walks the same flat ground as the deer. Its horns are two tubes with a ridge
 profile, not a keratin sheath with growth rings and a worn tip. A herd of one is not a herd.
+
+
+## Arms is a working class: a weapon stage on a person the camera has already found
+
+**What was wrong.** The Arms chip was shown disabled, because no weapon detector was wired into this build. That was
+honest but it left a dead control on the strip, and the perception work has since measured a gun model (decisions 47
+and 48 of `ares-perception`). The question was how to use it without claiming something it does not support.
+
+**Why it cannot simply run on the frame.** The gun model was measured on photographs, where a gun fills a good share of
+the picture. The rover's camera at 20 m sees a rifle as a few hundredths of a percent of its frame, forty times smaller
+in area than the smallest band anything was measured in. Running it on a whole frame and reading a number off the end
+of the curve would be inventing one.
+
+**What is built instead, and it is what a real system does.** A second stage on a person:
+
+1. the person detector finds somebody (the curves already in this build);
+2. the frame is cropped to their box and enlarged;
+3. the weapon model runs on that crop.
+
+In the crop a carried rifle is a large share of the picture, which is the regime that **was** measured. So the curve is
+indexed by the weapon's area as a share of the crop, exactly as decision 48 measured it, and the console computes that
+share against the person's box. `tools/build_ocu_weapon_curves.py` in the perception repository writes the curve from
+the arm B model's own detections on the author-disjoint test images at its registered threshold; nothing is re-run or
+re-tuned, and `ocu/data/weapon_curves.json` is a copy of that manifest, which a test checks has not drifted.
+
+**What that gives, from the measurements and not from a wish:**
+
+| | share of the person's crop | measured recall |
+|---|---|---|
+| a rifle carried in the open | 0.086 | about 0.65 per frame |
+| a pistol | 0.016 | **below anything measured; the console does not claim to find one** |
+
+- **Range.** Enlarging cannot invent detail, so the stage runs only while the weapon is at least 12 pixels across in the
+  original frame, which on the rover's camera is about 27 m. An allocation, not a measurement.
+- **Persistence.** A weapon call needs two hits in the last five frames of a confirmed person track, for the same reason
+  a person needs three: one frame of a classifier is not a report.
+- **False calls.** Someone carrying nothing is called armed at **0.024 per crop**, the rate decision 48 measured on
+  photographs of people holding a bat, a racket, a phone, a camera, a tripod or an instrument. Every one of those was
+  looked at by eye and none was a gun, so that rate is the model's own.
+- **One contact, not two.** An armed person is reported as `weapon`, labelled "armed person . long gun", with the
+  person's own position and confidence. The weapon stage describes a contact the camera already has, so an armed call
+  replaces a plain `person` on the same voxel whatever the confidences are (`threat_filter.replaces`).
+- **The scene** now holds an armed walker crossing the lanes ahead, drawn with a rifle held across the body (about
+  11 000 triangles, 12 poses) and a map glyph of a figure with a slung rifle.
+
+**What is still not claimed.** The recalls are from web photographs; a crop from a rover camera at 20 m, enlarged, is
+blurrier than a photograph, so they are an **upper bound** and the caveat travels with the curve into the console.
+Handgun rests on a few dozen boxes. Decision 47's random-box control still scored 0.26 to 0.44 AP50 on this data, so some
+of the apparent skill is recognising a gun photograph rather than locating the gun. Nothing was measured at night, in
+thermal, from the air, or on a weapon that is not being carried in the open, and the console does not pretend otherwise:
+the thermal camera has no weapon stage at all.
+
+## The speed control goes past the published figure, and says so
+
+The operator's speed slider ran to the platform's published 15 km/h (4.2 m/s). Crossing the map at a demonstration took
+real time, so the control now runs to **8 m/s** (`ROVER_COMMAND_CEILING_MS`), with the published figure still recorded
+as `ROVER_TOP_SPEED_MS` and sitting at about three quarters of the slider's travel.
+
+Above the published figure the speed readout turns amber and its tooltip says that it is past 15 km/h, a console
+ceiling and not a vehicle figure. The power model stays calibrated to 15 km/h whatever is commanded, so the endurance
+beside it is not a prediction at those speeds, and the rover panel's reference now reads "/ 15.0 km/h published".
+
+## Saying what the controls do
+
+The thermal row read `IRON | GAIN AUTO | -1 H | LOCAL 10:41 | +1 H`, which is thermal-camera jargon in a line of bare
+words. Each control now sits under a caption, as the panels on the right do, and says what it changes:
+
+| was | now | what it is |
+|---|---|---|
+| `LAYER IR` | `MAP  THERMAL` | which picture of the ground the map draws: LIDAR, THERMAL, or both |
+| `IRON` | `COLOUR` `IRON` | the colours warm and cold are drawn in |
+| `GAIN AUTO` / `GAIN HOLD` | `BRIGHTNESS` `AUTO` / `LOCKED` | which two temperatures are drawn darkest and brightest |
+| `- 1 H` `LOCAL 10:41` `+ 1 H` | `TIME OF DAY` `< 10:41 >` | local solar time at the site, in one-hour steps |
+
+Every one carries a tooltip of two or three lines saying what it is for, and every chip on the threat strip now names
+what finds that class. The map's own furniture (the compass, the mesh line, the colour bar) is placed under the
+controls rather than at fixed heights, so a wider toolbar never covers it. Marker labels on the map are one word
+("ARMED") where the card has room for the full name, because a label long enough to run across the rover is worse than
+a short one.
+
+**Also removed:** `_draw_terrain` and `_generate_terrain`, the decorative contour layer. It had not been called since
+the map began drawing the real scan, and it named a colour it never imported, so it would have raised a `NameError` the
+moment anything called it.

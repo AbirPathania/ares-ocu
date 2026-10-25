@@ -42,7 +42,8 @@ def run_frames(window, frames):
 
 
 def test_the_window_starts_with_one_of_each_kind_and_a_camera_detector(window):
-    assert sorted(e.kind for e in window.surface_entities) == ["animal", "animal", "person", "vehicle"], "a person, a vehicle, and two kinds of animal"
+    assert sorted(e.kind for e in window.surface_entities) == ["animal", "animal", "person", "person", "vehicle"]
+    assert [e.name for e in window.surface_entities if e.carrying] == ["armed walker"], "one of the two people is carrying a rifle"
     run_frames(window, 3)  # runs without error at the start of a mission
 
 
@@ -94,3 +95,44 @@ def test_reset_clears_boxes_tracks_and_what_was_reported(window):
     window._on_reset_clicked()
     assert window.camera_gate.tracks == [] and not window.camera_contacts.contacts
     assert window.camera_feeds["rover"]._detections == []
+
+
+# ---- the weapon stage, on the real window
+
+def armed_ahead(window, metres):
+    pose = window.units["rover"].pose
+    h = math.radians(pose.heading)
+    x, y = pose.x + metres * math.sin(h), pose.y + metres * math.cos(h)
+    return SurfaceEntity("person", "armed", 1.79, 1.00, 0.68, ((x, y),), box_offset_m=-0.098, style="armed", carrying="long_gun")
+
+
+def test_a_person_carrying_a_rifle_is_reported_as_armed_and_lands_in_the_arms_class(window):
+    from ocu.core.threat_filter import group_of
+
+    window.surface_entities = [armed_ahead(window, 10.0)]
+    run_frames(window, 120)
+    threats = list(window.threat_panel._threats.values())
+    assert threats, "the camera found them"
+    armed_threats = [t for t in threats if t["type"] == "weapon"]
+    assert armed_threats, f"reported as {[t['type'] for t in threats]}"
+    assert all(group_of(t) == "arms" for t in armed_threats)
+    assert "armed person" in armed_threats[0]["label"]
+    assert len(threats) <= 3, "one person is one contact, not a person and a weapon side by side"
+
+
+def test_an_unarmed_person_in_the_same_place_is_not_reported_as_armed(window):
+    window.surface_entities = [ahead_of_rover(window, 10.0)]
+    run_frames(window, 120)
+    assert [t["type"] for t in window.threat_panel._threats.values()].count("weapon") == 0
+
+
+def test_the_armed_contact_raises_an_alert_while_arms_is_on_and_falls_quiet_when_it_is_off(window):
+    window.threat_filter.set_enabled("arms", False)
+    window.surface_entities = [armed_ahead(window, 10.0)]
+    run_frames(window, 120)
+    assert not window._escalated, "arms switched off: a contact, no decision demanded"
+    listed = [t for t in window.threat_panel._threats.values() if window.threat_panel._shown(t)]
+    assert not any(t["type"] == "weapon" for t in listed), "and not in the threat list"
+    window.threat_filter.set_enabled("arms", True)
+    listed = [t for t in window.threat_panel._threats.values() if window.threat_panel._shown(t)]
+    assert any(t["type"] == "weapon" for t in listed), "switched back on, it is listed"

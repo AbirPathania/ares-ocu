@@ -301,8 +301,51 @@ def truck(length: float = 5.3, height: float = 1.85) -> tuple[np.ndarray, np.nda
 SKIN_TONE = (0.50, 0.34, 0.25)
 
 
-def person(phase: float = 0.0, height: float = 1.75) -> tuple[np.ndarray, np.ndarray]:
-    """A person walking, in field clothes with a pack. `phase` is where in the stride (0 to 1)."""
+GUNMETAL = (0.085, 0.082, 0.080)
+POLYMER = (0.115, 0.110, 0.100)
+FURNITURE = (0.155, 0.135, 0.095)  # the tan of a modern stock and handguard
+
+
+def _long_gun(b: Builder, butt: np.ndarray, muzzle: np.ndarray, k: float) -> None:
+    """A service rifle along the line from the butt to the muzzle: stock, receiver, optic, grip, magazine,
+    handguard and barrel. Drawn so that the silhouette reads at a distance, which is the whole point of it."""
+    axis = muzzle - butt
+    length = float(np.linalg.norm(axis))
+    d = axis / max(length, 1e-9)
+    up = _unit(np.cross(d, np.array([0.0, 1.0, 0.0])))
+    if up[2] < 0:
+        up = -up
+    side = _unit(np.cross(d, up))
+    at = lambda t, u=0.0, s=0.0: butt + d * (t * length) + up * (u * k) + side * (s * k)  # noqa: E731
+
+    limb(b, at(0.0), at(0.30, 0.005), 0.046 * k, 0.036 * k, DARK, FURNITURE, 0.85, sides=10, squash=0.62)  # stock
+    superellipsoid(b, at(0.40, 0.012), (0.055 * k, 0.038 * k, 0.052 * k), DARK, GUNMETAL, 0.8, 3.0, 3.0, rot=None, lat=8, lon=12)  # receiver
+    limb(b, at(0.30, 0.012), at(0.54, 0.012), 0.034 * k, 0.032 * k, DARK, GUNMETAL, 0.8, sides=10, squash=0.75)
+    limb(b, at(0.34, 0.058), at(0.50, 0.058), 0.021 * k, 0.019 * k, DARK, GUNMETAL, 0.9, sides=10)  # optic
+    limb(b, at(0.33, -0.012), at(0.29, -0.105), 0.024 * k, 0.020 * k, DARK, POLYMER, 0.7, sides=8, squash=0.7)  # pistol grip
+    limb(b, at(0.47, -0.015), at(0.50, -0.130), 0.030 * k, 0.026 * k, DARK, POLYMER, 0.7, sides=8, squash=0.45)  # magazine
+    limb(b, at(0.54, 0.010), at(0.80, 0.008), 0.031 * k, 0.027 * k, DARK, FURNITURE, 0.85, sides=10, squash=0.8)  # handguard
+    limb(b, at(0.80, 0.008), at(1.0, 0.006), 0.014 * k, 0.012 * k, CHROME, GUNMETAL, 0.9, sides=8)  # barrel
+    limb(b, at(0.70, 0.044), at(0.74, 0.044), 0.009 * k, 0.009 * k, DARK, GUNMETAL, 0.9, sides=6)  # front sight
+
+
+def _handgun(b: Builder, grip: np.ndarray, muzzle: np.ndarray, k: float) -> None:
+    """A pistol: a slide along the line, a grip below it."""
+    axis = muzzle - grip
+    length = float(np.linalg.norm(axis))
+    d = axis / max(length, 1e-9)
+    up = _unit(np.cross(d, np.array([0.0, 1.0, 0.0])))
+    if up[2] < 0:
+        up = -up
+    at = lambda t, u=0.0: grip + d * (t * length) + up * (u * k)  # noqa: E731
+    limb(b, at(0.10, 0.0), at(1.0, 0.0), 0.024 * k, 0.021 * k, DARK, GUNMETAL, 0.85, sides=10, squash=0.6)  # slide
+    limb(b, at(0.14, -0.005), at(0.08, -0.095), 0.022 * k, 0.020 * k, DARK, POLYMER, 0.7, sides=8, squash=0.55)  # grip
+
+
+def person(phase: float = 0.0, height: float = 1.75, carrying: str = "") -> tuple[np.ndarray, np.ndarray]:
+    """A person walking, in field clothes with a pack. `phase` is where in the stride (0 to 1).
+
+    `carrying` draws a weapon held across the body, and puts the hands on it instead of swinging them."""
     b = Builder()
     k = height / 1.75
     f = 2.0 * math.pi * phase
@@ -342,18 +385,39 @@ def person(phase: float = 0.0, height: float = 1.75) -> tuple[np.ndarray, np.nda
     tube(b, stations, FABRIC, jacket, ao, sides=22, caps=True)
     # a high collar
     superellipsoid(b, (0, 0.02 + 0.55 * lean * 0, 1.57 * k + bob), (0.17 * k, 0.15 * k, 0.07 * k), FABRIC, jacket, 0.9, 3, 3, lat=6, lon=14)
-    # arms, swinging against the legs
+    # the weapon, held across the body at chest height, muzzle to the person's left
+    butt = np.array([0.345 * k, 0.175 * k, 1.245 * k + bob])
+    muzzle = np.array([-0.600 * k, 0.215 * k, 1.145 * k + bob])
+    grips = {}
+    if carrying == "long_gun":
+        _long_gun(b, butt, muzzle, k)
+        grips = {1: butt + (muzzle - butt) * 0.33, -1: butt + (muzzle - butt) * 0.66}
+    elif carrying == "handgun":
+        pistol_grip = np.array([0.055 * k, 0.295 * k, 1.145 * k + bob])
+        _handgun(b, pistol_grip, pistol_grip + np.array([-0.195 * k, 0.045 * k, 0.012 * k]), k)
+        grips = {1: pistol_grip + np.array([0.0, -0.01 * k, -0.02 * k]), -1: pistol_grip + np.array([-0.055 * k, 0.0, -0.015 * k])}
+
+    # arms: swinging against the legs, or bent onto the weapon when there is one
     for side, ph in ((-1, f + math.pi), (1, f)):
         shoulder = np.array([side * sh_x, 0.02, sh_z])
-        sw = 0.40 * math.sin(ph)
-        elbow_bend = 0.22 + 0.34 * max(0.0, -math.sin(ph))
         up, fore = 0.30 * k, 0.27 * k
-        elbow = shoulder + np.array([side * 0.015, math.sin(sw) * up, -math.cos(sw) * up])
-        wrist_ang = sw + elbow_bend
-        wrist = elbow + np.array([side * 0.01, math.sin(wrist_ang) * fore, -math.cos(wrist_ang) * fore])
+        if grips:
+            # the elbow sits below the line from the shoulder to the hand and a little out from the body, which is
+            # how an arm bends onto a weapon held across the chest
+            hand = grips[side]
+            mid = (shoulder + hand) * 0.5
+            elbow = mid + np.array([side * 0.075 * k, -0.055 * k, -0.150 * k])
+            wrist = hand
+        else:
+            sw = 0.40 * math.sin(ph)
+            elbow_bend = 0.22 + 0.34 * max(0.0, -math.sin(ph))
+            elbow = shoulder + np.array([side * 0.015, math.sin(sw) * up, -math.cos(sw) * up])
+            wrist_ang = sw + elbow_bend
+            wrist = elbow + np.array([side * 0.01, math.sin(wrist_ang) * fore, -math.cos(wrist_ang) * fore])
         limb(b, shoulder, elbow, 0.052 * k, 0.045 * k, FABRIC, jacket, ao)
         limb(b, elbow, wrist, 0.044 * k, 0.036 * k, FABRIC, jacket, ao)
-        superellipsoid(b, wrist + np.array([0, 0.02 * k, -0.045 * k]), (0.055 * k, 0.095 * k, 0.095 * k), SKIN, SKIN_TONE, 1.0, 2.6, 2.4, lat=8, lon=12)
+        hand_c = wrist + (np.array([0, 0.0, 0.0]) if grips else np.array([0, 0.02 * k, -0.045 * k]))
+        superellipsoid(b, hand_c, (0.055 * k, 0.085 * k, 0.085 * k), SKIN, SKIN_TONE, 1.0, 2.6, 2.4, lat=8, lon=12)
     # neck and head
     limb(b, (0, 0.03, 1.50 * k + bob), (0, 0.04, 1.60 * k + bob), 0.05 * k, 0.047 * k, SKIN, SKIN_TONE, 1.0)
     head_c = np.array([0.0, 0.045, 1.655 * k + bob])
@@ -571,6 +635,7 @@ def build_all() -> dict[str, list[tuple[np.ndarray, np.ndarray]]]:
     return {
         "vehicle": [truck()],
         "person": [person(i / GAIT_FRAMES) for i in range(GAIT_FRAMES)],
+        "person:armed": [person(i / GAIT_FRAMES, carrying="long_gun") for i in range(GAIT_FRAMES)],
         "animal": [deer(i / GAIT_FRAMES) for i in range(GAIT_FRAMES)],
         "animal:buck": [deer(i / GAIT_FRAMES, buck=True) for i in range(GAIT_FRAMES)],
         "animal:ibex": [deer(i / GAIT_FRAMES, height=IBEX_HEIGHT, species="ibex") for i in range(GAIT_FRAMES)],

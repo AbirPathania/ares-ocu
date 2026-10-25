@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWi
 
 from ocu.core.constants import ALERT_CONFIDENCE_THRESHOLD
 from ocu.core.mesh_state import voxel_key
-from ocu.core.threat_filter import group_of
+from ocu.core.threat_filter import group_of, replaces
 from ocu.ui.theme import (
     BACKGROUND,
     CAUTION,
@@ -320,10 +320,16 @@ class ThreatPanel(QWidget):
             if sensor not in threat["sensors"]:
                 threat["sensors"].append(sensor)
 
-        # Highest confidence wins, matching the merge rule in core/mesh_state.py.
+        # Highest confidence wins, matching the merge rule in core/mesh_state.py, except that a more specific
+        # classification of the same contact (an armed person) replaces the earlier one whatever its confidence.
+        new_type = detection.get("type", threat["type"])
         if detection.get("confidence", 0.0) > threat["confidence"]:
             threat["confidence"] = detection["confidence"]
-            threat["type"] = detection.get("type", threat["type"])
+            threat["type"] = new_type
+            threat["label"] = detection.get("label", threat.get("label"))
+        if replaces(new_type, threat["type"]):
+            threat["type"] = new_type
+            threat["label"] = detection.get("label", threat.get("label"))
 
         self._cards[key].threat = threat
         self._cards[key]._sync_actions()
