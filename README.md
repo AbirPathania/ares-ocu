@@ -13,6 +13,9 @@ ground suite and the scouts' cameras find comes from sensor models over
 buried objects, and batteries come from the power budget. Nothing is read
 from a script: there is no mission timeline, and nothing happens on a schedule.
 
+**New here?** [docs/USER_GUIDE.md](docs/USER_GUIDE.md) is the operator's guide: every panel, every control, and where
+every number on the screen comes from.
+
 ## Running it
 
 Double-click **`start.command`** on macOS, or **`start.bat`** on Windows.
@@ -53,16 +56,22 @@ model was measured to behave, on images it never saw, from curves built by the `
 a scout at the usual distances is not found at all, small things are mostly missed, and the detector now and
 then invents a person or an animal, which the persistence gate normally catches. An animal is reported as
 `unknown` and labelled ANIMAL; whether `animal` becomes the spec's eighth threat class is an open decision, and whether it
-raises an alert is the operator's choice (next section). People and animals also appear in the LiDAR picture as short-lived warm and violet returns that are never written into the map, the rover drives round a parked vehicle and keeps clear of anything that walks, and they stop for it. See DECISIONS.md, "People, vehicles and animals".
+raises an alert is the operator's choice (next section). A person carrying a rifle in the open is put through a **second
+stage**: the frame is cropped to the person the detector has already found, enlarged, and a weapon model measured on
+photographs (perception decisions 47 and 48) runs on the crop, which is how a real system would deploy it and the only
+size regime anything was measured at. A rifle is found in about two frames in three inside about 27 m; a pistol is below
+anything that was measured, so the console does not claim to find one; someone carrying nothing is called armed about
+once in forty crops, the measured rate on people holding a bat, a camera or an instrument. Those recalls come from web
+photographs and are an **upper bound**, not a field figure. People and animals also appear in the LiDAR picture as short-lived warm and violet returns that are never written into the map, the rover drives round a parked vehicle and keeps clear of anything that walks, and they stop for it. See DECISIONS.md, "People, vehicles and animals".
 
 ## What counts as a threat is the operator's choice
 
 A strip at the top of the threat list, **TREAT AS A THREAT**, has a chip for Mines / IEDs, Arms, People, Vehicles,
-Animals and Other. A class that is on raises alerts and is listed. A class that is off is a **contact**: drawn small and
+Animals and Other, and each says what finds that class. A class that is on raises alerts and is listed. A class that is off is a **contact**: drawn small and
 quiet on the map and as a thin muted box on the feed, logged at the quietest level, counted in the strip, and still
-shared with the fleet and still avoided by the rover. Defaults are Mines / IEDs and People. Switching Mines / IEDs off
-takes the same two-second hold as an irreversible command; the other chips are one click. **Arms is shown, disabled,
-because no weapon detector is wired into this build.** See DECISIONS.md, "The operator chooses what counts as a threat".
+shared with the fleet and still avoided by the rover. Defaults are Mines / IEDs, Arms and People. Switching Mines / IEDs off
+takes the same two-second hold as an irreversible command; the other chips are one click. See DECISIONS.md, "The
+operator chooses what counts as a threat" and "Arms is a working class".
 
 ## Infrared
 
@@ -184,4 +193,5 @@ real decision from the team, not this build's placeholder.
 | Infrared | A physical simulation with textbook material values, checked against analytic solutions and not validated against a real site. The mosaic holds only what thermal cameras have seen. The visible feeds do not follow the time of day chosen for it |
 | Threat classes | The operator's choice per class; a class that is off is a quiet contact that is still shared and still avoided |
 | Mission theme | Generic hazard sweep, never labeled minefield |
-| Guns | Not modelled. The camera detector here is simulated from measured curves for people, vehicles and animals only. The separate gun model in the perception repository (decisions 47 and 48) was measured on web photographs, says nothing about a rover, and is not used here |
+| Weapons | Simulated from measured curves, as a second stage on a person the camera has already found. The model behind them (perception decisions 47 and 48) was measured on web photographs, so the rates are an upper bound and not a field figure. The thermal camera has no weapon stage at all |
+| Rover speed | The operator's control runs to 8 m/s, past the published 15 km/h, and marks anything above it in amber. The power model stays calibrated to 15 km/h, so endurance above it is not a prediction |

@@ -577,7 +577,7 @@ def test_a_formation_staged_before_the_rover_turns_is_still_off_the_nose_when_la
 
 
 def test_the_speed_slider_sets_how_fast_the_rover_may_drive(app):
-    from ocu.core.constants import ROVER_MIN_COMMAND_SPEED_MS, ROVER_TOP_SPEED_MS
+    from ocu.core.constants import ROVER_COMMAND_CEILING_MS, ROVER_MIN_COMMAND_SPEED_MS, ROVER_TOP_SPEED_MS
     from ocu.ui.main_window import slider_to_pace
 
     window = MainWindow()
@@ -594,14 +594,29 @@ def test_the_speed_slider_sets_how_fast_the_rover_may_drive(app):
     window._on_play_clicked()
     crawl = peak(window)
     window.pace_slider.setValue(window.pace_slider.maximum())
-    assert window.flight_director.commanded_speed_ms == pytest.approx(ROVER_TOP_SPEED_MS)
-    fast = peak(window)
+    assert window.flight_director.commanded_speed_ms == pytest.approx(ROVER_COMMAND_CEILING_MS)
+    fast = peak(window, 90.0)  # 8 m/s takes longer to reach than 4.2 did, at 0.8 m/s^2
     assert crawl <= ROVER_SURVEY_SPEED_MS + 0.05
     assert fast > crawl * 3, "the slider is a real control, not a label"
-    assert fast <= ROVER_TOP_SPEED_MS + 1e-6, "and never more than the platform can do"
+    assert fast <= ROVER_COMMAND_CEILING_MS + 1e-6, "and never more than the control allows"
+    assert ROVER_COMMAND_CEILING_MS > ROVER_TOP_SPEED_MS, "the control goes past the published figure on purpose"
     window.pace_slider.setValue(0)
     assert window.flight_director.commanded_speed_ms == pytest.approx(ROVER_MIN_COMMAND_SPEED_MS)
     assert slider_to_pace(0) < slider_to_pace(50) < slider_to_pace(100)
+
+
+def test_the_speed_figure_is_marked_once_it_is_past_the_published_platform_speed(app):
+    """Commanding more than the vehicle is claimed to do is allowed, and has to be visible on the face of it."""
+    from ocu.core.constants import ROVER_TOP_SPEED_MS
+    from ocu.ui.main_window import pace_to_slider
+
+    window = MainWindow()
+    window.pace_slider.setValue(pace_to_slider(ROVER_TOP_SPEED_MS - 0.5))
+    assert not window.pace_value.property("state"), "within the published figure: nothing to flag"
+    window.pace_slider.setValue(window.pace_slider.maximum())
+    assert window.pace_value.property("state") == "over"
+    assert "console ceiling" in window.pace_value.toolTip()
+    window.close()
 
 
 def test_the_speed_slider_is_finer_where_a_sweep_is_driven(app):

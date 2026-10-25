@@ -55,7 +55,7 @@ def run_seconds(window, seconds):
 def test_the_map_starts_on_the_lidar_layer_with_no_thermal_controls(window):
     assert window.map_view.layer == "lidar"
     assert not window.map_view.ir_row.isVisible()
-    assert window.map_view.layer_btn.text() == "LAYER  LIDAR"
+    assert window.map_view.layer_btn.text() == "MAP  LIDAR"
 
 
 def test_the_layer_button_cycles_lidar_ir_both_and_back(window):
@@ -111,7 +111,7 @@ def test_the_operator_moves_the_time_of_day_and_the_log_says_so(window):
     assert window.thermal.local_hour(0.0) == pytest.approx((start - 9.0) % 24.0)
     log = window.event_log.log_list
     assert any("Thermal time of day" in log.item(i).text() for i in range(log.count()))
-    assert window.map_view.time_label.text().startswith("LOCAL ")
+    assert window.map_view.time_label.text()[:2].isdigit() and ":" in window.map_view.time_label.text()
 
 
 def test_a_person_stands_out_of_the_cold_ground_at_night_and_is_a_heat_contact_not_a_streak(window):
@@ -133,7 +133,7 @@ def test_the_palette_and_the_gain_are_the_operators(window):
     assert window.thermal.palette != first
     run_seconds(window, 3.0)
     QTest.mouseClick(window.map_view.gain_btn, Qt.LeftButton)
-    assert window.thermal.hold_range is not None and window.map_view.gain_btn.text() == "GAIN HOLD"
+    assert window.thermal.hold_range is not None and window.map_view.gain_btn.text() == "LOCKED"
     QTest.mouseClick(window.map_view.gain_btn, Qt.LeftButton)
     assert window.thermal.hold_range is None
 
@@ -168,3 +168,14 @@ def test_before_the_day_is_solved_the_map_says_so_and_nothing_breaks(app):
     assert not w.map_view.grab().isNull()
     w._thermal_poll.stop()
     w.close()
+
+
+def test_every_thermal_control_says_what_it_changes(window):
+    """A row of bare words ("GAIN", "IRON") tells an operator who has not used a thermal camera nothing at all."""
+    view = window.map_view
+    view.set_layer("ir")
+    for control in (view.palette_btn, view.gain_btn, view.layer_btn):
+        assert len(control.toolTip()) > 40, f"{control.text()} does not explain itself"
+    assert view.time_label.parentWidget().toolTip(), "the clock says what the time of day is for"
+    captions = {label.text() for label in view.ir_row.findChildren(type(view.time_label)) if label.objectName() == "controlCaption"}
+    assert {"COLOUR", "BRIGHTNESS", "TIME OF DAY"} <= captions
