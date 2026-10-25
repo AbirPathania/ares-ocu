@@ -3,6 +3,7 @@ of updates, in any order, converge to the exact same map. Section 8.2.
 """
 
 import itertools
+import json
 import random
 
 from ocu.core.mesh_state import MeshLink, MeshState, VoxelObservation, merge, reconcile
@@ -175,3 +176,100 @@ def test_holdings_converge_after_restore():
     link.restore()
     assert link.holdings()[(9, 9, 9)] == {"rover", "aircraft"}
     assert link.divergence() == 0
+
+
+# --- the full-tie defect: merge was not commutative ---------------------------
+#
+# Before the total order, two observations that tied on confidence and
+# timestamp but differed in threat_type or source_id made merge(a, b) return a
+# and merge(b, a) return b.
+
+
+def canonical(state):
+    """The map as bytes: rows sorted, no whitespace, so equal maps give equal bytes."""
+    rows = sorted(
+        [*o.voxel_key, o.timestamp_us, o.confidence, o.threat_type, o.source_id]
+        for o in state.snapshot().values()
+    )
+    return json.dumps(rows, separators=(",", ":")).encode("ascii")
+
+
+def test_full_tie_on_confidence_and_timestamp_is_commutative():
+    a = VoxelObservation((1, 2, 0), 1000, 0.9, "mine", "rover")
+    b = VoxelObservation((1, 2, 0), 1000, 0.9, "ied", "aircraft_1")
+    assert merge(a, b) == merge(b, a)
+    # Highest source_id wins the tie; here "rover" > "aircraft_1".
+    assert merge(a, b) == a
+
+
+def test_tie_on_everything_but_threat_type_is_commutative():
+    a = make_obs(t=5, confidence=0.5, threat="mine", source="rover")
+    b = make_obs(t=5, confidence=0.5, threat="ied", source="rover")
+    assert merge(a, b) == merge(b, a) == a  # "mine" > "ied"
+
+
+def _random_obs(rng):
+    # A small value pool, so that ties on every field are common.
+    return VoxelObservation(
+        voxel_key=(rng.choice([0, 1]), 0, 0),
+        timestamp_us=rng.choice([10, 20]),
+        confidence=rng.choice([0.0, -0.0, 0.5, 0.9]),
+        threat_type=rng.choice(["mine", "ied", "person"]),
+        source_id=rng.choice(["rover", "aircraft_1", "aircraft_2"]),
+    )
+
+
+def _same_voxel(rng):
+    o = _random_obs(rng)
+    return VoxelObservation((0, 0, 0), o.timestamp_us, o.confidence, o.threat_type, o.source_id)
+
+
+def test_merge_is_commutative_associative_and_idempotent_over_many_ties():
+    rng = random.Random(20261025)
+    for _ in range(5000):
+        a, b, c = _same_voxel(rng), _same_voxel(rng), _same_voxel(rng)
+        assert merge(a, b) == merge(b, a)
+        assert merge(merge(a, b), c) == merge(a, merge(b, c))
+        assert merge(a, a) == a
+        # Equal observations must also serialize identically, not merely compare equal.
+        assert repr(merge(a, b)) == repr(merge(b, a))
+
+
+def test_replicas_converge_to_byte_identical_maps_under_shuffles_and_duplicates():
+    rng = random.Random(7)
+    updates = [_random_obs(rng) for _ in range(200)]
+
+    reference = MeshState("reference")
+    reference.apply_all(updates)
+    expected = canonical(reference)
+
+    for replica_index in range(40):
+        order = updates[:]
+        order += [rng.choice(updates) for _ in range(100)]  # duplicates
+        rng.shuffle(order)
+        replica = MeshState(f"replica-{replica_index}")
+        replica.apply_all(order)
+        assert canonical(replica) == expected
+
+
+def test_pairwise_reconcile_of_tied_replicas_gives_identical_bytes():
+    a, b = MeshState("a"), MeshState("b")
+    a.apply(VoxelObservation((1, 2, 0), 1000, 0.9, "mine", "rover"))
+    b.apply(VoxelObservation((1, 2, 0), 1000, 0.9, "ied", "aircraft_1"))
+    assert reconcile(a, b) == 1
+    assert canonical(a) == canonical(b)
+
+
+def test_confidence_outside_unit_interval_or_nan_is_rejected():
+    for bad in (float("nan"), -0.001, 1.001, float("inf"), float("-inf")):
+        try:
+            make_obs(confidence=bad)
+            assert False, f"accepted confidence {bad!r}"
+        except ValueError:
+            pass
+    assert make_obs(confidence=0.0).confidence == 0.0
+    assert make_obs(confidence=1.0).confidence == 1.0
+
+
+def test_negative_zero_confidence_is_stored_as_positive_zero():
+    assert repr(make_obs(confidence=-0.0).confidence) == "0.0"
