@@ -727,9 +727,17 @@ class Replica:
                 s = self.state()
                 return "%s link=%s voxels=%d divergence=%d hash=%s peer=%s tx=%d rx=%d" % (
                     s["id"], s["link"], s["voxels"], s["divergence"], s["hash"], s["peer_hash"], s["tx_bytes"], s["rx_bytes"])
+            if cmd == "dump":
+                path = parts[1] if len(parts) > 1 else "replica_%s_map.json" % self.replica_id
+                with self.lock:
+                    data = canonical_bytes(self.mesh.snapshot())
+                    h = map_hash(self.mesh.snapshot())
+                with open(path, "wb") as fh:
+                    fh.write(data + b"\n")
+                return "wrote %d voxels to %s (map hash %s)" % (len(json.loads(data)), path, h)
             if cmd == "help":
                 return ("commands: obs X Y CONF TYPE | conflict X Y [CONF [TYPE]] | status | "
-                        "simulate-cut | simulate-restore | quit")
+                        "dump [FILE] | simulate-cut | simulate-restore | quit")
         except ValueError as exc:
             return "bad command: %s" % exc
         return "unknown command %r (try help)" % cmd
@@ -759,7 +767,7 @@ class Replica:
             sim_banner = self.sim_cut or (self.last_cut_kind in ("simulated", "peer-simulated"))
             out = {
                 "id": self.replica_id,
-                "peer_id": self.peer_id if linked else None,
+                "peer_id": self.peer_id,
                 "link": "LINKED" if linked else "DOWN",
                 "since_s": round(time.monotonic() - self.link_since, 1),
                 "cut_reason": "" if linked else self.last_cut_reason,
@@ -909,7 +917,7 @@ def main(argv=None):
         rep.log("clock skewed by %+.1f s" % args.clock_offset_s)
     if args.simulate_cut:
         rep.log("REHEARSAL controls enabled: simulate-cut is software only")
-    print("commands: obs X Y CONF TYPE | conflict X Y [CONF [TYPE]] | status | quit", flush=True)
+    print("commands: obs X Y CONF TYPE | conflict X Y [CONF [TYPE]] | status | dump [FILE] | quit", flush=True)
     try:
         if args.no_stdin:
             rep.stop_event.wait()

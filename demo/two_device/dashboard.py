@@ -25,27 +25,27 @@ PAGE = """<!doctype html>
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--text);
     font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-  body { padding: 14px 18px 84px 18px; font-size: 22px; }
+  body { padding: 10px 18px 76px 18px; font-size: 22px; }
   header { display: flex; align-items: baseline; gap: 28px; flex-wrap: wrap; }
-  h1 { margin: 0; font-size: 44px; letter-spacing: 1px; }
-  #link { font-size: 44px; font-weight: 800; padding: 2px 18px; border-radius: 8px; }
+  h1 { margin: 0; font-size: 40px; letter-spacing: 1px; }
+  #link { font-size: 40px; font-weight: 800; padding: 2px 18px; border-radius: 8px; }
   #link.up { background: var(--ok); color: #04210f; }
   #link.down { background: var(--bad); color: #2a0505; }
   #since { font-size: 26px; color: var(--dim); }
   #sim { display: none; margin: 10px 0; padding: 12px 18px; background: var(--warn); color: #1a1100;
     font-size: 40px; font-weight: 900; text-align: center; border-radius: 8px; letter-spacing: 2px; }
-  #tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 12px 0; }
-  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+  #tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 8px 0 10px 0; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 14px; }
   .tile .k { color: var(--dim); font-size: 20px; text-transform: uppercase; letter-spacing: 1px; }
-  .tile .v { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; word-break: break-all; }
-  .tile .s { color: var(--dim); font-size: 20px; }
+  .tile .v { font-size: 36px; line-height: 1.15; font-weight: 700; font-variant-numeric: tabular-nums; word-break: break-all; }
+  .tile .s { color: var(--dim); font-size: 19px; }
   .match { color: var(--ok); } .differ { color: var(--bad); }
   #main { display: grid; grid-template-columns: 1.15fr 1fr; gap: 12px; }
   #mapbox, #logbox { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
   canvas { width: 100%; height: auto; display: block; background: #0a1017; border-radius: 6px; }
   #legend { font-size: 20px; color: var(--dim); margin-top: 6px; }
   #legend b { display: inline-block; width: 16px; height: 16px; margin: 0 6px 0 14px; vertical-align: -2px; }
-  #log { height: 430px; overflow-y: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 18px;
+  #log { height: 560px; overflow-y: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 18px;
     white-space: pre-wrap; color: #c8d6e5; }
   #ctl { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 20px; }
   #ctl input, #ctl select { font-size: 22px; padding: 6px 8px; background: #0a1017; color: var(--text);
@@ -79,7 +79,7 @@ PAGE = """<!doctype html>
 </div>
 <div id="main">
   <div id="mapbox">
-    <canvas id="cv" width="900" height="620"></canvas>
+    <canvas id="cv" width="900" height="440"></canvas>
     <div id="legend"></div>
     <div id="ctl">
       X <input id="x" value="2.0"> Y <input id="y" value="3.0"> Conf <input id="c" value="0.90">
@@ -113,8 +113,8 @@ function draw(s) {
     if (wy < minY) minY = wy; if (wy > maxY) maxY = wy;
   }
   var pad = 1.0; minX -= pad; maxX += pad; minY -= pad; maxY += pad;
-  var span = Math.max(maxX - minX, (maxY - minY) * W / H);
-  var scale = (W - 40) / span;
+  var scale = Math.min((W - 50) / (maxX - minX), (H - 50) / (maxY - minY));
+  var span = Math.max(maxX - minX, maxY - minY);
   function px(wx) { return 30 + (wx - minX) * scale; }
   function py(wy) { return H - 30 - (wy - minY) * scale; }
   var step = 1; while (span / step > 12) step *= 2;
@@ -125,12 +125,12 @@ function draw(s) {
   for (var gy = Math.ceil(minY / step) * step; gy <= maxY; gy += step) {
     g.beginPath(); g.moveTo(0, py(gy)); g.lineTo(W, py(gy)); g.stroke(); g.fillText(gy + " m", 4, py(gy) - 3);
   }
-  var r = Math.max(7, vm * scale);
+  var r = Math.max(16, vm * scale);
   for (var j = 0; j < pts.length; j++) {
     var p = pts[j], cx = px(p[0] * vm), cy = py(p[1] * vm);
     g.fillStyle = p[2] === s.id ? LOCAL_COLOR : (s.peer_id && p[2] === s.peer_id ? PEER_COLOR : OTHER_COLOR);
     g.fillRect(cx - r / 2, cy - r / 2, r, r);
-    if (p[5]) { g.strokeStyle = "#ffffff"; g.lineWidth = 3; g.strokeRect(cx - r / 2 - 4, cy - r / 2 - 4, r + 8, r + 8); }
+    if (p[5]) { g.strokeStyle = "#ffffff"; g.lineWidth = 3; g.strokeRect(cx - r / 2 - 5, cy - r / 2 - 5, r + 10, r + 10); }
   }
   var lg = $("legend");
   lg.textContent = "";

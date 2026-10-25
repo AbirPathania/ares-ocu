@@ -640,3 +640,15 @@ def test_two_bundled_processes_cut_diverge_and_reconverge_through_the_command_li
                 p.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 p.kill()
+
+
+def test_dump_writes_the_canonical_map_that_the_hash_is_taken_over(tmp_path):
+    r = replica.Replica("rover", listen_port=0, dash_port=None, echo=False)
+    r.run_command("obs 1 1 0.9 mine")
+    r.run_command("obs 2 2 0.5 person")
+    path = str(tmp_path / "map.json")
+    msg = r.run_command("dump " + path)
+    with open(path, "rb") as fh:
+        data = fh.read()
+    assert data.rstrip(b"\n") == replica.canonical_bytes(r.mesh.snapshot())
+    assert hashlib.sha256(data.rstrip(b"\n")).hexdigest()[:12] in msg
