@@ -1672,3 +1672,42 @@ a short one.
 **Also removed:** `_draw_terrain` and `_generate_terrain`, the decorative contour layer. It had not been called since
 the map began drawing the real scan, and it named a colour it never imported, so it would have raised a `NameError` the
 moment anything called it.
+
+## The merge was not commutative on a full tie (a real defect, now fixed)
+
+**The defect.** `merge()` in `core/mesh_state.py` decided on confidence, then on timestamp, and stopped there. When two
+observations of the same voxel tied on both and differed in `threat_type` or `source_id`, it fell through to argument
+order: `merge(a, b)` returned `a` and `merge(b, a)` returned `b`. Two replicas that received the same two observations in
+opposite orders therefore held different maps, and nothing would ever correct that, because each side kept the one it
+had. This is the property the shared map is claimed to guarantee (any order of the same updates gives the same map), and
+the claim is part of what we describe as patentable. The module docstring and the unit tests both said the merge was
+commutative. For this one class of input it was not. `MeshLink`, `reconcile()` and `MeshState.apply()` all inherited the
+defect, since they all call `merge()`.
+
+**How it was found.** Abir read `merge()` while preparing the two-device demo, where two real replicas would each record
+an observation of the same voxel, and reproduced it by hand with
+`a = VoxelObservation((1,2,0), 1000, 0.9, "mine", "rover")` and
+`b = VoxelObservation((1,2,0), 1000, 0.9, "ied", "aircraft_1")`. The existing convergence tests did not catch it because
+every tie in them was on confidence only, with different timestamps. None built a tie on confidence and timestamp both.
+
+**The fix.** One total order over observations of a voxel: `(confidence, timestamp_us, source_id, threat_type)`, compared
+left to right, exposed as `VoxelObservation.order_key()`. `merge()` returns the maximum under that order. A maximum under
+a total order is commutative, associative and idempotent by construction. The earlier rule is unchanged where it decided
+anything: higher confidence still wins, then the newer timestamp. `source_id` and `threat_type` only break ties that were
+previously decided by argument order. The rule is now longer than the one in the build specification's section 12.2,
+which names only confidence and timestamp. That is a deliberate addition, and the specification should be updated to
+match.
+
+Two related defects closed with it. `VoxelObservation` now rejects a NaN confidence and any confidence outside 0.0 to
+1.0 at construction, because NaN compares false against everything and breaks the order. And it stores `-0.0` as `0.0`:
+the two compare equal but serialize differently, so two replicas could otherwise hold equal observations with unequal
+bytes. Callers were checked first. The only production caller, `_on_detection` in `ui/main_window.py`, receives
+confidences from `fuse()` and the camera tracker, both capped at 0.97, and the full test suite builds none outside 0 to 1.
+
+**The tests** (`tests/test_mesh_state.py`). The exact reproduction above. A tie on everything except `threat_type`. A
+seeded property test, 5,000 cases drawn from a small value pool so that ties are common, checking commutativity,
+associativity and idempotence, and that `repr` of the two merge results is identical. A convergence test that applies 200
+observations plus 100 duplicates in 40 different shuffled orders to 40 replicas and asserts a byte-identical canonical
+serialization on every one. A pairwise `reconcile()` of the tied pair. Rejection of NaN, infinity and out-of-range
+confidence, and the `-0.0` normalization. With the fix reverted, six of these fail; with it applied they pass. No
+existing test encoded the old behavior and none was edited.
