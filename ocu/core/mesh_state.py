@@ -6,18 +6,26 @@ the one part of the system that can be demonstrated completely and
 correctly with zero hardware (section 8). Build and rehearse this module
 first, section 15.
 
-Merge rule: the higher-confidence observation of a voxel wins; if equal,
-the most recent timestamp wins. This is commutative, associative, and
-idempotent, so any two replicas that have seen the same set of updates, in
-any order, converge to the exact same map. That guarantee is worth a real
-unit test that feeds the same updates in different orders and asserts a
-byte-identical result, not a smoke test — see tests/test_mesh_state.py.
+Merge rule: observations of one voxel are totally ordered by
+(confidence, timestamp_us, source_id, threat_type), compared left to right,
+and merge() returns the maximum. A total order makes merge commutative,
+associative, and idempotent by construction, so any two replicas that have
+seen the same set of updates, in any order, converge to the exact same map.
+That guarantee is worth a real unit test that feeds the same updates in
+different orders and asserts a byte-identical result, not a smoke test; see
+tests/test_mesh_state.py.
+
+The earlier rule stopped at confidence and timestamp. Two observations that
+tied on both but differed in source_id or threat_type made merge(a, b) return
+a and merge(b, a) return b, so replicas could disagree permanently. See
+DECISIONS.md.
 
 No PySide import belongs anywhere in this file.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from ocu.core.constants import VOXEL_RESOLUTION_CM
@@ -37,17 +45,29 @@ class VoxelObservation:
     threat_type: str  # see constants.THREAT_CLASSES; eighth class open, section 14
     source_id: str  # which unit made this observation
 
+    def __post_init__(self) -> None:
+        # NaN compares false against everything, which would break the total
+        # order merge() relies on, so it is rejected here, not tolerated.
+        if math.isnan(self.confidence) or not 0.0 <= self.confidence <= 1.0:
+            raise ValueError(f"confidence must be a number from 0.0 to 1.0, got {self.confidence!r}")
+        # Store a plain float with +0.0 for -0.0: they compare equal but serialize
+        # differently, so two replicas could otherwise hold unequal bytes for equal observations.
+        object.__setattr__(self, "confidence", float(self.confidence) + 0.0)
+
+    def order_key(self) -> tuple[float, int, str, str]:
+        """The total order merge() maximizes: confidence, then timestamp,
+        then source_id, then threat_type."""
+        return (self.confidence, self.timestamp_us, self.source_id, self.threat_type)
+
 
 def merge(a: VoxelObservation, b: VoxelObservation) -> VoxelObservation:
-    """Section 12.2's merge rule, verbatim: higher confidence wins, ties broken
-    by the newer timestamp. a and b must observe the same voxel."""
+    """The maximum of a and b under VoxelObservation.order_key. a and b must
+    observe the same voxel. Commutative, associative, and idempotent."""
     if a.voxel_key != b.voxel_key:
         raise ValueError(
             f"cannot merge observations of different voxels: {a.voxel_key} != {b.voxel_key}"
         )
-    if a.confidence != b.confidence:
-        return a if a.confidence > b.confidence else b
-    return a if a.timestamp_us >= b.timestamp_us else b
+    return a if a.order_key() >= b.order_key() else b
 
 
 class MeshState:
