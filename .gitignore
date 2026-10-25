@@ -6,3 +6,4 @@ __pycache__/
 
 # Downloaded assets (see scripts/fetch_assets.py)
 assets/polyhaven/
+demo/two_device/dist/
