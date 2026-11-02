@@ -79,7 +79,8 @@ from ocu.core.entities import default_entities, settle_entities, stamp_static_en
 from ocu.core.thermal_display import to_rgb
 from ocu.core.thermal_system import ThermalSystem
 from ocu.core.threat_filter import ThreatFilter
-from ocu.core.vision import PERCEPTION_HZ, THREAT_TYPE, WEAPON_LABELS, WEAPON_THREAT_TYPE, CameraSpec, ConfirmationGate, ContactRegistry, PerceptionSensor
+from ocu.core import thermal_detect
+from ocu.core.vision import PERCEPTION_HZ, THREAT_TYPE, WEAPON_LABELS, WEAPON_THREAT_TYPE, CameraSpec, ConfirmationGate, ContactRegistry, Detection, PerceptionSensor
 from ocu.core.camera import CameraRig
 from ocu.core.occlusion import occlusion_bearing
 from ocu.ui.camera_feed import SimulatedCameraFeed
@@ -243,7 +244,7 @@ class MainWindow(QMainWindow):
         cut_washouts_on_lanes(self.terrain, self.sweep)
         # What is actually buried out there, placed relative to the lanes,
         # and what the suite has accumulated about each object swept over.
-        self.target_field = default_field(sweep=self.sweep)
+        self.target_field = default_field(sweep=self.sweep, world=self.terrain)
         self._target_evidence: dict[int, dict[str, float]] = {}
         #: What the scouts have seen of each object, kept apart from the rover's
         #: evidence: they are different replicas and cannot share it over a cut link.
@@ -256,7 +257,7 @@ class MainWindow(QMainWindow):
         # remembered so that a later, better reading updates that report instead of adding another.
         # Placed on ground they can stand on, parked ones stamped into the world so the LiDAR hits them and the
         # rover plans round them, walking ones tracked separately (core/dynamic_obstacles.py).
-        self.surface_entities = settle_entities(self.terrain, default_entities(sweep=self.sweep))
+        self.surface_entities = settle_entities(self.terrain, default_entities(sweep=self.sweep, world=self.terrain))
         stamp_static_entities(self.terrain, self.surface_entities)
         self.dynamic_obstacles = DynamicObstacles()
         #: Seconds each walking entity has spent stopped for the rover; its pose is read at mission time minus this.
@@ -268,6 +269,7 @@ class MainWindow(QMainWindow):
         self.camera_contacts = ContactRegistry()
         self._vision_frame = -1
         self._vision_noted = False
+        self._reset_thermal_detection()
         # Which way the vapour plume runs. The SAW sensor only reads when
         # the vehicle is on the plume side of a source, so on this ground
         # it confirms on the outbound lanes and not on the return ones --
@@ -1551,11 +1553,15 @@ class MainWindow(QMainWindow):
             self.camera_gate.update(unit_id, frame, detections)
             shown = [t for t in self.camera_gate.tracks if t.sensor_id == unit_id and t.hits and t.hits[-1] == frame]
             if feed is not None:
-                feed.set_detections([
-                    {"box": t.box, "kind": "weapon" if t.weapon else t.kind, "label": "armed" if t.weapon else t.kind,
-                     "score": t.scores[-1], "confirmed": t.confirmed,
-                     "threat": self.threat_filter.is_threat(self._reported_as(t))} for t in shown
-                ])
+                if feed.ir_mode:
+                    # the tile is showing what the thermal camera sees, so the boxes are the thermal detector's, drawn on its picture
+                    feed.set_detections(self._thermal_boxes.get(unit_id, []))
+                else:
+                    feed.set_detections([
+                        {"box": t.box, "kind": "weapon" if t.weapon else t.kind, "label": "armed" if t.weapon else t.kind,
+                         "score": t.scores[-1], "confirmed": t.confirmed,
+                         "threat": self.threat_filter.is_threat(self._reported_as(t))} for t in shown
+                    ])
             for track in shown:
                 if not track.confirmed:
                     continue
@@ -1576,6 +1582,106 @@ class MainWindow(QMainWindow):
                         "source_id": unit_id,
                     }
                 )
+        self._tick_thermal_detection(poses)
+
+    # --- thermal detection -----------------------------------------------------------------------------
+
+    #: Gate for the thermal detector. One camera is read per step, so a unit is seen every few steps and the window is
+    #: longer than the visible camera's; the radius allows for a walker covering ground between two looks at it.
+    THERMAL_CONFIRM = {"hits": 3, "window": 20, "radius_m": 5.0, "memory": 28}
+    #: What the thermal detector reports. Warm bodies are what an infrared camera is for. A vehicle is a large warm or cold
+    #: shape that a stand of trees or a rock face also makes, and the visible camera already reports vehicles, so a
+    #: thermal "vehicle" is not raised (the detector still classes one; see core/thermal_detect.py).
+    THERMAL_REPORTS = ("person", "animal")
+    THERMAL_VEHICLE_CLEARANCE_M = 5.0
+    #: Least wall-clock time between thermal steps, so a fast-forwarded mission does not spend its time imaging.
+    THERMAL_STEP_WALL_S = 0.12
+
+    def _reset_thermal_detection(self) -> None:
+        self.thermal_gate = ConfirmationGate(**self.THERMAL_CONFIRM)
+        self._thermal_step = 0
+        self._thermal_turn = 0
+        self._thermal_boxes: dict[str, list[dict]] = {}
+        self._thermal_wall = 0.0
+        self._thermal_noted = False
+        self.thermal_seen: dict[tuple[str, str], int] = {}  # (unit, kind) -> looks that found one, before the gate; for checks
+
+    def _tick_thermal_detection(self, poses) -> None:
+        """Read one running thermal camera and report the people, animals and vehicles it finds.
+
+        The imager's picture goes to the detector (core/thermal_detect.py) as numbers; the detector knows nothing of
+        what is out there. Its contacts go through their own confirmation gate, then into the same contact registry
+        as the visible camera's, so a person both cameras see is one threat with two sensors. The rover is read every step, the aircraft in
+        turn, one a step, because imaging is the expensive part.
+        """
+        if not self.thermal.ready:
+            return
+        import time
+
+        now = time.monotonic()
+        if now - self._thermal_wall < self.THERMAL_STEP_WALL_S:
+            return
+        self._thermal_wall = now
+        running = self._cameras_on()
+        if not running:
+            return
+        # the rover's camera is the one that resolves a person, so it is read every step; the aircraft take turns
+        scouts = [u for u in running if u != "rover"]
+        units = (["rover"] if "rover" in running else []) + ([scouts[self._thermal_turn % len(scouts)]] if scouts else [])
+        self._thermal_turn += 1
+        self._thermal_step += 1
+        step = self._thermal_step
+        for unit_id in units:
+            self._thermal_look(unit_id, poses, step)
+
+    def _thermal_look(self, unit_id: str, poses, step: int) -> None:
+        pose = self.units[unit_id].pose
+        frame = self.thermal.look(unit_id, pose.x, pose.y, pose.z, pose.heading, self.mission_clock.clock_s, self.surface_entities, poses)
+        sensor_kind = "rover" if unit_id == "rover" else "scout"
+        found = thermal_detect.detect(frame, sensor_kind)
+        # A warm patch on a vehicle (a bonnet, a sunlit side) is a warm blob the size of an animal. Whatever is within a
+        # vehicle's length of a vehicle, in this picture or already on the map, is taken to be part of it.
+        vehicles = [(c.x, c.y) for c in found if c.kind == "vehicle"] + [(c.x, c.y) for c in self.camera_contacts.contacts if c.kind == "vehicle"]
+        detections = [
+            Detection(c.kind, c.confidence, c.x, c.y, c.box)
+            for c in found
+            if c.kind in self.THERMAL_REPORTS and not any(math.hypot(c.x - vx, c.y - vy) <= self.THERMAL_VEHICLE_CLEARANCE_M for vx, vy in vehicles)
+        ]
+        for d in detections:
+            self.thermal_seen[(unit_id, d.kind)] = self.thermal_seen.get((unit_id, d.kind), 0) + 1
+        self.thermal_gate.update(unit_id, step, detections)
+        shown = [t for t in self.thermal_gate.tracks if t.sensor_id == unit_id and t.hits and t.hits[-1] == step]
+        self._thermal_boxes[unit_id] = [
+            {"box": t.box, "kind": t.kind, "label": t.kind, "score": t.scores[-1], "confirmed": t.confirmed,
+             "threat": self.threat_filter.is_threat(self._reported_as(t))} for t in shown
+        ]
+        for track in shown:
+            if not track.confirmed:
+                continue
+            # A silhouette seen end-on can be a person or an animal. Where the map already holds a body of the other
+            # kind at this spot, the thermal call does not add a second contact beside it.
+            if any(
+                c.kind in self.THERMAL_REPORTS and c.kind != track.kind and math.hypot(c.x - track.x, c.y - track.y) <= self.THERMAL_VEHICLE_CLEARANCE_M
+                for c in self.camera_contacts.contacts
+            ):
+                continue
+            contact = self.camera_contacts.resolve(track.kind, track.x, track.y)
+            if not self._worth_reporting(("thermal", unit_id, contact.id), track.confidence):
+                continue
+            if not self._thermal_noted:
+                self._thermal_noted = True
+                self.event_log.log(
+                    self.mission_clock.clock_s,
+                    "Thermal detections are read from the simulated imager's temperatures by a size-and-contrast detector",
+                    level="info",
+                )
+            self._on_detection(
+                {
+                    "x": contact.x, "y": contact.y, "confidence": track.confidence, **self._reported_as(track),
+                    "sensor": "thermal", "sensors": ["thermal"], "source": "rover" if unit_id == "rover" else "aircraft",
+                    "source_id": unit_id,
+                }
+            )
 
     # --- thermal imagery -------------------------------------------------------------------------------
 
@@ -2241,6 +2347,7 @@ class MainWindow(QMainWindow):
         self._aerial_evidence.clear()
         self.camera_gate = ConfirmationGate()
         self.camera_contacts = ContactRegistry()
+        self._reset_thermal_detection()
         self.dynamic_obstacles.clear()
         self._entity_hold.clear()
         self._vision_frame = -1

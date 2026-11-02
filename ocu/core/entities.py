@@ -212,7 +212,20 @@ def stamp_static_entities(world: TerrainWorld, entities: list[SurfaceEntity]) ->
     return cells
 
 
-def default_entities(seed: int = 20261016, sweep: LaneSweep | None = None) -> list[SurfaceEntity]:
+#: Where a truck might be pulled off at a site, nearest first, in the site's frame.
+_TRUCK_SPOTS = ((-5.0, -10.5), (-12.0, 12.0), (12.0, -14.0), (-14.0, -4.0), (0.0, 16.0), (16.0, 6.0), (-6.0, 18.0), (20.0, -4.0), (-20.0, 10.0))
+
+
+def _truck_spot(world: TerrainWorld, site) -> tuple[float, float]:
+    """The first place near the site where a truck could really be parked: level, with clear ground all round it."""
+    for forward, right in _TRUCK_SPOTS:
+        x, y = site.at(forward, right)
+        if _passable(world, x, y, 2.85 + CLEAR_MARGIN_M) and _level(world, x, y, 2.85):
+            return x, y
+    return site.at(*_TRUCK_SPOTS[0])
+
+
+def default_entities(seed: int = 20261016, sweep: LaneSweep | None = None, world: TerrainWorld | None = None) -> list[SurfaceEntity]:
     """Three entities, each a different lesson, positioned from the sweep.
 
       - a person walking across the ground ahead of the lanes. Large enough to be seen from the ground
@@ -222,9 +235,29 @@ def default_entities(seed: int = 20261016, sweep: LaneSweep | None = None) -> li
       - a buck moving slowly near the first lane: not a threat, and the thing a detector most often
         invents on rocks, so seeing a real one is the contrast
     """
-    sweep = sweep if sweep is not None else sweep_from_first_scan(TerrainWorld(seed=seed))
+    if world is None and sweep is None:
+        world = TerrainWorld(seed=seed)
+    sweep = sweep if sweep is not None else sweep_from_first_scan(world)
+    sites = None
+    if world is not None:
+        from ocu.core.scenario import place_sites
+
+        sites = place_sites(world, sweep)
     # Sizes are those of the figures drawn (render/figures.py): the whole outline, head and pack and roof rack included,
     # which is what a person drawing a box round it would draw.
+    if sites is not None:
+        b, d = sites["B"], sites["D"]
+        return [
+            # across the lanes, as before
+            SurfaceEntity("person", "walker", 1.78, 0.54, 0.63, (sweep.at(1, 22.0, 12.0), sweep.at(1, 22.0, -4.0)), speed_ms=1.2, box_offset_m=-0.095),
+            SurfaceEntity("animal", "buck", 1.91, 0.72, 2.14, (sweep.at(0, 10.0, 9.0), sweep.at(0, 16.0, 11.0), sweep.at(0, 12.0, 7.0)), speed_ms=0.5, box_offset_m=0.27, style="buck"),
+            # at the crossing: someone with a rifle watching the track, and a truck pulled off it
+            SurfaceEntity("person", "armed walker", 1.79, 1.00, 0.68, (b.at(9.0, -9.0), b.at(11.0, 8.0)), speed_ms=0.9, box_offset_m=-0.098,
+                          style="armed", carrying="long_gun"),
+            SurfaceEntity("vehicle", "parked truck", 2.20, 2.12, 5.70, (_truck_spot(world, b),), heading_deg=65.0),
+            # on the scattered ground: an ibex, and a civilian crossing it
+            SurfaceEntity("animal", "ibex", 1.61, 0.52, 1.64, (d.at(8.0, -9.0), d.at(13.0, -11.0), d.at(10.0, -6.0)), speed_ms=0.35, box_offset_m=0.215, style="ibex"),
+        ]
     return [
         SurfaceEntity("person", "walker", 1.78, 0.54, 0.63, (sweep.at(1, 22.0, 12.0), sweep.at(1, 22.0, -4.0)), speed_ms=1.2, box_offset_m=-0.095),
         # someone carrying a rifle in the open, walking across the lanes ahead: the case the Arms class exists for

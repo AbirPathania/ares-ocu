@@ -52,13 +52,13 @@ def test_an_entity_must_have_a_known_kind_and_a_position():
         SurfaceEntity("person", "p", 1, 1, 1, ())
 
 
-def test_the_default_entities_cover_every_kind_and_are_inside_the_tether():
+def test_the_default_entities_cover_every_kind_and_are_inside_the_operating_area():
     ents = default_entities()
     assert set(e.kind for e in ents) == set(KINDS), "every kind is there"
     assert sorted(e.kind for e in ents) == sorted([*KINDS, "animal", "person"]), "two animals (a buck and an ibex) and two people (one of them armed)"
     for e in ents:
         for x, y in e.path:
-            assert math.hypot(x, y) < 50.0, f"{e.name} is beyond the 50 m tether"
+            assert math.hypot(x, y) < 100.0, f"{e.name} is outside the operating area"
     assert len({e.name for e in ents}) == len(ents)
 
 

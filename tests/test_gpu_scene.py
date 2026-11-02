@@ -139,8 +139,24 @@ def _flat_site(scene):
     return best[1], best[2]
 
 
+@pytest.fixture
+def high_sun(scene, monkeypatch):
+    """The figure's shadow is part of what it changes in the picture, and under the mission's low sun it is many metres
+    long. This test is about where the figure is drawn, so it is lit from high, and the scene is put back after."""
+    import ocu.core.camera as camera
+
+    monkeypatch.setattr(camera, "SUN_AZIMUTH_DEG", 150.0)
+    monkeypatch.setattr(camera, "SUN_ELEVATION_DEG", 60.0)
+    with scene.ctx:
+        scene._build_shadow()
+    yield
+    monkeypatch.undo()
+    with scene.ctx:
+        scene._build_shadow()
+
+
 @pytest.mark.parametrize("name,distance", [("walker", 7.0), ("armed walker", 7.0), ("parked truck", 12.0), ("buck", 6.0), ("ibex", 6.0)])
-def test_an_entity_is_drawn_where_the_detector_model_says_its_box_is(scene, monkeypatch, name, distance):
+def test_an_entity_is_drawn_where_the_detector_model_says_its_box_is(scene, high_sun, monkeypatch, name, distance):
     """The simulated detector's box (core/vision.py) and the picture have to agree, or the overlay lies."""
     from ocu.core import vision as pc
     from ocu.core.entities import SurfaceEntity, default_entities

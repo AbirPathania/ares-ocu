@@ -222,6 +222,8 @@ class ThermalFrame:
     across_m: np.ndarray
     sensor: ThermalSensor
     painted: np.ndarray | None = None  # (H, W) bool: the ray met ground, an object or a body, not sky
+    sx: np.ndarray | None = None  # (H, W) where the nearest surface is: hx, hy for ground, the body's own face for a body
+    sy: np.ndarray | None = None
 
 
 def _gaussian_blur(image: np.ndarray, sigma: float) -> np.ndarray:
@@ -291,6 +293,7 @@ class ThermalImager:
         # things that stand on the ground, drawn from their own surfaces and in front of what is behind them
         entity_index = np.full(n, -1, dtype=np.int16)
         nearest = slant.copy()
+        surface_x, surface_y = hits["hx"].astype(np.float64).copy(), hits["hy"].astype(np.float64).copy()
         origin = (x, y, camera_z)
         beam, diffuse = site.sunlight(site.sun(hour)[0])
         sun_el, sun_az = site.sun(hour)
@@ -336,6 +339,8 @@ class ThermalImager:
                     emissivity[hit] = band.emissivity
                     reflected_k[hit] = air_k - UPRIGHT_REFLECTED_DEPRESSION_K
                     nearest[hit] = t[closer]
+                    surface_x[hit] = x + t[closer] * sub_dir[closer, 0]
+                    surface_y[hit] = y + t[closer] * sub_dir[closer, 1]
                     entity_index[hit] = index
                     painted[hit] = True
 
@@ -358,5 +363,5 @@ class ThermalImager:
         return ThermalFrame(
             (image - tp.KELVIN).astype(np.float32), ground_pixels, entity_index.reshape(h, w), hits["hx"].reshape(h, w), hits["hy"].reshape(h, w),
             nearest.reshape(h, w).astype(np.float32), along.reshape(h, w).astype(np.float32), across.reshape(h, w).astype(np.float32), sensor,
-            painted.reshape(h, w),
+            painted.reshape(h, w), surface_x.reshape(h, w), surface_y.reshape(h, w),
         )

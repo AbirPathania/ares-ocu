@@ -66,10 +66,11 @@ def test_v3_clear_sky_sunlight_at_altitude():
     assert site.sunlight(math.radians(30.0))[0] < site.sunlight(math.radians(50.0))[0], "the beam falls as the sun drops"
 
 
-def test_the_sun_the_visible_camera_draws_is_where_this_date_puts_it_at_ten_forty():
+def test_the_sun_the_visible_camera_draws_is_where_this_date_puts_it_at_the_start_hour():
     from ocu.core.camera import SUN_AZIMUTH_DEG, SUN_ELEVATION_DEG
 
-    el, az = tp.ThermalSite().sun(10.0 + 40.0 / 60.0)
+    site = tp.ThermalSite()
+    el, az = site.sun(site.start_hour)
     assert abs(math.degrees(el) - SUN_ELEVATION_DEG) < 3.0
     assert abs(math.degrees(az) - SUN_AZIMUTH_DEG) < 8.0
 

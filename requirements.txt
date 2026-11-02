@@ -4,3 +4,6 @@ opensimplex>=0.4.5
 pytest>=8.0
 moderngl>=5.10
 certifi
+scipy>=1.13
+pillow>=10.0
+meshoptimizer>=0.2

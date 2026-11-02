@@ -218,3 +218,11 @@ def test_a_unit_appears_where_it_is_first_reported(app):
     view.set_unit_pose("tricopter-2", 25.0, -14.0, 18.0, 200.0)
     assert view._drawn_pose("tricopter-2")["x"] == 25.0
     assert view._drawn_pose("tricopter-2")["y"] == -14.0
+
+
+def test_detection_labels_that_would_stack_are_placed_clear_of_each_other():
+    view = MapView()
+    rects = [view._free_label_rect(100.0, 200.0, 92.0, 13.0) for _ in range(6)]
+    for i, a in enumerate(rects):
+        for b in rects[i + 1:]:
+            assert not a.intersects(b)

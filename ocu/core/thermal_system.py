@@ -23,8 +23,8 @@ from ocu.core.thermal_map import ThermalMap
 
 MAP_BINNING = 2  # the mast camera is read 2 x 2 binned for mapping: cells are a quarter metre, not a pixel
 RANGE_HYSTERESIS_K = 1.0  # the legend's range moves only when the ground it describes has moved this much
-MIN_RANGE_SPAN_K = 4.0
-DEFAULT_PALETTE = "iron"
+MIN_RANGE_SPAN_K = 14.0
+DEFAULT_PALETTE = "white_hot"
 CACHE_DIR = pathlib.Path.home() / ".cache" / "ares-ocu"
 
 

@@ -196,6 +196,7 @@ class MapView(QWidget):
         # being bridged by a line across ground nobody swept.
         self._swept: list[list[tuple[float, float]]] = []
         self._detections: list[dict] = []
+        self._placed_labels: list[QRectF] = []  # where this frame's detection labels went, so the next one can keep clear of them
         self._threat_filter = None
         self._layer = "lidar"
         self._thermal: dict | None = None  # what the thermal layer draws: the mosaic, the levels, the clock
@@ -1374,8 +1375,24 @@ class MapView(QWidget):
                 for a, b in zip(segment, segment[1:]):
                     painter.drawLine(self._to_screen(*a), self._to_screen(*b))
 
+    def _free_label_rect(self, centre_x: float, top: float, width: float, height: float) -> QRectF:
+        """A label's rectangle moved down, then up, until it overlaps no label already placed this frame.
+
+        Contacts on a swept lane and sites with several objects stand close together on the map, and labels at a fixed
+        offset stacked on one another. Placing them one at a time against what is already down keeps each readable."""
+        for step in range(8):
+            for shift in ((step * (height - 1.0),) if step == 0 else (step * (height - 1.0), -step * (height + 24.0))):
+                rect = QRectF(centre_x - width / 2, top + shift, width, height)
+                if not any(rect.intersects(other) for other in self._placed_labels):
+                    self._placed_labels.append(rect)
+                    return rect
+        rect = QRectF(centre_x - width / 2, top, width, height)
+        self._placed_labels.append(rect)
+        return rect
+
     def _draw_detections(self, painter: QPainter) -> None:
         pulse = (math.sin(math.radians(self._radar_angle * 4)) + 1.0) / 2.0  # 0..1
+        self._placed_labels: list[QRectF] = []
         for index, d in enumerate(self._detections):
             center = self._to_screen(d["x"], d["y"])
             confidence = d.get("confidence", 0.0)
@@ -1434,12 +1451,9 @@ class MapView(QWidget):
             painter.setPen(QPen(QColor("#C6D0DA")))
             painter.setFont(QFont("Menlo", 8))
             label = f"{map_label(d)} {confidence:.2f}"
-            # Contacts on a swept lane cluster along it, so labels are
-            # stepped to stop them stacking on one another.
-            offset = radius + 3 + (index % 3) * 12
-            painter.drawText(
-                QRectF(center.x() - MAP_LABEL_WIDTH / 2, center.y() + offset, MAP_LABEL_WIDTH, 13), Qt.AlignHCenter, label
-            )
+            # Contacts on a swept lane cluster along it, so labels are placed
+            # clear of one another rather than at a fixed step.
+            painter.drawText(self._free_label_rect(center.x(), center.y() + radius + 3, MAP_LABEL_WIDTH, 13), Qt.AlignHCenter, label)
 
     def _draw_contact(self, painter: QPainter, center: QPointF, d: dict, glyph: str, index: int) -> None:
         """A detection the operator has not chosen to treat as a threat: small, grey-blue, no ring and no pulse."""
@@ -1451,9 +1465,7 @@ class MapView(QWidget):
         draw_threat_glyph(painter, center, CONTACT_RADIUS * 1.15, glyph)
         painter.setPen(QPen(QColor(CONTACT_COLOR).lighter(120)))
         painter.setFont(QFont("Menlo", 7))
-        painter.drawText(
-            QRectF(center.x() - MAP_LABEL_WIDTH / 2, center.y() + CONTACT_RADIUS + 2 + (index % 3) * 10, MAP_LABEL_WIDTH, 12), Qt.AlignHCenter, map_label(d)
-        )
+        painter.drawText(self._free_label_rect(center.x(), center.y() + CONTACT_RADIUS + 2, MAP_LABEL_WIDTH, 12), Qt.AlignHCenter, map_label(d))
 
     def _draw_formation_preview(self, painter: QPainter) -> None:
         """Show the formation before it is committed, section 6.2.

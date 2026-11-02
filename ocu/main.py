@@ -47,6 +47,8 @@ def main() -> int:
     # The feeds are drawn as 3D on the GPU where there is one; without it the
     # numpy renderer is used and the application is none the worse for it.
     window.enable_gpu_cameras()
+    # The thermal detector and the infrared tiles need the day's temperature field; start getting it now.
+    window.warm_thermal()
     window.resize(opening_size(app))
     window.show()
     window.warm_thermal()  # infrared is ready by the time it is asked for

@@ -106,7 +106,7 @@ class ThermalSite:
     wind_swing: float = 0.5  # share of the mean: the wind eases at night and peaks mid-afternoon as the boundary layer mixes
     wind_peak_hour: float = 14.0
     deep_c: float = 6.0  # the temperature a metre down, which barely moves in a day: the daily mean of the air
-    start_hour: float = 10.67  # solar time at the start of a mission (10:40)
+    start_hour: float = 7.5  # solar time at the start of a mission (07:30)
 
     def air_c(self, hour: float) -> float:
         return self.air_mean_c + self.air_swing_k * math.cos(2.0 * math.pi * (hour - self.air_peak_hour) / 24.0)

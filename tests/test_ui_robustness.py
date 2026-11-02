@@ -1362,11 +1362,11 @@ def test_the_rover_drives_to_a_destination_the_operator_sets_and_stops_there(app
     window = MainWindow()
     window.pace_slider.setValue(60)  # a transit, not a survey crawl
     window._on_play_clicked()
-    window._on_destination_placed(25.0, -18.0)
+    window._on_destination_placed(25.0, -8.0)
     assert window.phase_label.text() in EN_ROUTE
     assert _drive_until_settled(window) == "reached"
     rover = window.units["rover"].pose
-    assert math.hypot(rover.x - 25.0, rover.y + 18.0) < 1.5
+    assert math.hypot(rover.x - 25.0, rover.y + 8.0) < 1.5
     assert window.phase_label.text() == "AT DESTINATION"
     _drive(window, 5.0)
     assert window.flight_director.rover_body.speed_ms < 0.05, "it stays put once it is there"
@@ -1579,9 +1579,10 @@ def test_the_link_chip_text_sits_in_the_middle_of_its_box(app):
 
 
 def test_there_are_few_contacts_to_deal_with(app):
-    """A dozen contacts buried the one that mattered."""
+    """A dozen contacts buried the one that mattered. The ground is now laid out over four sites, so there are more of
+    them, but a handful at each: the sweep block's and three sites 35 to 90 m out."""
     window = MainWindow()
-    assert len(window.target_field) <= 6
+    assert len(window.target_field) <= 18
     window._on_play_clicked()
     window.pace_slider.setValue(100)
     _drive(window, 200.0)

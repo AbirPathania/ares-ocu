@@ -206,7 +206,7 @@ def test_classification_never_invents_an_eighth_class():
 def test_the_default_field_has_a_range_of_difficulty():
     """Four different outcomes, not four of the same one."""
     field = default_field()
-    assert 4 <= len(field) <= 6, "a few contacts, each different, not a dozen"
+    assert 12 <= len(field) <= 18, "enough to fill a search area, few enough that each is a decision"
     depths = [t.depth_m for t in field.targets]
     masses = [t.metal_mass_g for t in field.targets]
     assert max(depths) > 0.2 and min(depths) < 0.1

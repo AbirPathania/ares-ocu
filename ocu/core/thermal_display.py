@@ -21,7 +21,7 @@ _IRON = np.array(
 )
 LUT_SIZE = 256
 AGC_PERCENTILES = (1.0, 99.0)
-MIN_SPAN_K = 2.0  # never stretch a frame narrower than this: noise would become picture
+MIN_SPAN_K = 12.0  # never stretch a frame narrower than this: noise, and a patch of sun on a slope, would become picture
 
 
 def _lut(name: str) -> np.ndarray:

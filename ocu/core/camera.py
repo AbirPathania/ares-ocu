@@ -121,10 +121,11 @@ TRUNK_FRACTION = 0.28
 
 # --- the light --------------------------------------------------------------
 
-#: Sun azimuth (compass, clockwise from north) and elevation. A fixed late
-#: morning sun: low enough that shadows read, high enough not to blind.
-SUN_AZIMUTH_DEG = 150.0
-SUN_ELEVATION_DEG = 42.0
+#: Sun azimuth (compass, clockwise from north) and elevation. A fixed early
+#: morning sun, the thermal site's sun at its start hour (07:30): low enough that shadows read, and early enough
+#: that people and animals are warmer than the ground they stand on, which is when an infrared sweep works.
+SUN_AZIMUTH_DEG = 112.0
+SUN_ELEVATION_DEG = 12.0
 
 #: Distances toward the sun at which a ground point is tested for an
 #: occluder. A shadow is as long as the thing casting it divided by the tan

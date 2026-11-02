@@ -325,8 +325,9 @@ class ThreatPanel(QWidget):
         new_type = detection.get("type", threat["type"])
         if detection.get("confidence", 0.0) > threat["confidence"]:
             threat["confidence"] = detection["confidence"]
-            threat["type"] = new_type
-            threat["label"] = detection.get("label", threat.get("label"))
+            if not replaces(threat["type"], new_type):  # a second sensor's plain "person" does not undo "armed person"
+                threat["type"] = new_type
+                threat["label"] = detection.get("label", threat.get("label"))
         if replaces(new_type, threat["type"]):
             threat["type"] = new_type
             threat["label"] = detection.get("label", threat.get("label"))

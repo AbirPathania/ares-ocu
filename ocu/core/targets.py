@@ -63,7 +63,7 @@ class TargetField:
         return len(self.targets)
 
 
-def default_field(seed: int = 20261016, sweep: LaneSweep | None = None) -> TargetField:
+def default_field(seed: int = 20261016, sweep: LaneSweep | None = None, world: TerrainWorld | None = None) -> TargetField:
     """Objects laid along the lane the rover sweeps, plus others dispersed.
 
     The suite's widest swath is the pulse induction array at 40 cm, so a
@@ -96,7 +96,9 @@ def default_field(seed: int = 20261016, sweep: LaneSweep | None = None) -> Targe
     did not go the moment the ground changed, and the demonstration would
     silently become one where the vehicle sweeps empty dirt.
     """
-    sweep = sweep if sweep is not None else sweep_from_first_scan(TerrainWorld(seed=seed))
+    if world is None and sweep is None:
+        world = TerrainWorld(seed=seed)
+    sweep = sweep if sweep is not None else sweep_from_first_scan(world)
 
     # (lane, metres along it, metres across it, then the object itself)
     placements = [
@@ -106,7 +108,7 @@ def default_field(seed: int = 20261016, sweep: LaneSweep | None = None) -> Targe
         # gradiometer is blind to it and induction is marginal.
         (0, 13.2, -0.09, 0.27, 11.0, False, 0.34, "low_metal_deep"),
         # Scrap: strong metal return, no vapour at all.
-        (0, 16.1, 0.11, 0.13, 255.0, True, 0.0, "inert_scrap"),
+        (0, 18.0, 0.11, 0.13, 255.0, True, 0.0, "inert_scrap"),
         # Between the lanes, clear of every swath including the 2 m the
         # vapour sensor reaches, so the sweep genuinely misses it.
         (0, 6.5, 2.0, 0.06, 140.0, True, 0.5, "outside_swath"),
@@ -120,4 +122,11 @@ def default_field(seed: int = 20261016, sweep: LaneSweep | None = None) -> Targe
     for lane, along, offset, depth, mass, ferrous, voc, truth in placements:
         x, y = sweep.at(lane, along, offset)
         targets.append(BuriedTarget(x, y, depth, mass, ferrous, voc, truth))
+    if world is not None:
+        # The rest of the operating area: three more sites, so that what there is to find is spread across it
+        # and not laid out in one block beside the deploy point. See scenario.py.
+        from ocu.core.scenario import place_sites, site_targets
+
+        for x, y, depth, mass, ferrous, voc, truth in site_targets(world, place_sites(world, sweep)):
+            targets.append(BuriedTarget(x, y, depth, mass, ferrous, voc, truth))
     return TargetField(targets=targets)

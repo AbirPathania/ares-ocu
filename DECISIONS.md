@@ -1711,3 +1711,36 @@ observations plus 100 duplicates in 40 different shuffled orders to 40 replicas 
 serialization on every one. A pairwise `reconcile()` of the tied pair. Rejection of NaN, infinity and out-of-range
 confidence, and the `-0.0` normalization. With the fix reverted, six of these fail; with it applied they pass. No
 existing test encoded the old behavior and none was edited.
+
+## Thermal detection, and where the demonstration puts its threats
+
+**Thermal detection.** The infrared tiles used to be pictures only. `core/thermal_detect.py` now reads the imager's
+temperatures the way a detector does and knows nothing of what is in the world. The background is the median of each
+row of the picture (a warm body cannot raise its own background, which a window mean lets it do). A blob is anything
+beyond 3.5 robust standard deviations and at least a degree; blobs are joined across small gaps, and a strong blob is
+split again at half its own peak, because a body on sunlit ground is one blob at the clutter's threshold and two at its
+own. A person or animal must be at least 3 K warmer than the picture, 2.5 K warmer than the ring round it, fill 40% of
+its box, have 40 pixels and about five across its smaller side (the recognition criterion), and be the size and shape
+of one. Positions come from the nearest surface a pixel sees: the imager's ground hit for a body is the ground behind
+it, which put a person tens of metres out, and is no longer used for bodies.
+
+Measured on 120 random looks at 07:30 (`/tmp` probe, not shipped): people seen by the rover are found about three
+times in four, animals about two in five (the ibex is often partly hidden), and a handful of false person or animal
+calls arise, mostly warm patches on the parked truck. The pipeline therefore adds three things: a confirmation gate
+(3 looks in 20), a clearance (5 m) round any vehicle, and a rule that a thermal call does not add a second contact
+beside a body of the other kind. Thermal vehicles are classed by the detector but not reported: a stand of trees makes
+the same shape, and the visible camera reports vehicles. Scouts at 20 m resolve a person only within about 25 m.
+
+**The start hour is 07:30.** At 10:40 the ground in the sun is warmer than a clothed person, so an infrared sweep finds
+nothing it should. The visible sun is the thermal site's sun at the start hour (azimuth 112, elevation 12), as the
+earlier test already required of the two, so the picture and the physics agree. The operator can still step the time of
+day.
+
+**Sites.** Everything buried used to be within about 50 m of the start, so the demonstration read as one cluster. The
+sweep block keeps its targets; three further sites (B, C, D) are placed on open gentle ground 35 to 90 m out, with a
+crossing, a pattern row, and a deep heavy object with scrap, and with a person, an animal and the truck spread over
+them. `core/scenario.py` finds the ground; nothing is positioned by hand.
+
+**Display.** The thermal gain never stretches a picture narrower than 12 K (14 K for the map), and the default palette
+is white-hot: a sun-lit slope at a low sun differs from its shade by several kelvin, and stretching 4 K over a colour
+ramp made that read as noise.
