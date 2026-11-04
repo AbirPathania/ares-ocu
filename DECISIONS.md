@@ -1797,3 +1797,22 @@ patches on the open slopes, lumpy at the scale of a crown) and left to the haze,
 vertices is 29 rings out to 5 km: the first version, with 15, shaded in visible streaks across its large triangles.
 It is scenery only: nothing in the planner, the LiDAR, the thermal model or the detector reads it, and the shadow map
 still covers only the simulated ground.
+
+## Reconstructing the trail from the footage (in progress)
+
+Procedural plants and tiled textures can get near the footage but not be it, so the next step reconstructs the real trail.
+Two tools were downloaded with the user's approval: pycolmap 4.2.1 (PyPI), in its own environment under
+`reference_footage/recon/venv`, and Brush v0.3.0 (`brush-app-aarch64-apple-darwin.tar.xz`, 41.4 MB, from the project's GitHub
+releases; its SHA-256 was checked against the published one before unpacking). Both live under `reference_footage/`, which is
+git-ignored; the scripts that drive them are tracked (`scripts/recon_frames.py`, `scripts/recon_sfm.py`).
+
+First result, IMG_5129 (the 41 s climb up a trail between walls of dry grass): 207 sharp frames chosen by `recon_frames.py`
+(sharpest of each window at about 5 per second), all 207 registered by COLMAP into one model of 91 189 points with a mean
+reprojection error of 0.63 px (a fit well inside what the footage can support). The first run also produced a spurious
+two-image fragment, ignored. The reconstructed camera path folds back on itself near the end, which is not what was
+walked; it has not yet been diagnosed. The model has no real-world scale yet (the path is 21.5 model units; the
+walk is estimated at tens of metres), which will come from the GPS tags and known sizes (the trail's width, a person's
+height) before it is placed in the simulation.
+
+Not done yet: training the splat. The training tool is a downloaded binary, and running it was refused by the environment's
+permission check, so it has not been run; the dataset is prepared in `reference_footage/recon/IMG_5129/dataset`.
