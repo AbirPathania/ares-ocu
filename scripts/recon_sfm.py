@@ -33,6 +33,13 @@ def main(clip: str) -> None:
     print(f"  {time.time() - t0:.0f} s; reconstructing", flush=True)
     models = pycolmap.incremental_mapping(database, images, sparse)
     print(f"  {time.time() - t0:.0f} s; {len(models)} model(s)", flush=True)
+    best = max(models.values(), key=lambda m: m.num_reg_images())
+    # Brush reads the classic layout (cameras, images, points3D as text); pycolmap's own binary layout is newer and differs.
+    dataset = work / "dataset"
+    (dataset / "sparse" / "0").mkdir(parents=True, exist_ok=True)
+    best.write_text(dataset / "sparse" / "0")
+    if not (dataset / "images").exists():
+        (dataset / "images").symlink_to("../images")
     for index, model in models.items():
         print(f"model {index}: {model.num_reg_images()} of {len(list(images.glob('*.jpg')))} images registered, {model.num_points3D()} points, "
               f"mean reprojection error {model.compute_mean_reprojection_error():.2f} px", flush=True)

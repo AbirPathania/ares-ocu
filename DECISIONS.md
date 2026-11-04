@@ -1816,3 +1816,16 @@ height) before it is placed in the simulation.
 
 Not done yet: training the splat. The training tool is a downloaded binary, and running it was refused by the environment's
 permission check, so it has not been run; the dataset is prepared in `reference_footage/recon/IMG_5129/dataset`.
+
+**First splat, and what it showed.** A 1 500-step training of IMG_5129 (155 000 splats, a few minutes) already redraws the
+real frames from their own camera poses with the right trail, shadows, grass walls and sky, only soft. That is the test that
+matters for a reconstruction (`scripts/splat_check.py` draws frame and splats one above the other), and it passed at the first
+attempt. `render/splats.py` is the renderer (GPU, one float texture plus an index buffer, sorted on the CPU), and
+`render/trail.py` finds the route in metres. The camera the clip was filmed on has a field of view of about 90 degrees
+(the COLMAP estimate, f = 643 px at 1280): it is the phone's ultra-wide lens.
+
+**Scale is the weakest number.** A reconstruction has none. Anchored to a camera height of 1.45 m the route comes out 87 m
+long for a 41 s clip, 2.1 m/s, which is not a walk up a hill. Anchored to a walking pace of 1.25 m/s it is 51.5 m long, rises 5.4 m
+(about a 10% grade) and implies the phone was held 0.92 m above the ground, which is low but within what the footage looks like.
+The pace is used; the height is reported as a check. Both are assumptions, good to a quarter either way. One real measurement
+(the trail's width at a spot, or the distance walked from a fitness app) replaces them: `TrailRoute.rescale_to`.
