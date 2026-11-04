@@ -1,6 +1,6 @@
 """Pick the frames of a clip that a 3D reconstruction should use.
 
-    .venv/bin/python scripts/recon_frames.py IMG_5129 [fps_candidates=10] [keep_per_second=4]
+    .venv/bin/python scripts/recon_frames.py IMG_5129 [name=clip] [width=1280] [keep_per_second=5] [start_s=0] [end_s=clip end]
 
 A walk filmed on a phone is hundreds of near-identical frames, some blurred by a step. Reconstruction wants a few
 sharp ones with about three-quarters overlap, so the clip is decoded at `fps_candidates`, tone-mapped from HLG, and the
@@ -25,15 +25,19 @@ import footage_ingest as fi  # noqa: E402
 RECON = fi.FOOTAGE / "recon"
 
 
-def pick_frames(clip_name: str, fps_candidates: int = 10, keep_per_second: int = 4, width: int = 1280) -> list[Path]:
+def pick_frames(clip_name: str, name: str | None = None, width: int = 1280, keep_per_second: int = 5, start_s: float = 0.0,
+                end_s: float | None = None, candidate_fps: int = 10) -> list[Path]:
+    """Sharpest frame in each window of `candidate_fps / keep_per_second` candidates, of the clip's `start_s` to `end_s`."""
     clip = fi.probe(fi.FOOTAGE / f"{clip_name}.MOV")
+    name = name or clip_name
     height = int(round(width * clip.height / clip.width / 2)) * 2
-    out_dir = RECON / clip_name / "images"
+    out_dir = RECON / name / "images"
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = ["ffmpeg", "-v", "error", "-hwaccel", "videotoolbox", "-i", str(clip.path), "-vf", f"fps={fps_candidates},scale={width}:{height}:flags=lanczos",
-           "-pix_fmt", "rgb48le", "-f", "rawvideo", "-"]
+    end_s = clip.duration_s if end_s is None else min(end_s, clip.duration_s)
+    cmd = ["ffmpeg", "-v", "error", "-hwaccel", "videotoolbox", "-ss", f"{start_s:.2f}", "-t", f"{end_s - start_s:.2f}", "-i", str(clip.path),
+           "-vf", f"fps={candidate_fps},scale={width}:{height}:flags=lanczos", "-pix_fmt", "rgb48le", "-f", "rawvideo", "-"]
     size = width * height * 6
-    group = max(fps_candidates // keep_per_second, 1)
+    group = max(candidate_fps // keep_per_second, 1)
     kept: list[Path] = []
     best: tuple[float, np.ndarray] | None = None
     index = 0
@@ -50,7 +54,7 @@ def pick_frames(clip_name: str, fps_candidates: int = 10, keep_per_second: int =
             best = (score, rgb)
         index += 1
         if index % group == 0:
-            path = out_dir / f"{clip_name}_{len(kept):04d}.jpg"
+            path = out_dir / f"{name}_{len(kept):04d}.jpg"
             Image.fromarray(best[1]).save(path, quality=95)
             kept.append(path)
             best = None
@@ -59,8 +63,12 @@ def pick_frames(clip_name: str, fps_candidates: int = 10, keep_per_second: int =
 
 
 if __name__ == "__main__":
-    name = sys.argv[1] if len(sys.argv) > 1 else "IMG_5129"
-    fps = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-    keep = int(sys.argv[3]) if len(sys.argv) > 3 else 4
-    frames = pick_frames(name, fps, keep)
-    print(f"{name}: kept {len(frames)} frames in {frames[0].parent}")
+    args = sys.argv[1:]
+    clip = args[0] if args else "IMG_5129"
+    name = args[1] if len(args) > 1 and args[1] != "-" else None
+    width = int(args[2]) if len(args) > 2 else 1280
+    keep = int(args[3]) if len(args) > 3 else 5
+    start = float(args[4]) if len(args) > 4 else 0.0
+    end = float(args[5]) if len(args) > 5 else None
+    frames = pick_frames(clip, name, width, keep, start, end)
+    print(f"{name or clip}: kept {len(frames)} frames in {frames[0].parent}")

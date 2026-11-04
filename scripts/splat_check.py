@@ -41,7 +41,8 @@ def main() -> None:
         fbo.clear(0.0, 0.0, 0.0, 1.0)
         renderer.render(pose, ks)
         image = np.frombuffer(fbo.read(components=3), dtype=np.uint8).reshape(ks.height, ks.width, 3)[::-1]
-        real = np.array(Image.open(folder / "images" / pose.name).resize((ks.width, ks.height)))
+        shown = folder / "dataset" / "images" / pose.name  # the pictures it was trained on: undistorted, if that was done
+        real = np.array(Image.open(shown if shown.exists() else folder / "images" / pose.name).resize((ks.width, ks.height)))
         errors.append(np.abs(image.astype(int) - real.astype(int)).mean())
         rows.append(np.vstack([real, image]))
     Image.fromarray(np.hstack(rows[:4])).save(folder / "check.jpg", quality=92)
