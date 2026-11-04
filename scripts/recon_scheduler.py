@@ -83,6 +83,22 @@ def final_splat(job: Job) -> Path:
     return RECON / job.name / "out" / f"splat_{job.steps:05d}.ply"
 
 
+def tidy(job: Job) -> None:
+    """Give back the disk a finished stage no longer needs: nine trails would otherwise want more than there is."""
+    import shutil
+
+    folder = RECON / job.name
+    if done(job, "sfm"):
+        for name in ("database.db", "database.db-wal", "database.db-shm"):
+            (folder / name).unlink(missing_ok=True)
+        shutil.rmtree(folder / "sparse", ignore_errors=True)  # the undistorted dataset has its own copy of the model
+        shutil.rmtree(folder / "images", ignore_errors=True)  # and its own, undistorted, pictures
+    if done(job, "trained"):
+        for path in (folder / "out").glob("splat_*.ply"):
+            if path != final_splat(job):
+                path.unlink(missing_ok=True)
+
+
 def settle_markers() -> None:
     """Notice work that was finished before the scheduler existed (or by an earlier run)."""
     for job in JOBS:
@@ -102,6 +118,8 @@ def main() -> None:
     children: dict[str, tuple[Job, subprocess.Popen]] = {}
     while True:
         settle_markers()
+        for job in JOBS:
+            tidy(job)
         # reap
         for key in list(children):
             job, proc = children[key]

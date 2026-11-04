@@ -22,3 +22,13 @@ The mission starts at 07:30 local solar time, when people and animals are warmer
 - Do not step the thermal time of day to midday on camera: bodies are then colder than sunlit ground and are rightly
   not found.
 - The thermal detector reports people and animals only; vehicles come from the visible camera.
+
+## The real trail
+
+`.venv/bin/python -m ocu.main --trail` builds the world on the real trails reconstructed from the footage (assets/footage/trail; see
+DECISIONS.md, "Reconstructing the trail from the footage"): the rover drives a carved path along them and its camera tile shows the real
+place, with the people and animals standing on it. `--trail NAME` (or `a,b,c`) chooses which. Without the flag the world is the
+simulated one, and the TRAIL chip on the rover's tile (next to IR) shows a replay of the first trail in it.
+
+The splats are not in the repository (tens of megabytes each, made from footage that is not either): `scripts/recon_scheduler.py` rebuilds
+them from reference_footage/, in about an hour a trail on an M1.

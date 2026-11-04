@@ -1860,3 +1860,20 @@ about 1 h 40 min on the M1; the cap is set by 9 GB of shared memory.
 
 Not done: the scouts' cameras still draw the simulated world with the corridor cut into it, not the splats; a second trail cannot be
 chained to the first; the thermal model and the detectors have not been tuned for this world.
+
+**Chaining the trails.** One trail is 30 to 45 m of patrol, which is a minute of driving, so `--trail` with no name chains every packed trail
+into one patrol (`TrailWorld`): each leg's deploy point is placed at the end of the one before it, leaving in the direction it arrived,
+except that a leg may turn up to 35 degrees at the join (80 when the path is more than 70 m from the middle of the map, which is steering
+back inside the world; the cut between two real places hides the corner). With legs of about 40 m the patrol stays inside +-80 m however
+many there are (checked to 20 legs, 800 m). Only the patrol part of each leg is carved and driven, from its deploy point 10 m into the
+walk to 9 m short of its end, so the poorly reconstructed head and the filmer's shadow at the tail are never on the path. The carved path
+is one path, with the ground carried across each join at the same height; what changes at a join is only which real place the rover's
+camera is drawn from (a cut, as between shots). The scene keeps the current leg's splat and the next one's on the GPU and reads the next from
+disk when the rover is within 12 m of the end of the current one. Every leg gets buried objects and a person and an animal of its own.
+
+**Reconstructing everything** (`scripts/recon_scheduler.py`): eleven jobs, IMG_5108 in six 40 s segments and the other five clips whole
+(IMG_5117 is someone standing at a viewpoint, with no walk to reconstruct from). Frames, structure from motion (CPU) and training (GPU) are
+separate stages with marker files, so the scheduler can be stopped and started and the CPU stages of the next trail overlap the GPU stage of
+this one. It tidies as it goes (feature database, frames and intermediate checkpoints are deleted once the stage after them has what it needs),
+because nine more trails would otherwise want more disk than there is. Each trail is trained for 9 000 steps with up to 600 000 splats,
+against 14 000 and 800 000 for the first.
