@@ -32,6 +32,7 @@ class GpuRenderWorker(QObject):
         self._stop = False
         self._scene = None
         self.available = False
+        self.trail_length_m = 0.0  # metres of reconstructed trail loaded, 0 for none
         #: True once the scene has been built or has failed to be: until then there
         #: is nothing to draw with, and the interface waits instead of improvising.
         self.resolved = False
@@ -55,6 +56,9 @@ class GpuRenderWorker(QObject):
         from ocu.render.gpu_scene import GpuScene
 
         self._scene = GpuScene.create(self._world)
+        if self._scene is not None:
+            self._scene.load_trail()  # a reconstructed trail, if one has been built (assets/footage/trail)
+            self.trail_length_m = self._scene.trail_length_m()
         self.available = self._scene is not None
         self.resolved = True
         self.ready.emit(self.available)

@@ -10,3 +10,6 @@ demo/two_device/dist/
 
 # Raw reference video (several GB); only what scripts/footage_ingest.py derives from it is tracked
 reference_footage/
+
+# Trained splats of the reconstructed trails (tens of MB each; rebuilt by scripts/footage_* and scripts/recon_*)
+assets/footage/trail/

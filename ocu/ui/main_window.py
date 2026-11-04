@@ -269,6 +269,7 @@ class MainWindow(QMainWindow):
         self.camera_contacts = ContactRegistry()
         self._vision_frame = -1
         self._vision_noted = False
+        self._trail_origin_s = 0.0  # mission time at which the rover tile's trail replay began
         self._reset_thermal_detection()
         # Which way the vapour plume runs. The SAW sensor only reads when
         # the vehicle is on the plume side of a source, so on this ground
@@ -554,6 +555,7 @@ class MainWindow(QMainWindow):
         self.map_view.timeShiftRequested.connect(self._on_time_shift)
         for feed in self.camera_feeds.values():
             feed.irToggled.connect(self._on_feed_ir_toggled)
+            feed.trailToggled.connect(self._on_feed_trail_toggled)
         self.map_view.set_threat_filter(self.threat_filter)
         self.threat_filter_bar.changed.connect(self._on_threat_classes_changed)
         self.threat_panel.threatSelected.connect(self._on_threat_selected)
@@ -1013,6 +1015,10 @@ class MainWindow(QMainWindow):
     def _on_gpu_ready(self, available: bool) -> None:
         for feed in self.camera_feeds.values():
             feed.set_starting(False)
+        # a reconstructed trail, if one is loaded, can be shown in the rover's tile
+        rover_feed = self.camera_feeds.get("rover")
+        if rover_feed is not None:
+            rover_feed.set_trail_available(bool(available and self._gpu_worker is not None and self._gpu_worker.trail_length_m > 0.0))
         if available:
             self._camera_timer.setInterval(GPU_CAMERA_TICK_MS)
         else:
@@ -1026,12 +1032,37 @@ class MainWindow(QMainWindow):
         if feed is not None and live and self._comms.video:
             feed.set_frame(frame)
 
+    #: How fast the rover's tile goes along the reconstructed trail, in metres per second of mission time: a walk, which is what
+    #: the footage is of (see render/trail.py).
+    TRAIL_PACE_MS = 1.25
+
+    def _on_feed_trail_toggled(self, unit_id: str, on: bool) -> None:
+        if on:
+            self._trail_origin_s = self.mission_clock.clock_s
+        self.event_log.log(
+            self.mission_clock.clock_s,
+            "Rover camera shows the reconstructed trail" if on else "Rover camera shows the simulated world",
+            level="info",
+        )
+
+    def _trail_progress_m(self) -> float:
+        """Metres along the trail the replay has got to, going round again at the end."""
+        length = self._gpu_worker.trail_length_m if self._gpu_worker is not None else 0.0
+        if length <= 0.0:
+            return 0.0
+        return ((self.mission_clock.clock_s - self._trail_origin_s) * self.TRAIL_PACE_MS) % length
+
     def _camera_request(self, unit_id: str) -> dict:
         """Everything the renderer needs to draw one unit's view, as plain data."""
         feed = self.camera_feeds[unit_id]
         width, height = feed.render_size()
         pose = self.units[unit_id].pose
         rig = self.camera_rig
+        if unit_id == "rover" and feed.trail_mode:
+            return dict(
+                eye=(0.0, 0.0, 2.0), heading_deg=0.0, pitch_down_deg=0.0, hfov_deg=90.0, width=width, height=height,
+                rover=None, grain=2.2 / 255.0, entities=None, trail_s=self._trail_progress_m(),
+            )
         if unit_id == "rover":
             return dict(
                 eye=(pose.x, pose.y, rig.elevation_at(pose.x, pose.y) + 1.5),
@@ -2439,7 +2470,10 @@ class MainWindow(QMainWindow):
             feed = self.camera_feeds.get(unit_id)
             if feed is not None:
                 feed.set_link_state(unit.link_state)
-                if unit.kind == "rover":
+                if unit.kind == "rover" and feed.trail_mode:
+                    length = self._gpu_worker.trail_length_m if self._gpu_worker is not None else 0.0
+                    feed.set_telemetry(f"{unit.battery_pct:.0f}%  TRAIL {self._trail_progress_m():.0f}/{length:.0f} m")
+                elif unit.kind == "rover":
                     feed.set_telemetry(f"{unit.battery_pct:.0f}%  HDG {unit.pose.heading:.0f}°")
                 else:
                     feed.set_telemetry(

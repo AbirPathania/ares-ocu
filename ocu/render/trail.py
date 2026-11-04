@@ -25,12 +25,15 @@ from pathlib import Path
 import numpy as np
 from scipy import ndimage
 
-from ocu.render.splats import Pose
+from ocu.render.splats import Intrinsics, Pose
 
 #: A reconstruction from video has no scale of its own. Two things anchor it here, and they disagree by about half
 #: again, which is the honest uncertainty: how fast someone walks up a trail (this one), and how high they held the phone
 #: (reported, not used). A real measurement of anything in the scene replaces both: see `rescale_to`.
 WALK_PACE_MS = 1.25
+
+
+TRAIL_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "footage" / "trail"
 
 
 def read_points(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
@@ -95,6 +98,19 @@ class TrailRoute:
     @property
     def length_m(self) -> float:
         return float(self.arc_m[-1])
+
+    def save(self, path: str | Path, k: Intrinsics) -> None:
+        np.savez_compressed(
+            path, centres=self.centres, quats=self.quats, arc_m=self.arc_m, scale=self.scale, up=self.up,
+            ground_height=self.ground_height, camera_height_m=self.camera_height_m, k=np.array([k.width, k.height, k.fx, k.fy, k.cx, k.cy]),
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> tuple["TrailRoute", Intrinsics]:
+        with np.load(path, allow_pickle=False) as d:
+            route = cls(d["centres"], d["quats"], d["arc_m"], float(d["scale"]), d["up"], d["ground_height"], float(d["camera_height_m"]))
+            w, h, fx, fy, cx, cy = d["k"]
+        return route, Intrinsics(int(w), int(h), float(fx), float(fy), float(cx), float(cy))
 
     def rescale_to(self, metres_per_unit: float) -> None:
         """Replace the scale with a measured one, and the distances along the path with it."""

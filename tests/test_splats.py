@@ -117,3 +117,34 @@ def test_a_splat_in_front_of_the_camera_is_drawn_where_the_camera_says_and_behin
     fbo.clear(0.0, 0.0, 0.0, 1.0)
     renderer.render(splats.Pose(np.diag([1.0, 1.0, -1.0]) @ np.diag([-1.0, 1.0, 1.0]), np.zeros(3)), k)  # turned right round: it is behind
     assert np.frombuffer(fbo.read(components=3), dtype=np.uint8).max() == 0
+
+
+def test_the_scene_draws_the_trail_when_asked_and_the_world_when_not(tmp_path, monkeypatch):
+    pytest.importorskip("moderngl")
+    from ocu.core.terrain import TerrainWorld
+    from ocu.render import gpu_scene
+
+    # a short straight trail: a line of reddish splats on a floor, and the cameras that walked it
+    rng = np.random.default_rng(2)
+    rows = [one_splat(x=float(x), y=0.3, z=float(z), f_dc_0=1.2, f_dc_1=0.2, f_dc_2=-0.8, scale_0=np.log(0.08), scale_1=np.log(0.08), scale_2=np.log(0.08))
+            for x, z in zip(rng.uniform(0, 4, 300), rng.uniform(-0.6, 0.6, 300))]
+    write_ply(tmp_path / "t.ply", rows)
+    rot = np.array([[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    poses = [splats.Pose(rot, -rot @ np.array([i * 0.1, 0.0, 0.0])) for i in range(31)]
+    points = np.stack([np.linspace(0, 3, 400), np.full(400, 0.3), rng.uniform(-0.3, 0.3, 400)], axis=1)
+    route, _ = trail.build_route(poses, points, np.tile([200.0, 165.0, 125.0], (400, 1)), seconds_per_frame=0.1)
+    route.save(tmp_path / "t.npz", splats.Intrinsics(1280, 720, 640.0, 640.0, 640.0, 360.0))
+    monkeypatch.setattr(trail, "TRAIL_DIR", tmp_path)
+
+    scene = gpu_scene.GpuScene.create(TerrainWorld.blank(half_extent_m=60.0))
+    if scene is None:
+        pytest.skip("no GL context")
+    assert scene.trail is None and scene.load_trail()
+    assert scene.trail_length_m() == pytest.approx(route.length_m)
+    args = dict(eye=(0.0, 0.0, 3.0), heading_deg=0.0, pitch_down_deg=5.0, hfov_deg=90.0, width=240, height=135)
+    world = scene.render(**args)
+    on_trail = scene.render(**args, trail_s=1.0)
+    assert np.abs(world.astype(int) - on_trail.astype(int)).mean() > 8.0, "the trail replaces the world's terrain and plants"
+    red = on_trail[..., 0].astype(int) - on_trail[..., 2].astype(int)
+    assert (red > 40).sum() > 300, "the splats are in the picture"
+    assert scene.render(**args).shape == world.shape and np.abs(scene.render(**args).astype(int) - world.astype(int)).mean() < 3.0, "the world still renders after a trail frame"

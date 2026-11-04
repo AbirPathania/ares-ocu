@@ -29,11 +29,14 @@ LINK_COLORS = {
 
 IR_CHIP = QRectF(0, 0, 26, 14)  # size of the visible / infrared toggle in a tile's top right corner
 IR_COLOR = QColor("#F0A23C")
+TRAIL_CHIP = QRectF(0, 0, 40, 14)  # the toggle that shows the reconstructed trail, left of the IR chip
+TRAIL_COLOR = QColor("#5CC9A7")
 GROUND_BIAS = 0.8  # how far toward the bottom of a thermal frame the crop sits when the tile is wider than the frame
 
 
 class SimulatedCameraFeed(QWidget):
     irToggled = Signal(str, bool)  # unit id, whether the tile now shows infrared
+    trailToggled = Signal(str, bool)  # unit id, whether the tile now shows the reconstructed trail
 
     def __init__(self, unit_id: str, label: str, parent=None) -> None:
         super().__init__(parent)
@@ -53,6 +56,8 @@ class SimulatedCameraFeed(QWidget):
         self._ir_frame = False  # and the frame held is a thermal one
         self._ir_scale: tuple[float, float, str] | None = None  # black and white levels (degrees C) and the palette
         self._ir_note = ""
+        self._trail_available = False  # a reconstructed trail is loaded, so the chip is offered
+        self._trail = False  # the tile is showing it
 
         # A 16:9 feed wants height, and the left column has it: the roster
         # below is a fixed stack of four cards, so whatever is left belongs
@@ -114,6 +119,26 @@ class SimulatedCameraFeed(QWidget):
             self._ir_scale = None
         self.update()
 
+    @property
+    def trail_mode(self) -> bool:
+        return self._trail
+
+    def set_trail_available(self, available: bool) -> None:
+        self._trail_available = available
+        if not available:
+            self._trail = False
+        self.update()
+
+    def set_trail(self, on: bool) -> None:
+        if on != self._trail:
+            self._trail = on
+            self._frame = None  # the other kind of picture is not held while the right one is being drawn
+            self.update()
+
+    def _trail_chip_rect(self) -> QRectF:
+        ir = self._chip_rect()
+        return QRectF(ir.left() - TRAIL_CHIP.width() - 4, ir.top(), TRAIL_CHIP.width(), TRAIL_CHIP.height())
+
     def set_ir_scale(self, lo: float, hi: float, palette: str, note: str = "") -> None:
         self._ir_scale = (lo, hi, palette)
         self._ir_note = note
@@ -122,7 +147,19 @@ class SimulatedCameraFeed(QWidget):
         return QRectF(self.width() - IR_CHIP.width() - 5, 3, IR_CHIP.width(), IR_CHIP.height())
 
     def mousePressEvent(self, event) -> None:
+        if self._active and not self._emcon and self._trail_available and self._trail_chip_rect().contains(event.position()):
+            if self._ir:  # one picture at a time: infrared gives way
+                self._ir = False
+                self._ir_frame = False
+                self._ir_scale = None
+                self.irToggled.emit(self.unit_id, False)
+            self.set_trail(not self._trail)
+            self.trailToggled.emit(self.unit_id, self._trail)
+            return
         if self._active and not self._emcon and self._chip_rect().contains(event.position()):
+            if self._trail:
+                self.set_trail(False)
+                self.trailToggled.emit(self.unit_id, False)
             self._ir = not self._ir
             self._ir_frame = False
             self._frame = None
@@ -289,6 +326,7 @@ class SimulatedCameraFeed(QWidget):
         painter.drawText(telemetry_rect, Qt.AlignLeft, text)
 
         self._draw_ir_chip(painter)
+        self._draw_trail_chip(painter)
         painter.end()
 
     def _draw_ir_chip(self, painter: QPainter) -> None:
@@ -300,6 +338,18 @@ class SimulatedCameraFeed(QWidget):
         painter.setFont(QFont("DIN Condensed", 7 + 2, QFont.Bold))
         painter.setPen(QPen(IR_COLOR if self._ir else QColor("#8796A4")))
         painter.drawText(chip, Qt.AlignCenter, "IR")
+
+    def _draw_trail_chip(self, painter: QPainter) -> None:
+        """The toggle for the reconstructed trail: offered only when one is loaded, lit when the tile shows it."""
+        if not self._trail_available:
+            return
+        chip = self._trail_chip_rect()
+        painter.setBrush(QColor(92, 201, 167, 70) if self._trail else QColor(8, 12, 16, 150))
+        painter.setPen(QPen(TRAIL_COLOR if self._trail else QColor("#4F5B68"), 1))
+        painter.drawRoundedRect(chip, 3, 3)
+        painter.setFont(QFont("DIN Condensed", 7 + 2, QFont.Bold))
+        painter.setPen(QPen(TRAIL_COLOR if self._trail else QColor("#8796A4")))
+        painter.drawText(chip, Qt.AlignCenter, "TRAIL")
 
     def _draw_ir_scale(self, painter: QPainter, shown: QRectF) -> None:
         """A thin colour scale down the right of the thermal frame, with its two levels in degrees C."""

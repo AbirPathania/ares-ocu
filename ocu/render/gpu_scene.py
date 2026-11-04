@@ -19,7 +19,7 @@ import time
 import numpy as np
 
 from ocu.core.terrain import Terrain, TerrainWorld
-from ocu.render import assets, figures, meshes, palette, shaders
+from ocu.render import assets, figures, meshes, palette, shaders, splats, trail
 
 SHADOW_SIZE = 4096
 MSAA_SAMPLES = 4
@@ -91,6 +91,7 @@ class GpuScene:
         self.mgl = moderngl
         self.ctx = moderngl.create_standalone_context()
         self._world = world
+        self.trail = None  # a reconstructed trail, once load_trail has found one
         self._t0 = time.monotonic()
         self._cell = world.cell_size_m
         self._extent = world._extent
@@ -286,6 +287,51 @@ class GpuScene:
             ibo,
         )
         return vao, shadow
+
+    def load_trail(self, name: str | None = None) -> bool:
+        """Load a reconstructed trail (a splat and its route) from assets/footage/trail, if there is one. True if loaded.
+
+        Must run on the thread that owns the GL context."""
+        folder = trail.TRAIL_DIR
+        candidates = [folder / f"{name}.ply"] if name else sorted(folder.glob("*.ply"))
+        for ply in candidates:
+            route_file = ply.with_suffix(".npz")
+            if not (ply.exists() and route_file.exists()):
+                continue
+            try:
+                route, k = trail.TrailRoute.load(route_file)
+                renderer = splats.SplatRenderer(self.ctx, splats.load_ply(ply))
+            except (OSError, ValueError, KeyError):
+                continue
+            self.trail = {"name": ply.stem, "route": route, "intrinsics": k, "renderer": renderer}
+            return True
+        return False
+
+    def trail_length_m(self) -> float:
+        return self.trail["route"].length_m if self.trail else 0.0
+
+    def _trail_view(self, s_m: float, lateral_m: float, yaw_deg: float, height_m: float | None, width: int, height: int):
+        """The splat camera for a point on the route, and the heading and pitch to draw the sky with.
+
+        The sky is drawn by the same code as the rest of the world, which has z up, so the camera's direction is turned from the
+        reconstruction's frame into a z-up one first. Roll is ignored: a phone held by a walker is nearly level."""
+        t = self.trail
+        route, k = t["route"], t["intrinsics"]
+        pose = route.pose_at(s_m, lateral_m, yaw_deg, height_m)
+        up = route.up / np.linalg.norm(route.up)
+        axis = np.cross(up, [0.0, 0.0, 1.0])
+        sin, cos = float(np.linalg.norm(axis)), float(up @ [0.0, 0.0, 1.0])
+        if sin < 1e-8:
+            turn = np.eye(3) if cos > 0 else np.diag([1.0, -1.0, -1.0])
+        else:
+            a = axis / sin
+            ax = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+            turn = np.eye(3) + sin * ax + (1 - cos) * (ax @ ax)  # Rodrigues: takes `up` to +z
+        f = turn @ pose.rotation[2]
+        heading = math.degrees(math.atan2(f[0], f[1])) % 360.0
+        pitch_down = math.degrees(-math.asin(float(np.clip(f[2], -1.0, 1.0))))
+        fx = k.fx * width / k.width
+        return pose, splats.Intrinsics(width, height, fx, fx, width / 2.0, height / 2.0), heading, pitch_down
 
     def _build_templates(self) -> None:
         self._template_meshes = {
@@ -786,10 +832,23 @@ class GpuScene:
         rover: tuple[float, float, float] | None = None,
         grain: float = 0.0,
         entities: list[tuple[str, float, float, float]] | None = None,
+        trail_s: float | None = None,
+        trail_lateral_m: float = 0.0,
+        trail_yaw_deg: float = 0.0,
+        trail_height_m: float | None = None,
     ) -> np.ndarray:
-        """One frame, (height, width, 3) uint8. `eye` is absolute (x, y, z)."""
+        """One frame, (height, width, 3) uint8. `eye` is absolute (x, y, z).
+
+        With `trail_s` (metres along the reconstructed trail) and a trail loaded, the picture is the real place, drawn
+        from the splats, over the sky: `eye`, the heading and the pitch are then not used, and the terrain, plants and figures of
+        the simulated world are not drawn."""
         ctx = self.ctx
         width, height = max(int(width), 8), max(int(height), 8)
+        view_pose = None
+        if trail_s is not None and self.trail:
+            view_pose, view_k, heading_deg, pitch_down_deg = self._trail_view(trail_s, trail_lateral_m, trail_yaw_deg, trail_height_m, width, height)
+            eye = (0.0, 0.0, 2.0)
+            hfov_deg = math.degrees(2.0 * math.atan(width / (2.0 * view_k.fx)))
         h, pitch = math.radians(heading_deg), math.radians(pitch_down_deg)
         forward = np.array([math.sin(h) * math.cos(pitch), math.cos(h) * math.cos(pitch), -math.sin(pitch)])
         up = (0.0, 0.0, 1.0) if pitch_down_deg < 80.0 else (math.sin(h), math.cos(h), 0.0)
@@ -818,6 +877,14 @@ class GpuScene:
             self._set(self.p_sky, name, value)
         self._set(self.p_sky, "u_inv_vp", np.linalg.inv(vp))
         ctx.vertex_array(self.p_sky, []).render(self.mgl.TRIANGLES, vertices=3)
+
+        if view_pose is not None:
+            self.trail["renderer"].render(view_pose, view_k)
+            ctx.disable(self.mgl.BLEND)
+            ctx.copy_framebuffer(resolve, msaa)
+            resolve.use()
+            raw = resolve.read(components=3, alignment=1)
+            return np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)[::-1].copy()
 
         ctx.enable(self.mgl.DEPTH_TEST)
         ctx.disable(self.mgl.CULL_FACE)
