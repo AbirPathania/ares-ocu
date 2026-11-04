@@ -836,19 +836,23 @@ class GpuScene:
         trail_lateral_m: float = 0.0,
         trail_yaw_deg: float = 0.0,
         trail_height_m: float | None = None,
+        trail_world_view: bool = False,
     ) -> np.ndarray:
         """One frame, (height, width, 3) uint8. `eye` is absolute (x, y, z).
 
         With `trail_s` (metres along the reconstructed trail) and a trail loaded, the picture is the real place, drawn
-        from the splats, over the sky: `eye`, the heading and the pitch are then not used, and the terrain, plants and figures of
-        the simulated world are not drawn."""
+        from the splats, over the sky, and the simulated world's terrain and plants are not drawn. By default `eye`, the
+        heading and the pitch are then ignored (a replay of the walk, with no figures). With `trail_world_view` they are the
+        camera's place in the simulated world, which the caller has worked out to be where the trail camera is, and the
+        figures standing in that world are drawn, with depth, so that the splats in front of one hide it."""
         ctx = self.ctx
         width, height = max(int(width), 8), max(int(height), 8)
         view_pose = None
         if trail_s is not None and self.trail:
-            view_pose, view_k, heading_deg, pitch_down_deg = self._trail_view(trail_s, trail_lateral_m, trail_yaw_deg, trail_height_m, width, height)
-            eye = (0.0, 0.0, 2.0)
+            view_pose, view_k, inferred_heading, inferred_pitch = self._trail_view(trail_s, trail_lateral_m, trail_yaw_deg, trail_height_m, width, height)
             hfov_deg = math.degrees(2.0 * math.atan(width / (2.0 * view_k.fx)))
+            if not trail_world_view:
+                eye, heading_deg, pitch_down_deg, entities = (0.0, 0.0, 2.0), inferred_heading, inferred_pitch, None
         h, pitch = math.radians(heading_deg), math.radians(pitch_down_deg)
         forward = np.array([math.sin(h) * math.cos(pitch), math.cos(h) * math.cos(pitch), -math.sin(pitch)])
         up = (0.0, 0.0, 1.0) if pitch_down_deg < 80.0 else (math.sin(h), math.cos(h), 0.0)
@@ -878,14 +882,6 @@ class GpuScene:
         self._set(self.p_sky, "u_inv_vp", np.linalg.inv(vp))
         ctx.vertex_array(self.p_sky, []).render(self.mgl.TRIANGLES, vertices=3)
 
-        if view_pose is not None:
-            self.trail["renderer"].render(view_pose, view_k)
-            ctx.disable(self.mgl.BLEND)
-            ctx.copy_framebuffer(resolve, msaa)
-            resolve.use()
-            raw = resolve.read(components=3, alignment=1)
-            return np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)[::-1].copy()
-
         ctx.enable(self.mgl.DEPTH_TEST)
         ctx.disable(self.mgl.CULL_FACE)
         self.shadow_tex.use(location=0)
@@ -904,13 +900,14 @@ class GpuScene:
             self.ground_normal.use(location=2)
             self._set(self.p_terrain, "u_g_albedo", 1)
             self._set(self.p_terrain, "u_g_normal", 2)
-        self.terrain_coarse_vao.render()
+        if view_pose is None:
+            self.terrain_coarse_vao.render()
 
         # Cull instances to what could be in view.
         diagonal = math.degrees(math.atan(math.hypot(math.tan(math.radians(hfov_deg / 2)), math.tan(math.radians(vfov / 2)))))
         cone = math.cos(math.radians(min(diagonal + HALF_FOV_MARGIN_DEG, 179.0)))
         self._set(self.p_inst, "u_kind", 0)
-        for key, group in self._groups.items():
+        for key, group in ({} if view_pose is not None else self._groups).items():
             kind = group["kind"]
             rows = group["rows"]
             reach = DRAW_DISTANCE[kind]
@@ -935,9 +932,10 @@ class GpuScene:
             self._set(self.p_inst, "u_kind", group["shader_kind"])
             group["vao"].render(instances=count)
 
-        self._draw_pbr(eye_v, forward, cone)
+        if view_pose is None:
+            self._draw_pbr(eye_v, forward, cone)
 
-        if rover is not None:
+        if rover is not None and view_pose is None:
             rx, ry, rheading = rover
             gz = float(self._ground(np.array([rx]), np.array([ry]))[0])
             row = np.array([[rx, ry, gz, -math.radians(rheading), 1, 1, 1, 0, 1, 1, 1, 0]], dtype=np.float32)
@@ -947,6 +945,13 @@ class GpuScene:
 
         for e in entities or ():
             self._draw_entity(e, shadow=False)
+
+        if view_pose is not None:
+            # the real place, over the sky and under nothing; against the figures' depth when there are any
+            scale = float(self.trail["route"].scale)
+            self.trail["renderer"].render(view_pose, view_k, depth=(scale, NEAR_M, FAR_M) if trail_world_view else None)
+            ctx.disable(self.mgl.BLEND)
+            ctx.enable(self.mgl.DEPTH_TEST)
 
         ctx.copy_framebuffer(resolve, msaa)
         resolve.use()

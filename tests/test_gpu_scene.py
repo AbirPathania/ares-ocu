@@ -40,10 +40,10 @@ def test_a_frame_is_a_picture_not_a_flat_colour(scene):
     assert not np.allclose(top, bottom, atol=10.0)
 
 
-def test_the_same_view_twice_is_the_same_picture(scene):
+def test_the_same_view_twice_is_the_same_picture(scene, monkeypatch):
+    monkeypatch.setattr(gpu_scene.time, "monotonic", lambda: 123.0)  # foliage sways with the clock; hold it still
     a, b = view(scene, grain=0.0), view(scene, grain=0.0)
-    # Foliage sways with the clock, so allow for that and nothing more.
-    assert np.mean(np.abs(a.astype(int) - b.astype(int))) < 2.0
+    assert np.mean(np.abs(a.astype(int) - b.astype(int))) < 0.5
 
 
 def test_looking_the_other_way_shows_something_else(scene):

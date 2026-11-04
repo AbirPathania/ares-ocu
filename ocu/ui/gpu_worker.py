@@ -24,9 +24,10 @@ class GpuRenderWorker(QObject):
     frameReady = Signal(str, object)  # unit id, (height, width, 3) uint8
     ready = Signal(bool)  # True once the scene is built, False if there is no GPU
 
-    def __init__(self, world: TerrainWorld, parent=None) -> None:
+    def __init__(self, world: TerrainWorld, parent=None, trail_name: str | None = None) -> None:
         super().__init__(parent)
         self._world = world
+        self._trail_name = trail_name
         self._pending: dict[str, dict] = {}
         self._wake = threading.Condition()
         self._stop = False
@@ -57,7 +58,7 @@ class GpuRenderWorker(QObject):
 
         self._scene = GpuScene.create(self._world)
         if self._scene is not None:
-            self._scene.load_trail()  # a reconstructed trail, if one has been built (assets/footage/trail)
+            self._scene.load_trail(self._trail_name)  # a reconstructed trail, if one has been built (assets/footage/trail)
             self.trail_length_m = self._scene.trail_length_m()
         self.available = self._scene is not None
         self.resolved = True

@@ -1837,3 +1837,26 @@ streak into soft blades, because grass is thousands of fine strands and 500 000 
 this kind use millions); the first 10 m of the walk, seen by few frames, is poor and has floaters near the camera when the
 view is lowered to a mast's height. The replay in the rover's tile (the TRAIL chip) therefore starts at 10 m. Training took
 about 1 h 40 min on the M1; the cap is set by 9 GB of shared memory.
+
+## A world built round the trail (groundwork)
+
+`python -m ocu.main --trail [NAME]` (or `OCU_TRAIL=NAME`) builds the world on a reconstructed trail from `assets/footage/trail`
+(`core/trail_scenario.py`). Without the flag nothing changes. With it:
+
+  * the real centreline is put into the world with the deploy point on it, 10 m into the walk (the first stretch is the poorest
+    reconstructed), running north; the world is right-handed with z up, east being to the right of travel;
+  * the terrain is carved to it: elevation follows the walk's own ground along the line (blending back to the procedural
+    ground over 7 m), a 3.2 m strip becomes TRACK, 2.5 m of verge either side becomes SCRUB, and the boulders, trees,
+    bushes, pebbles and holes that were there are removed so that LiDAR and planner meet what the camera shows;
+  * the sweep is one lane along the line (waypoints every 3 m). `TrailSweep.at` places the scenario's buried objects and people
+    relative to the line, with a lane worth 0.7 m across and an offset worth half, so the code written for four straight lanes four
+    metres apart lays out a footpath instead; vehicles are left out of a footpath's content, and the far sites are not built;
+  * the rover's tile is drawn from the real place: where the rover is across and along the trail, and which way it faces, select the
+    camera on the walk (`camera_state`). Within 1.0 m of the line and 30 degrees of the walk's direction it is drawn from the
+    splats; outside that, which the walk never saw, the simulated world is drawn as everywhere else.
+  * figures (people, animals) are drawn first, with depth, and the splats are tested against it (`SplatRenderer.render(depth=...)`), so a
+    clump of grass in front of someone hides them, and they stand on the carved ground. The sky and the shadows of the figures
+    are the simulation's.
+
+Not done: the scouts' cameras still draw the simulated world with the corridor cut into it, not the splats; a second trail cannot be
+chained to the first; the thermal model and the detectors have not been tuned for this world.

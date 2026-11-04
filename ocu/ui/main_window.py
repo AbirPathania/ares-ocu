@@ -208,7 +208,10 @@ def _chip(label: str, value: str, color: str) -> str:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, trail: str | bool | None = None) -> None:
+        """`trail` builds the world round a reconstructed trail (a name from assets/footage/trail, or True for the first
+        one): the ground is carved to it, the sweep follows it, and the rover's camera is drawn from the real place. If
+        there is none to be found the ordinary world is built."""
         super().__init__()
         self.setWindowTitle("ARES Operator Control Unit — Patroclus Systems")
         self.resize(1500, 900)
@@ -231,20 +234,33 @@ class MainWindow(QMainWindow):
         self._comms = profile_for(STANDARD)
         # Ground truth, and separately what the rover has actually seen of it.
         self.terrain = TerrainWorld()
-        # The clearance task: a serpentine lane sweep away from the deploy
-        # point, laid out on the clearest axis available. The rover chooses
-        # it after its first scan (see _plan_sweep_from_first_scan); this is
-        # that same choice made ahead of time so the scenario can be set up
-        # consistently with it. See core/sweep.py.
-        self.sweep = sweep_from_first_scan(self.terrain)
-        # Scenario content, cut before anything reads the ground: washouts on
-        # the lanes themselves, past the range a negative obstacle can be
-        # resolved at, so the rover meets them as it drives rather than
-        # planning around them from the start. See core/sweep.py.
-        cut_washouts_on_lanes(self.terrain, self.sweep)
+        #: The reconstructed trail the world is built round, if there is one (core/trail_scenario.py).
+        self.trail = None
+        if trail:
+            from ocu.core.trail_scenario import TrailScenario
+
+            self.trail = TrailScenario.load(trail if isinstance(trail, str) else None)
+        if self.trail is not None:
+            # The ground is cut to the real trail before anything reads it, the sweep runs along it, and the content
+            # (buried objects, people, animals) is laid out along it. See core/trail_scenario.py.
+            self.trail.carve(self.terrain)
+            self.sweep = self.trail.sweep()
+        else:
+            # The clearance task: a serpentine lane sweep away from the deploy
+            # point, laid out on the clearest axis available. The rover chooses
+            # it after its first scan (see _plan_sweep_from_first_scan); this is
+            # that same choice made ahead of time so the scenario can be set up
+            # consistently with it. See core/sweep.py.
+            self.sweep = sweep_from_first_scan(self.terrain)
+            # Scenario content, cut before anything reads the ground: washouts on
+            # the lanes themselves, past the range a negative obstacle can be
+            # resolved at, so the rover meets them as it drives rather than
+            # planning around them from the start. See core/sweep.py.
+            cut_washouts_on_lanes(self.terrain, self.sweep)
         # What is actually buried out there, placed relative to the lanes,
         # and what the suite has accumulated about each object swept over.
-        self.target_field = default_field(sweep=self.sweep, world=self.terrain)
+        scenario_world = None if self.trail is not None else self.terrain  # the far sites are for the open world
+        self.target_field = default_field(sweep=self.sweep, world=scenario_world)
         self._target_evidence: dict[int, dict[str, float]] = {}
         #: What the scouts have seen of each object, kept apart from the rover's
         #: evidence: they are different replicas and cannot share it over a cut link.
@@ -257,7 +273,10 @@ class MainWindow(QMainWindow):
         # remembered so that a later, better reading updates that report instead of adding another.
         # Placed on ground they can stand on, parked ones stamped into the world so the LiDAR hits them and the
         # rover plans round them, walking ones tracked separately (core/dynamic_obstacles.py).
-        self.surface_entities = settle_entities(self.terrain, default_entities(sweep=self.sweep, world=self.terrain))
+        entities = default_entities(sweep=self.sweep, world=scenario_world)
+        if self.trail is not None:
+            entities = [e for e in entities if e.kind != "vehicle"]  # nothing drives a footpath: people and animals only
+        self.surface_entities = settle_entities(self.terrain, entities)
         stamp_static_entities(self.terrain, self.surface_entities)
         self.dynamic_obstacles = DynamicObstacles()
         #: Seconds each walking entity has spent stopped for the rover; its pose is read at mission time minus this.
@@ -1004,7 +1023,7 @@ class MainWindow(QMainWindow):
             return True
         from ocu.ui.gpu_worker import GpuRenderWorker
 
-        self._gpu_worker = GpuRenderWorker(self.terrain, self)
+        self._gpu_worker = GpuRenderWorker(self.terrain, self, trail_name=self.trail.name if self.trail is not None else None)
         self._gpu_worker.frameReady.connect(self._on_gpu_frame)
         self._gpu_worker.ready.connect(self._on_gpu_ready)
         for feed in self.camera_feeds.values():
@@ -1018,7 +1037,10 @@ class MainWindow(QMainWindow):
         # a reconstructed trail, if one is loaded, can be shown in the rover's tile
         rover_feed = self.camera_feeds.get("rover")
         if rover_feed is not None:
-            rover_feed.set_trail_available(bool(available and self._gpu_worker is not None and self._gpu_worker.trail_length_m > 0.0))
+            has_trail = bool(available and self._gpu_worker is not None and self._gpu_worker.trail_length_m > 0.0)
+            rover_feed.set_trail_available(has_trail)
+            if has_trail and self.trail is not None:
+                rover_feed.set_trail(True)  # a world built on the trail shows it from the start
         if available:
             self._camera_timer.setInterval(GPU_CAMERA_TICK_MS)
         else:
@@ -1061,7 +1083,17 @@ class MainWindow(QMainWindow):
         width, height = feed.render_size()
         pose = self.units[unit_id].pose
         rig = self.camera_rig
-        if unit_id == "rover" and feed.trail_mode:
+        if unit_id == "rover" and feed.trail_mode and self.trail is not None:
+            state = self.trail.camera_state(pose.x, pose.y, pose.heading)
+            if state.on_trail:
+                cam = self.trail.camera(state)
+                return dict(
+                    eye=cam.eye, heading_deg=cam.heading_deg, pitch_down_deg=cam.pitch_down_deg, hfov_deg=90.0, width=width, height=height,
+                    rover=None, grain=2.2 / 255.0, entities=self._entities_to_draw(),
+                    trail_s=state.s_m, trail_lateral_m=state.lateral_m, trail_yaw_deg=-state.yaw_deg, trail_world_view=True,
+                )
+            # off the part of the trail that was walked, or facing a way it was not: the simulated world, as everywhere else
+        elif unit_id == "rover" and feed.trail_mode:
             return dict(
                 eye=(0.0, 0.0, 2.0), heading_deg=0.0, pitch_down_deg=0.0, hfov_deg=90.0, width=width, height=height,
                 rover=None, grain=2.2 / 255.0, entities=None, trail_s=self._trail_progress_m(),
@@ -1122,7 +1154,8 @@ class MainWindow(QMainWindow):
         rover = self.units["rover"].pose
         self._last_scan_s = -1e9
         self._tick_lidar()
-        self.sweep = plan_lane_sweep(self.perception, (rover.x, rover.y))
+        if self.trail is None:  # on a trail the sweep is the trail: there is nothing to choose
+            self.sweep = plan_lane_sweep(self.perception, (rover.x, rover.y))
         self._mission_waypoints = self.sweep.points
         self.event_log.log(
             self.mission_clock.clock_s,

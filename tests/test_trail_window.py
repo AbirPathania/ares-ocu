@@ -56,3 +56,63 @@ def test_without_the_chip_the_rover_asks_for_the_simulated_world(app):
     window = MainWindow()
     assert "trail_s" not in window._camera_request("rover")
     window.close()
+
+
+# --- a world built on a trail --------------------------------------------------------------------------------------------
+
+@pytest.fixture
+def synthetic_trail(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_trail_scenario import make_route
+
+    from ocu.render import trail
+
+    route, k = make_route(length_m=80.0)
+    route.save(tmp_path / "synthetic.npz", k)
+    monkeypatch.setattr(trail, "TRAIL_DIR", tmp_path)
+    return "synthetic"
+
+
+def test_a_world_built_on_a_trail_has_its_ground_sweep_and_content_along_it(app, synthetic_trail):
+    from ocu.core.terrain import Terrain
+
+    window = MainWindow(trail=synthetic_trail)
+    trail = window.trail
+    assert trail is not None and window.sweep.points and window.sweep.points[0][2] == "LANE 1"
+    x, y = trail.point(0.0)
+    assert window.terrain.classify(x, y) == Terrain.TRACK, "the deploy point is on the carved track"
+    for t in window.target_field.targets[:5]:
+        assert trail._tree.query([t.x, t.y])[0] < 3.5, "buried objects are laid along the trail, not across four straight lanes"
+    assert not any(abs(e.path[0][0]) > 150 for e in window.surface_entities)
+    window._plan_sweep_from_first_scan()
+    assert window.sweep.points[0][2] == "LANE 1" and window._mission_waypoints is window.sweep.points, "the first scan does not replace the trail's sweep"
+    window.close()
+
+
+def test_the_rover_tile_on_a_trail_draws_from_the_real_place_where_it_was_walked_and_the_world_elsewhere(app, synthetic_trail):
+    window = MainWindow(trail=synthetic_trail)
+    feed = window.camera_feeds["rover"]
+    feed.resize(320, 180)
+    feed.set_trail_available(True)
+    feed.set_trail(True)
+    rover = window.units["rover"].pose
+    rover.x, rover.y = window.trail.point(5.0)
+    rover.heading = window.trail.bearing_deg
+    request = window._camera_request("rover")
+    assert request.get("trail_world_view") is True and request["entities"] is not None
+    assert request["trail_s"] == pytest.approx(window.trail.start_m + 5.0, abs=1.0)
+    assert abs(request["eye"][0] - rover.x) < 1.0 and abs(request["eye"][1] - rover.y) < 1.0, "the splat camera is where the rover is"
+    rover.heading = (window.trail.bearing_deg + 120.0) % 360.0  # turned away from the walk
+    assert "trail_s" not in window._camera_request("rover"), "facing a way the walk never looked: the simulated world"
+    window.close()
+
+
+def test_the_command_line_asks_for_a_trail():
+    from ocu.main import trail_argument
+
+    assert trail_argument(["ocu"]) is None
+    assert trail_argument(["ocu", "--trail"]) is True
+    assert trail_argument(["ocu", "--trail", "IMG_5129"]) == "IMG_5129"

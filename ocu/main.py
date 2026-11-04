@@ -39,11 +39,21 @@ def opening_size(app: QApplication):
     )
 
 
+def trail_argument(argv: list[str]) -> str | bool | None:
+    """`--trail` builds the world round the first reconstructed trail there is; `--trail NAME` round that one. Also OCU_TRAIL."""
+    import os
+
+    if "--trail" in argv:
+        i = argv.index("--trail")
+        return argv[i + 1] if i + 1 < len(argv) and not argv[i + 1].startswith("-") else True
+    return os.environ.get("OCU_TRAIL") or None
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE_PATH.read_text())
 
-    window = MainWindow()
+    window = MainWindow(trail=trail_argument(sys.argv))
     # The feeds are drawn as 3D on the GPU where there is one; without it the
     # numpy renderer is used and the application is none the worse for it.
     window.enable_gpu_cameras()

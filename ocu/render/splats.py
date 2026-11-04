@@ -176,6 +176,7 @@ uniform vec3 u_eye;           // camera position in the world
 uniform vec4 u_k;             // fx, fy, cx, cy in pixels
 uniform vec2 u_size;          // width, height in pixels
 uniform float u_gain;
+uniform vec3 u_depth;         // metres per model unit, near, far: for depth against other things drawn (0 turns it off)
 in vec2 in_corner;
 in uint in_index;
 out vec2 v_corner;
@@ -211,7 +212,13 @@ void main() {
     vec2 px = vec2(u_k.x * c.x * iz + u_k.z, u_k.y * c.y * iz + u_k.w);
     vec2 pos_px = px + in_corner.x * major + in_corner.y * minor;
     vec2 ndc = vec2(2.0 * pos_px.x / u_size.x - 1.0, 1.0 - 2.0 * pos_px.y / u_size.y);
-    gl_Position = vec4(ndc, 0.0, 1.0);
+    float zdepth = 0.0;
+    if (u_depth.x > 0.0) {
+        // the same depth a perspective projection with these planes gives, so a splat can be hidden by (or hide) a figure
+        float d = max(c.z * u_depth.x, u_depth.y);
+        zdepth = (u_depth.z + u_depth.y) / (u_depth.z - u_depth.y) - 2.0 * u_depth.z * u_depth.y / ((u_depth.z - u_depth.y) * d);
+    }
+    gl_Position = vec4(ndc, clamp(zdepth, -1.0, 1.0), 1.0);
     v_corner = in_corner * 3.0;
 
     // colour from this direction: spherical harmonics, degree 0 to 2
@@ -286,8 +293,12 @@ class SplatRenderer:
         order = visible[np.argsort(-depth[visible], kind="stable")]
         return order.astype(np.uint32)
 
-    def render(self, pose: Pose, k: Intrinsics, gain: float = 1.0) -> None:
-        """Draw into the current framebuffer, blending over what is there (clear it first, or draw the sky first)."""
+    def render(self, pose: Pose, k: Intrinsics, gain: float = 1.0, depth: tuple[float, float, float] | None = None) -> None:
+        """Draw into the current framebuffer, blending over what is there (clear it first, or draw the sky first).
+
+        `depth` is (metres per model unit, near, far) of the projection the rest of the picture was drawn with: with it, the
+        splats are tested against what is already in the depth buffer (a figure drawn first hides the splats behind it, and
+        the splats in front hide it); without it they are simply laid over."""
         order = self.sort_for(pose)
         self._last_count = len(order)
         if not len(order):
@@ -302,8 +313,15 @@ class SplatRenderer:
         p["u_k"].value = (k.fx, k.fy, k.cx, k.cy)
         p["u_size"].value = (float(k.width), float(k.height))
         p["u_gain"].value = gain
+        p["u_depth"].value = depth if depth is not None else (0.0, 0.1, 100.0)
         self.ctx.enable(self.ctx.BLEND)
         self.ctx.blend_func = (self.ctx.SRC_ALPHA, self.ctx.ONE_MINUS_SRC_ALPHA)
-        self.ctx.disable(self.ctx.DEPTH_TEST)
         self.ctx.disable(self.ctx.CULL_FACE)
+        if depth is not None:
+            self.ctx.enable(self.ctx.DEPTH_TEST)
+            self.ctx.depth_func = "<"
+            self.ctx.depth_mask = False
+        else:
+            self.ctx.disable(self.ctx.DEPTH_TEST)
         self.vao.render(instances=len(order))
+        self.ctx.depth_mask = True
