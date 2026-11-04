@@ -47,6 +47,8 @@ MAX_LATERAL_M = 1.0
 MAX_YAW_DEG = 30.0
 #: The first stretch of the walk was seen by few frames and is the poorest; the deploy point is this far along it.
 DEFAULT_START_M = 10.0
+#: The walk's last metres have the filmer's own shadow in them, and are where the camera slowed to stop; the patrol ends this short of them.
+END_MARGIN_M = 9.0
 #: Across the trail, in metres, per lane and per metre of offset in the scenario code written for straight lanes four metres apart.
 LANE_LATERAL_M = 0.7
 OFFSET_SCALE = 0.5
@@ -160,8 +162,8 @@ class TrailScenario:
         return x + (ty / norm) * lateral_m, y - (tx / norm) * lateral_m
 
     def sweep(self, spacing_m: float = 3.0) -> TrailSweep:
-        """Waypoints along the line, from the deploy point to a few metres short of the end of the walk."""
-        stations = np.arange(spacing_m, self.length_m - self.start_m - 2.0, spacing_m)
+        """Waypoints along the line, from the deploy point to `END_MARGIN_M` short of the end of the walk."""
+        stations = np.arange(spacing_m, self.length_m - self.start_m - END_MARGIN_M, spacing_m)
         points = [(*self.point(float(a)), "LANE 1") for a in stations]
         return TrailSweep(origin=(0.0, 0.0), bearing_deg=self.bearing_deg, clear_fraction=1.0, points=points, scenario=self)
 
