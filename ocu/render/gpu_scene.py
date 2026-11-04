@@ -193,12 +193,13 @@ class GpuScene:
         hole = np.clip(world._pothole_depth / 0.75, 0.0, 1.0).astype(np.float32)
         extra = np.stack([hole, np.zeros_like(hole), np.zeros_like(hole), np.zeros_like(hole)], axis=-1)
 
-        # Extend past the edge of the world, flat, so the horizon is ground and
-        # not the end of a table.
-        pad = 5
+        # Extend past the edge of the world so the horizon is country and not the end of a table: ground that rises from the
+        # edge into rolling hills, forested as the footage's are, fading into the haze.
         axis = (np.arange(span) - extent + 0.5) * cell
         half = axis[-1]
-        outer = np.array([half + 0.5, half + 30.0, half + 300.0, half + 1200.0, half + 5000.0])
+        outer = half + np.array([0.5, 6.0, 12.0, 20.0, 30.0, 45.0, 65.0, 90.0, 120.0, 155.0, 195.0, 240.0, 290.0, 345.0, 405.0, 470.0, 540.0, 615.0, 700.0,
+                                800.0, 920.0, 1050.0, 1200.0, 1400.0, 1650.0, 2000.0, 2500.0, 3300.0, 5000.0])
+        pad = len(outer)
         xs = np.concatenate([-outer[::-1], axis, outer])
 
         def padded(a):
@@ -210,13 +211,27 @@ class GpuScene:
             out[:pad], out[-pad:], out[:, :pad], out[:, -pad:] = value, value, value, value
             return out
 
-        # The extension is plain ground: its materials are constants, not the
-        # edge of the world smeared out for five kilometres.
-        zp = padded(z)
+        X, Y = np.meshgrid(xs, xs, indexing="ij")
+        beyond = np.maximum(np.abs(X), np.abs(Y)) - half  # metres past the edge of the world, zero or less inside it
+        rise = np.clip(beyond / 170.0, 0.0, 1.0)
+        rise = rise * rise * (3.0 - 2.0 * rise) * (1.0 - np.clip((beyond - 2200.0) / 2800.0, 0.0, 1.0))
+        big = meshes.fbm3(np.stack([X / 330.0, Y / 330.0, np.zeros_like(X)], axis=-1).reshape(-1, 3), 77, 4).reshape(X.shape)
+        small = meshes.fbm3(np.stack([X / 105.0, Y / 105.0, np.zeros_like(X)], axis=-1).reshape(-1, 3), 78, 3).reshape(X.shape)
+        hills = rise * (95.0 * (big - 0.36) + 16.0 * (small - 0.5))
+
+        # What is past the edge is not the edge of the world smeared out: its materials are constants, and a flag in the
+        # extra channel says "forest" (the shader paints canopy there).
+        zp = padded(z) + hills
         np_ = padded_with(normal, (0.0, 0.0, 1.0))
+        far_gx, far_gy = np.gradient(zp, xs, xs)
+        far_normal = np.stack([-far_gx, -far_gy, np.ones_like(far_gx)], axis=-1)
+        far_normal /= np.linalg.norm(far_normal, axis=-1, keepdims=True)
+        outside = (beyond > 0.0)[..., None]
+        np_ = np.where(outside, far_normal, np_)
         wp = padded_with(weights, (0.75, 0.25, 0.0, 0.0))
         ep = padded_with(extra, (0.0, 0.0, 0.0, 0.0))
-        X, Y = np.meshgrid(xs, xs, indexing="ij")
+        forest = np.clip(beyond / 45.0, 0.0, 1.0)
+        ep[..., 1] = forest * forest * (3.0 - 2.0 * forest)
         positions = np.stack([X, Y, zp], axis=-1).reshape(-1, 3)
         vertex = np.concatenate(
             [positions, np_.reshape(-1, 3), wp.reshape(-1, 4), ep.reshape(-1, 4)], axis=1

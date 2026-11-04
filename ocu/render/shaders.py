@@ -258,6 +258,18 @@ void main() {
         albedo = mix(albedo, photo, 0.88);
         n = normalize(n + vec3(nrm * 0.75 * (0.35 + 0.65 * near), 0.0));
     }
+    // Country past the edge of the simulated ground: forest canopy, lumpy and dark in the folds, dry and pale in patches
+    // on the open slopes, as in the footage's hilltop clip. It is only ever seen from far off, through the haze.
+    float forest = v_extra.y;
+    if (forest > 0.01) {
+        float c1 = fbm2(p.xy * 0.040);
+        float c2 = vnoise2(p.xy * 0.33);
+        float c3 = vnoise2(p.xy * 1.9);
+        vec3 canopy = mix(vec3(0.030, 0.046, 0.020), vec3(0.092, 0.112, 0.042), smoothstep(0.25, 0.75, 0.6 * c1 + 0.5 * c2));
+        canopy = mix(canopy, vec3(0.17, 0.13, 0.060), smoothstep(0.60, 0.86, c1 + 0.25 * (c3 - 0.5)) * 0.8);
+        canopy *= 0.72 + 0.56 * c3;
+        albedo = mix(albedo, canopy, forest);
+    }
     // A hole is bare earth, darker, with the rim scuffed.
     albedo = mix(albedo, albedo * 0.45 + vec3(0.05, 0.035, 0.02), clamp(v_extra.x * 3.0, 0.0, 0.9));
 

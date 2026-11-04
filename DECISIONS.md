@@ -1789,3 +1789,11 @@ trees or grass was measured from it.
 banks and steps that the height model does not generate, and nothing was reconstructed from the video in three
 dimensions (photogrammetry would only cover the strip that was walked and would break what the rover's planner and the
 LiDAR rely on).
+
+**The horizon.** Past the edge of the simulated ground the terrain used to be a flat plain for five kilometres. It is now
+rolling hills that rise from the edge (a smooth rise over 170 m, then about 40 m of relief at the scale of a few hundred
+metres, from two octaves of value noise), shaded as forest canopy by the terrain shader (dark olive in the folds, dry
+patches on the open slopes, lumpy at the scale of a crown) and left to the haze, as in the hilltop clip. The ring of
+vertices is 29 rings out to 5 km: the first version, with 15, shaded in visible streaks across its large triangles.
+It is scenery only: nothing in the planner, the LiDAR, the thermal model or the detector reads it, and the shadow map
+still covers only the simulated ground.
