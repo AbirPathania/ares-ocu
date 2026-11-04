@@ -81,14 +81,14 @@ def test_a_world_built_on_a_trail_has_its_ground_sweep_and_content_along_it(app,
 
     window = MainWindow(trail=synthetic_trail)
     trail = window.trail
-    assert trail is not None and window.sweep.points and window.sweep.points[0][2] == "LANE 1"
+    assert trail is not None and window.sweep.points and window.sweep.points[0][2] == "LEG 1"
     x, y = trail.point(0.0)
     assert window.terrain.classify(x, y) == Terrain.TRACK, "the deploy point is on the carved track"
     for t in window.target_field.targets[:5]:
         assert trail._tree.query([t.x, t.y])[0] < 3.5, "buried objects are laid along the trail, not across four straight lanes"
     assert not any(abs(e.path[0][0]) > 150 for e in window.surface_entities)
     window._plan_sweep_from_first_scan()
-    assert window.sweep.points[0][2] == "LANE 1" and window._mission_waypoints is window.sweep.points, "the first scan does not replace the trail's sweep"
+    assert window.sweep.points[0][2] == "LEG 1" and window._mission_waypoints is window.sweep.points, "the first scan does not replace the trail's sweep"
     window.close()
 
 
@@ -103,7 +103,7 @@ def test_the_rover_tile_on_a_trail_draws_from_the_real_place_where_it_was_walked
     rover.heading = window.trail.bearing_deg
     request = window._camera_request("rover")
     assert request.get("trail_world_view") is True and request["entities"] is not None
-    assert request["trail_s"] == pytest.approx(window.trail.start_m + 5.0, abs=1.0)
+    assert request["trail_s"] == pytest.approx(window.trail.legs[0].start_m + 5.0, abs=1.0) and request["trail_name"] == "synthetic"
     assert abs(request["eye"][0] - rover.x) < 1.0 and abs(request["eye"][1] - rover.y) < 1.0, "the splat camera is where the rover is"
     rover.heading = (window.trail.bearing_deg + 120.0) % 360.0  # turned away from the walk
     assert "trail_s" not in window._camera_request("rover"), "facing a way the walk never looked: the simulated world"
@@ -116,3 +116,39 @@ def test_the_command_line_asks_for_a_trail():
     assert trail_argument(["ocu"]) is None
     assert trail_argument(["ocu", "--trail"]) is True
     assert trail_argument(["ocu", "--trail", "IMG_5129"]) == "IMG_5129"
+
+
+def test_a_world_built_on_several_trails_has_content_on_every_leg_and_asks_for_the_leg_it_is_on(app, tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_trail_scenario import make_route
+
+    from ocu.render import trail
+
+    for name, length in (("a", 70.0), ("b", 76.0), ("c", 82.0)):
+        route, k = make_route(length_m=length)
+        route.save(tmp_path / f"{name}.npz", k)
+    monkeypatch.setattr(trail, "TRAIL_DIR", tmp_path)
+    window = MainWindow(trail=True)
+    assert window.trail.names == ["a", "b", "c"]
+    labels = {label for _, _, label in window.sweep.points}
+    assert labels == {"LEG 1", "LEG 2", "LEG 3"}
+    names = [e.name for e in window.surface_entities]
+    assert len(names) == len(set(names)), "the later legs' people and animals are named apart"
+    assert len(window.surface_entities) > 4 and len(window.target_field.targets) > 5
+    feed = window.camera_feeds["rover"]
+    feed.resize(320, 180)
+    feed.set_trail_available(True)
+    feed.set_trail(True)
+    leg = window.trail.legs[2]
+    x, y = leg.point(6.0)
+    i = int(__import__("numpy").searchsorted(leg.arc, leg.start_m + 6.0))
+    import math
+
+    rover = window.units["rover"].pose
+    rover.x, rover.y, rover.heading = x, y, math.degrees(math.atan2(*leg.tangent[i])) % 360.0
+    request = window._camera_request("rover")
+    assert request["trail_name"] == "c" and request["trail_s"] == pytest.approx(leg.start_m + 6.0, abs=1.0)
+    window.close()

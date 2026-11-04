@@ -139,3 +139,72 @@ def test_the_trail_camera_is_where_the_phone_was_looking_the_way_it_looked(scena
     assert abs(cam.pitch_down_deg) < 3.0
     turned = scenario.camera(type(state)(state.s_m, 0.0, 20.0, True))
     assert (turned.heading_deg - cam.heading_deg + 180.0) % 360.0 - 180.0 == pytest.approx(20.0, abs=1.0), "a heading turns clockwise"
+
+
+# --- several trails chained into one patrol -------------------------------------------------------------------------------
+
+from ocu.core.trail_scenario import FAR_TURN_MAX_DEG, TrailWorld  # noqa: E402
+
+
+def chain(count=6, length_m=60.0, growth_m=4.0):
+    trails = []
+    for i in range(count):
+        route, k = make_route(length_m=length_m + growth_m * i)
+        trails.append((f"leg{i}", route, k))
+    return TrailWorld.build(trails)
+
+
+def test_each_leg_starts_where_the_one_before_it_ended_and_leaves_in_the_direction_it_arrived():
+    world = chain()
+    for before, after in zip(world.legs, world.legs[1:]):
+        i0, i1 = before.patrol_range()
+        end = before.xy[i1 - 1]
+        start = after.xy[after.start_index]
+        assert np.linalg.norm(end - start) < 0.1, "the next leg's deploy point is the last one's end"
+        arrived = math.degrees(math.atan2(*before.tangent[i1 - 1]))
+        left = math.degrees(math.atan2(*after.tangent[after.start_index]))
+        assert abs((left - arrived + 180.0) % 360.0 - 180.0) <= FAR_TURN_MAX_DEG + 5.0
+        assert after.ground_z[after.start_index] == pytest.approx(before.ground_z[i1 - 1], abs=0.05), "the ground carries on at the same height"
+
+
+def test_a_long_patrol_stays_inside_the_world():
+    world = chain(count=14, length_m=60.0, growth_m=0.0)  # legs of about 40 m of patrol each, like the footage's
+    assert world.length_m > 450.0
+    assert np.abs(world.xy).max() < 105.0, "the path steers back toward the middle of the map"
+    assert math.hypot(*world.xy[0]) < 0.5
+
+
+def test_the_chained_sweep_runs_the_whole_patrol_and_names_its_legs():
+    world = chain(count=4)
+    sweep = world.sweep()
+    labels = [label for _, _, label in sweep.points]
+    assert labels[0] == "LEG 1" and labels[-1] == "LEG 4" and sorted(set(labels)) == [f"LEG {i}" for i in range(1, 5)]
+    for x, y, _ in sweep.points:
+        assert world._tree.query([x, y])[0] < 0.3
+    assert world.arc[-1] == pytest.approx(sum(np.linalg.norm(np.diff(leg.xy[slice(*leg.patrol_range())], axis=0), axis=1).sum() for leg in world.legs), rel=0.02)
+
+
+def test_the_camera_changes_leg_when_the_rover_crosses_into_the_next_one():
+    world = chain(count=3)
+    inside_second = world.legs[1].point(8.0)
+    tx, ty = world.legs[1].tangent[int(np.searchsorted(world.legs[1].arc, world.legs[1].start_m + 8.0))]
+    state = world.camera_state(*inside_second, math.degrees(math.atan2(tx, ty)))
+    assert state.leg == 1 and state.on_trail
+    assert state.s_m == pytest.approx(world.legs[1].start_m + 8.0, abs=0.6), "the arc is the leg's own, which is what its splat is drawn along"
+    cam = world.camera(state)
+    assert math.hypot(cam.eye[0] - inside_second[0], cam.eye[1] - inside_second[1]) < 0.6
+
+
+def test_the_ground_is_carved_continuously_across_a_join():
+    world = chain(count=3)
+    ground = TerrainWorld.blank(half_extent_m=110.0)
+    world.carve(ground)
+    i0, i1 = world.legs[0].patrol_range()
+    join = world.legs[0].xy[i1 - 1]
+    heights = []
+    for back in (-1.5, -0.5, 0.0, 0.5, 1.5):
+        along = world.legs[0].tangent[i1 - 1]
+        p = join + along * back
+        heights.append(ground.elevation_at(ground.to_cell(*p)))
+    assert max(heights) - min(heights) < 0.5
+    assert ground.classify(*join) == Terrain.TRACK

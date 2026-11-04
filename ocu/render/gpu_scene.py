@@ -91,7 +91,8 @@ class GpuScene:
         self.mgl = moderngl
         self.ctx = moderngl.create_standalone_context()
         self._world = world
-        self.trail = None  # a reconstructed trail, once load_trail has found one
+        self.trail = None  # the reconstructed trail in use, once load_trail has found one
+        self.trails: dict[str, dict] = {}  # every one loaded, least recently used first
         self._t0 = time.monotonic()
         self._cell = world.cell_size_m
         self._extent = world._extent
@@ -288,13 +289,21 @@ class GpuScene:
         )
         return vao, shadow
 
+    #: How many reconstructed trails are kept on the GPU at once: the one being driven and the next.
+    TRAILS_RESIDENT = 2
+
     def load_trail(self, name: str | None = None) -> bool:
-        """Load a reconstructed trail (a splat and its route) from assets/footage/trail, if there is one. True if loaded.
+        """Load a reconstructed trail (a splat and its route) from assets/footage/trail, if there is one, and make it the current
+        one. True if it is loaded. Trails already loaded are kept (up to TRAILS_RESIDENT, the least recently used given up).
 
         Must run on the thread that owns the GL context."""
         folder = trail.TRAIL_DIR
         candidates = [folder / f"{name}.ply"] if name else sorted(folder.glob("*.ply"))
         for ply in candidates:
+            if ply.stem in self.trails:
+                self.trails[ply.stem] = self.trails.pop(ply.stem)  # most recently used last
+                self.trail = self.trails[ply.stem]
+                return True
             route_file = ply.with_suffix(".npz")
             if not (ply.exists() and route_file.exists()):
                 continue
@@ -303,7 +312,11 @@ class GpuScene:
                 renderer = splats.SplatRenderer(self.ctx, splats.load_ply(ply))
             except (OSError, ValueError, KeyError):
                 continue
-            self.trail = {"name": ply.stem, "route": route, "intrinsics": k, "renderer": renderer}
+            self.trails[ply.stem] = {"name": ply.stem, "route": route, "intrinsics": k, "renderer": renderer}
+            while len(self.trails) > self.TRAILS_RESIDENT:
+                oldest = next(iter(self.trails))
+                self.trails.pop(oldest)["renderer"].release()
+            self.trail = self.trails[ply.stem]
             return True
         return False
 
@@ -837,6 +850,7 @@ class GpuScene:
         trail_yaw_deg: float = 0.0,
         trail_height_m: float | None = None,
         trail_world_view: bool = False,
+        trail_name: str | None = None,
     ) -> np.ndarray:
         """One frame, (height, width, 3) uint8. `eye` is absolute (x, y, z).
 
@@ -848,6 +862,8 @@ class GpuScene:
         ctx = self.ctx
         width, height = max(int(width), 8), max(int(height), 8)
         view_pose = None
+        if trail_s is not None and trail_name is not None and (self.trail is None or self.trail["name"] != trail_name):
+            self.load_trail(trail_name)  # the leg being driven; its splat is read from disk the first time it is needed
         if trail_s is not None and self.trail:
             view_pose, view_k, inferred_heading, inferred_pitch = self._trail_view(trail_s, trail_lateral_m, trail_yaw_deg, trail_height_m, width, height)
             hfov_deg = math.degrees(2.0 * math.atan(width / (2.0 * view_k.fx)))

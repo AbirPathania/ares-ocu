@@ -286,6 +286,11 @@ class SplatRenderer:
         )
         self._last_count = 0
 
+    def release(self) -> None:
+        """Give the GPU its memory back: a trail that is no longer being driven does not need to stay there."""
+        for resource in (self.texture, self.corner_buffer, self.index_buffer, self.quad, self.vao, self.program):
+            resource.release()
+
     def sort_for(self, pose: Pose, near: float = 0.15) -> np.ndarray:
         """Indices of the splats in front of the camera, far to near."""
         depth = self.cloud.position @ pose.rotation[2] + pose.translation[2]

@@ -28,6 +28,7 @@ class GpuRenderWorker(QObject):
         super().__init__(parent)
         self._world = world
         self._trail_name = trail_name
+        self._prefetch: str | None = None
         self._pending: dict[str, dict] = {}
         self._wake = threading.Condition()
         self._stop = False
@@ -41,6 +42,12 @@ class GpuRenderWorker(QObject):
 
     def start(self) -> None:
         self._thread.start()
+
+    def prefetch(self, trail_name: str) -> None:
+        """Have a trail's splat read in when the worker next has a moment, so that the first frame drawn from it does not wait for the disk."""
+        with self._wake:
+            self._prefetch = trail_name
+            self._wake.notify()
 
     def submit(self, unit_id: str, request: dict) -> None:
         with self._wake:
@@ -72,6 +79,12 @@ class GpuRenderWorker(QObject):
                 if self._stop:
                     return
                 work, self._pending = self._pending, {}
+                warm, self._prefetch = self._prefetch, None
+            if warm is not None:
+                current = self._scene.trail["name"] if self._scene.trail else None
+                self._scene.load_trail(warm)
+                if current is not None:
+                    self._scene.load_trail(current)  # the one being drawn stays the current one
             for unit_id, request in work.items():
                 try:
                     frame = self._scene.render(**request)

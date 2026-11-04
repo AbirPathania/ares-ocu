@@ -237,9 +237,9 @@ class MainWindow(QMainWindow):
         #: The reconstructed trail the world is built round, if there is one (core/trail_scenario.py).
         self.trail = None
         if trail:
-            from ocu.core.trail_scenario import TrailScenario
+            from ocu.core.trail_scenario import TrailWorld
 
-            self.trail = TrailScenario.load(trail if isinstance(trail, str) else None)
+            self.trail = TrailWorld.load(trail if isinstance(trail, str) else None)
         if self.trail is not None:
             # The ground is cut to the real trail before anything reads it, the sweep runs along it, and the content
             # (buried objects, people, animals) is laid out along it. See core/trail_scenario.py.
@@ -260,7 +260,14 @@ class MainWindow(QMainWindow):
         # What is actually buried out there, placed relative to the lanes,
         # and what the suite has accumulated about each object swept over.
         scenario_world = None if self.trail is not None else self.terrain  # the far sites are for the open world
-        self.target_field = default_field(sweep=self.sweep, world=scenario_world)
+        self.target_field = default_field(sweep=self.sweep if self.trail is None else self.trail.leg_sweep(0), world=scenario_world)
+        if self.trail is not None:
+            # every later leg gets a few of its own: the objects laid along a trail, alternating so that no two legs repeat each other
+            from dataclasses import replace as _replace
+
+            for index in range(1, len(self.trail.legs)):
+                extra = default_field(sweep=self.trail.leg_sweep(index), world=None)
+                self.target_field.targets.extend(extra.targets[index % 2::2][:3])
         self._target_evidence: dict[int, dict[str, float]] = {}
         #: What the scouts have seen of each object, kept apart from the rover's
         #: evidence: they are different replicas and cannot share it over a cut link.
@@ -273,9 +280,14 @@ class MainWindow(QMainWindow):
         # remembered so that a later, better reading updates that report instead of adding another.
         # Placed on ground they can stand on, parked ones stamped into the world so the LiDAR hits them and the
         # rover plans round them, walking ones tracked separately (core/dynamic_obstacles.py).
-        entities = default_entities(sweep=self.sweep, world=scenario_world)
-        if self.trail is not None:
-            entities = [e for e in entities if e.kind != "vehicle"]  # nothing drives a footpath: people and animals only
+        if self.trail is None:
+            entities = default_entities(sweep=self.sweep, world=scenario_world)
+        else:
+            # people and animals along every leg (nothing drives a footpath, so no vehicles); the later legs have two each, renamed
+            entities = [e for e in default_entities(sweep=self.trail.leg_sweep(0), world=None) if e.kind != "vehicle"]
+            for index in range(1, len(self.trail.legs)):
+                pool = [e for e in default_entities(sweep=self.trail.leg_sweep(index), world=None) if e.kind != "vehicle"]
+                entities.extend(_replace(e, name=f"{e.name} {index + 1}") for e in (pool[index % len(pool)], pool[(index + 2) % len(pool)]))
         self.surface_entities = settle_entities(self.terrain, entities)
         stamp_static_entities(self.terrain, self.surface_entities)
         self.dynamic_obstacles = DynamicObstacles()
@@ -1023,7 +1035,7 @@ class MainWindow(QMainWindow):
             return True
         from ocu.ui.gpu_worker import GpuRenderWorker
 
-        self._gpu_worker = GpuRenderWorker(self.terrain, self, trail_name=self.trail.name if self.trail is not None else None)
+        self._gpu_worker = GpuRenderWorker(self.terrain, self, trail_name=self.trail.legs[0].name if self.trail is not None else None)
         self._gpu_worker.frameReady.connect(self._on_gpu_frame)
         self._gpu_worker.ready.connect(self._on_gpu_ready)
         for feed in self.camera_feeds.values():
@@ -1077,6 +1089,15 @@ class MainWindow(QMainWindow):
         start = min(self.TRAIL_START_M, 0.25 * length)
         return start + ((self.mission_clock.clock_s - self._trail_origin_s) * self.TRAIL_PACE_MS) % (length - start)
 
+    def _prefetch_next_leg(self, state, leg) -> None:
+        """Ask for the next leg's splat to be read from disk as the rover nears the end of this one, so the cut is not a stall."""
+        from ocu.core.trail_scenario import END_MARGIN_M
+
+        if self._gpu_worker is None or state.leg + 1 >= len(self.trail.legs):
+            return
+        if state.s_m > leg.length_m - END_MARGIN_M - 12.0:
+            self._gpu_worker.prefetch(self.trail.legs[state.leg + 1].name)
+
     def _camera_request(self, unit_id: str) -> dict:
         """Everything the renderer needs to draw one unit's view, as plain data."""
         feed = self.camera_feeds[unit_id]
@@ -1087,10 +1108,13 @@ class MainWindow(QMainWindow):
             state = self.trail.camera_state(pose.x, pose.y, pose.heading)
             if state.on_trail:
                 cam = self.trail.camera(state)
+                leg = self.trail.legs[state.leg]
+                self._prefetch_next_leg(state, leg)
                 return dict(
                     eye=cam.eye, heading_deg=cam.heading_deg, pitch_down_deg=cam.pitch_down_deg, hfov_deg=90.0, width=width, height=height,
                     rover=None, grain=2.2 / 255.0, entities=self._entities_to_draw(),
                     trail_s=state.s_m, trail_lateral_m=state.lateral_m, trail_yaw_deg=-state.yaw_deg, trail_world_view=True,
+                    trail_name=leg.name,
                 )
             # off the part of the trail that was walked, or facing a way it was not: the simulated world, as everywhere else
         elif unit_id == "rover" and feed.trail_mode:

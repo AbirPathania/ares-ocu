@@ -153,3 +153,32 @@ def test_the_scene_draws_the_trail_when_asked_and_the_world_when_not(tmp_path, m
     scene.render(**args, trail_s=1.0)
     after = np.abs(scene.render(**args).astype(int) - world.astype(int)).mean()
     assert after < max(2.0 * sway, 3.0), "the world still renders after a trail frame"
+
+
+def test_the_scene_loads_each_trail_when_a_frame_asks_for_it_and_keeps_only_the_latest_few(tmp_path, monkeypatch):
+    pytest.importorskip("moderngl")
+    from ocu.core.terrain import TerrainWorld
+    from ocu.render import gpu_scene
+
+    rot = np.array([[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    poses = [splats.Pose(rot, -rot @ np.array([i * 0.1, 0.0, 0.0])) for i in range(31)]
+    rng = np.random.default_rng(5)
+    points = np.stack([np.linspace(0, 3, 400), np.full(400, 0.3), rng.uniform(-0.3, 0.3, 400)], axis=1)
+    for name, dc in (("red", 1.2), ("green", -1.0), ("blue", -1.4)):
+        rows = [one_splat(x=float(x), y=0.3, z=float(z), f_dc_0=dc if name == "red" else -0.8, f_dc_1=dc if name == "green" else -0.8,
+                          f_dc_2=dc if name == "blue" else -0.8, scale_0=np.log(0.08), scale_1=np.log(0.08), scale_2=np.log(0.08))
+                for x, z in zip(rng.uniform(0, 4, 300), rng.uniform(-0.6, 0.6, 300))]
+        write_ply(tmp_path / f"{name}.ply", rows)
+        route, _ = trail.build_route(poses, points, np.tile([200.0, 165.0, 125.0], (400, 1)), seconds_per_frame=0.1)
+        route.save(tmp_path / f"{name}.npz", splats.Intrinsics(1280, 720, 640.0, 640.0, 640.0, 360.0))
+    monkeypatch.setattr(trail, "TRAIL_DIR", tmp_path)
+    scene = gpu_scene.GpuScene.create(TerrainWorld.blank(half_extent_m=60.0))
+    if scene is None:
+        pytest.skip("no GL context")
+    args = dict(eye=(0.0, 0.0, 3.0), heading_deg=0.0, pitch_down_deg=5.0, hfov_deg=90.0, width=200, height=112, trail_s=1.0)
+    frames = {name: scene.render(**args, trail_name=name) for name in ("red", "green", "blue")}
+    dominant = {name: int(np.argmax(frame.reshape(-1, 3).astype(int).sum(axis=0) - frame.reshape(-1, 3).astype(int).mean() * 0)) for name, frame in frames.items()}
+    assert dominant["red"] != dominant["green"] or dominant["green"] != dominant["blue"], "each trail is drawn from its own splat"
+    assert len(scene.trails) == scene.TRAILS_RESIDENT and list(scene.trails) == ["green", "blue"], "the oldest was given up"
+    scene.render(**args, trail_name="red")  # asked for again: read in again, the least recently used given up
+    assert "red" in scene.trails and len(scene.trails) == scene.TRAILS_RESIDENT
