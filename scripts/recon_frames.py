@@ -6,8 +6,8 @@ A walk filmed on a phone is hundreds of near-identical frames, some blurred by a
 sharp ones with about three-quarters overlap, so the clip is decoded at `fps_candidates`, tone-mapped from HLG, and the
 sharpest frame in each window is kept. Frames land in reference_footage/recon/<clip>/images/, which is git-ignored.
 
-Only clips that were held the right way up throughout are handled here (IMG_5108, 5114, 5117, 5129, 5132); the two
-that were turned over part of the time need the per-frame orientation from footage_ingest first.
+Frames from a clip that was filmed with the phone upside down for part of the time (IMG_5109, IMG_5128) are turned over, using the
+same sky-position rule as footage_ingest (see uprightness there), so that the reconstruction sees upright pictures throughout.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ def pick_frames(clip_name: str, name: str | None = None, width: int = 1280, keep
     size = width * height * 6
     group = max(candidate_fps // keep_per_second, 1)
     kept: list[Path] = []
+    sky: list[float] = []
     best: tuple[float, np.ndarray] | None = None
     index = 0
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
@@ -57,8 +58,13 @@ def pick_frames(clip_name: str, name: str | None = None, width: int = 1280, keep
             path = out_dir / f"{name}_{len(kept):04d}.jpg"
             Image.fromarray(best[1]).save(path, quality=95)
             kept.append(path)
+            sky.append(fi.sky_score(best[1]))
             best = None
     proc.wait()
+    # turn over the frames filmed with the phone upside down
+    for path, upright in zip(kept, fi.uprightness(sky)):
+        if not upright:
+            Image.fromarray(np.array(Image.open(path))[::-1, ::-1].copy()).save(path, quality=95)
     return kept
 
 
