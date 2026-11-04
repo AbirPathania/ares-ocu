@@ -40,12 +40,12 @@ def test_the_trail_chip_is_offered_only_when_a_trail_is_loaded_and_switches_the_
     press(feed, feed._trail_chip_rect().center())
     assert feed.trail_mode and toggled == [("rover", True)]
     request = window._camera_request("rover")
-    assert request["trail_s"] == pytest.approx(0.0, abs=1e-6) and request["entities"] is None
+    assert request["trail_s"] == pytest.approx(window.TRAIL_START_M, abs=1e-6) and request["entities"] is None
 
     window.mission_clock._clock_s = 10.0
-    assert window._trail_progress_m() == pytest.approx(10.0 * window.TRAIL_PACE_MS % 51.5)
+    assert window._trail_progress_m() == pytest.approx(window.TRAIL_START_M + 10.0 * window.TRAIL_PACE_MS)
     window.mission_clock._clock_s = 100.0
-    assert 0.0 <= window._trail_progress_m() < 51.5, "the replay goes round again at the end"
+    assert window.TRAIL_START_M <= window._trail_progress_m() < 51.5, "the replay goes round again at the end"
 
     press(feed, feed._chip_rect().center())  # switching to infrared gives the trail up
     assert not feed.trail_mode

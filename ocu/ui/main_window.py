@@ -1035,6 +1035,8 @@ class MainWindow(QMainWindow):
     #: How fast the rover's tile goes along the reconstructed trail, in metres per second of mission time: a walk, which is what
     #: the footage is of (see render/trail.py).
     TRAIL_PACE_MS = 1.25
+    #: The first stretch of the reconstructed walk was seen by few frames and is the poorest part of it, so the replay starts after it.
+    TRAIL_START_M = 10.0
 
     def _on_feed_trail_toggled(self, unit_id: str, on: bool) -> None:
         if on:
@@ -1050,7 +1052,8 @@ class MainWindow(QMainWindow):
         length = self._gpu_worker.trail_length_m if self._gpu_worker is not None else 0.0
         if length <= 0.0:
             return 0.0
-        return ((self.mission_clock.clock_s - self._trail_origin_s) * self.TRAIL_PACE_MS) % length
+        start = min(self.TRAIL_START_M, 0.25 * length)
+        return start + ((self.mission_clock.clock_s - self._trail_origin_s) * self.TRAIL_PACE_MS) % (length - start)
 
     def _camera_request(self, unit_id: str) -> dict:
         """Everything the renderer needs to draw one unit's view, as plain data."""

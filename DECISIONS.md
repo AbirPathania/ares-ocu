@@ -1829,3 +1829,11 @@ long for a 41 s clip, 2.1 m/s, which is not a walk up a hill. Anchored to a walk
 (about a 10% grade) and implies the phone was held 0.92 m above the ground, which is low but within what the footage looks like.
 The pace is used; the height is reported as a check. Both are assumptions, good to a quarter either way. One real measurement
 (the trail's width at a spot, or the distance walked from a fitness app) replaces them: `TrailRoute.rescale_to`.
+
+**The trail, trained.** IMG_5129 trained for 12 000 steps with 500 000 splats (the cap was reached by about step 6 000), 15.4 mean
+absolute error per pixel (0..255) against the real frames at their own poses. It is the real trail: the gravel, the tyre ruts,
+the leaf litter, the shadow pattern and the sky are in the right places. It is not as sharp as the video. The grass walls
+streak into soft blades, because grass is thousands of fine strands and 500 000 splats are too few for it (reconstructions of
+this kind use millions); the first 10 m of the walk, seen by few frames, is poor and has floaters near the camera when the
+view is lowered to a mast's height. The replay in the rover's tile (the TRAIL chip) therefore starts at 10 m. Training took
+about 1 h 40 min on the M1; the cap is set by 9 GB of shared memory.
