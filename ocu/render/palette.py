@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-EXPOSURE = 0.85  # the renderer's exposure; the one place it is set
+EXPOSURE = 0.78  # the renderer's exposure; the one place it is set
 SATURATION = 1.10  # what the finishing pass in shaders.py does to chroma
 PALETTE_PATH = Path(__file__).resolve().parent.parent / "data" / "footage_palette.json"
 

@@ -404,7 +404,7 @@ class GpuScene:
 
         # Grass: a tuft per cell where the ground carries it, thicker in scrub.
         grid = world._grid
-        for terrain, per_cell in ((Terrain.SCRUB, 1.6), (Terrain.GROUND, 0.9), (Terrain.BUSH, 0.9)):
+        for terrain, per_cell in ((Terrain.SCRUB, 4.2), (Terrain.GROUND, 2.0), (Terrain.BUSH, 2.4)):
             ix, iy = np.nonzero(grid == int(terrain))
             count = rng.poisson(per_cell, len(ix))
             ix, iy = np.repeat(ix, count), np.repeat(iy, count)
@@ -423,9 +423,9 @@ class GpuScene:
             ground = self._ground(gx, gy)
             n = len(gx)
             # the template is the colour of dry grass; an instance only varies from it, a little greener or more bleached
-            straw = rng.uniform(0.0, 1.0, n) < 0.7
-            tone = rng.uniform(0.75, 1.25, (n, 1))
-            colour = np.where(straw[:, None], np.array([1.05, 0.98, 0.80]), np.array([0.85, 1.05, 0.75])) * tone
+            straw = rng.uniform(0.0, 1.0, n) < 0.85
+            tone = rng.uniform(0.70, 1.20, (n, 1))
+            colour = np.where(straw[:, None], np.array([1.08, 0.97, 0.76]), np.array([0.82, 1.02, 0.70])) * tone
             height = np.exp(rng.normal(np.log(0.62 if terrain == Terrain.SCRUB else 0.40), 0.32, n))
             rows = np.concatenate(
                 [

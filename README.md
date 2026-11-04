@@ -125,16 +125,26 @@ The honest line to close on: almost every autonomy pitch claims to work in
 a GPS-denied, link-contested environment, and almost none of them show the
 failure on purpose and then show the recovery.
 
-## Photographic scenery (optional)
+## What the world looks like
 
-The camera feeds use CC0 models and textures from Poly Haven when they are present:
+The camera feeds are drawn to look like the ground the reference footage was filmed on: a dry deciduous foothill forest
+(acacia, kans grass, a sandy and gravelly trail, pale stone, a hazy sky). That comes from three places:
+
+- `assets/footage/` and `ocu/data/footage_palette.json` (committed, about 4 MB): ground textures cut from the footage
+  and the colours measured from it. These are always present.
+- The scripts that make them from the raw video, which is not in the repository (it is several gigabytes; put it in
+  `reference_footage/`): `scripts/footage_ingest.py` (read and catalogue the clips), `scripts/footage_palette.py`
+  (measure the colours) and `scripts/footage_textures.py` (build the tiles).
+- Trees, shrubs and grass are built in `ocu/render/meshes.py`; the boulders are the Poly Haven models below, recoloured.
+
+The boulders and pebbles use CC0 models from Poly Haven when they are present:
 
 ```
 .venv/bin/python scripts/fetch_assets.py
 ```
 
-That downloads about 66 MB into `assets/polyhaven/` (not committed). Without it the
-feeds are drawn with procedural rocks, bushes and ground instead.
+That downloads about 66 MB into `assets/polyhaven/` (not committed). Without it the feeds draw procedural rocks.
+See DECISIONS.md, "Reference footage", for what was measured, what was chosen by eye, and what is not done.
 
 ## Tests
 

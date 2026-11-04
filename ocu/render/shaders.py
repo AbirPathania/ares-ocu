@@ -106,12 +106,12 @@ float shadowAt(vec3 world, vec3 n) {
             lit += texture(u_shadow, vec3(c.xy + vec2(x, y) * texel * 1.2, c.z - 0.0008));
     return lit / 9.0;
 }
-vec3 sunLight() { return vec3(1.0, 0.92, 0.78) * 2.5; }
+vec3 sunLight() { return vec3(1.0, 0.92, 0.78) * 3.2; }
 vec3 skyLight(vec3 n) {
     float up = n.z * 0.5 + 0.5;
     vec3 sky = @AMBIENT@;
     vec3 bounce = vec3(0.26, 0.21, 0.14);
-    return mix(bounce, sky, up) * 0.9;
+    return mix(bounce, sky, up) * 0.66;
 }
 """
 
@@ -235,9 +235,9 @@ void main() {
         // Photographic ground. Only the layers that matter here are read.
         float wg = v_mat.x, ws = v_mat.y, wt = v_mat.z, wd = v_mat.w;
         if (u_footage > 0.5) {
-            // Open ground in the footage is not bare sand: it is sand under dry grass, leaves and stalks. Part of it takes the straw.
-            ws += wg * 0.45;
-            wg *= 0.55;
+            // Open ground in the footage is not bare sand: it is sand under dry grass, leaves and stalks. Most of it takes the straw.
+            ws += wg * 0.62;
+            wg *= 0.38;
         }
         vec3 tex = vec3(0.0);
         vec2 nrm = vec2(0.0);
@@ -302,7 +302,9 @@ out vec3 v_rgb;
 out float v_ao;
 out vec4 v_tint;
 out float v_seed;
+out float v_wood;
 void main() {
+    v_wood = step(1.5, length(in_normal));   // wood is marked by normals of length two (render/meshes.py)
     vec3 p = in_pos * i_scale.xyz;
     if (u_kind == 1 && i_tint.a > 0.0 && length(in_normal) < 1.5) {   // wood (normals of length 2) does not wobble
         // Leafy crowns have a broken outline: push the surface in and out along
@@ -344,6 +346,7 @@ in vec3 v_rgb;
 in float v_ao;
 in vec4 v_tint;
 in float v_seed;
+in float v_wood;
 out vec4 f_color;
 
 void main() {
@@ -381,6 +384,15 @@ void main() {
         albedo = mix(albedo, vec3(0.34, 0.26, 0.17), dust * 0.35);
         n = normalize(n + (vec3(vnoise3(q * 5.0), vnoise3(q * 5.0 + 4.0), vnoise3(q * 5.0 + 9.0)) - 0.5) * 0.9
                         + (vec3(vnoise3(v_world * 31.0), vnoise3(v_world * 31.0 + 3.0), vnoise3(v_world * 31.0 + 7.0)) - 0.5) * 0.35);
+    } else if (u_kind == 1 && v_wood > 0.5) {
+        // Bark: dark, furrowed along the limb, paler where the furrows catch light, lichen-grey in patches. Lit as a
+        // solid, not wrapped round like a leaf.
+        float furrow = vnoise3(vec3(v_world.xy * 34.0, v_world.z * 2.2) + v_seed) * 0.65 + vnoise3(vec3(v_world.xy * 11.0, v_world.z * 1.2) + v_seed) * 0.35;
+        float fine = vnoise3(vec3(v_world.xy * 95.0, v_world.z * 9.0) + v_seed);
+        albedo *= 0.38 + 1.25 * furrow;
+        albedo *= 0.80 + 0.4 * fine;
+        albedo = mix(albedo, vec3(0.20, 0.19, 0.17), smoothstep(0.62, 0.85, fbm3(v_world * 3.0 + v_seed)) * 0.45);
+        n = normalize(n + (vec3(furrow, vnoise3(v_world * 30.0 + 7.0), 0.0) - vec3(0.5, 0.5, 0.0)) * 0.7);
     } else if (u_kind == 1) {
         leaf = 1.0;
         vec3 q = v_world * 3.4 + v_seed;
