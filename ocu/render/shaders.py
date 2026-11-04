@@ -55,9 +55,7 @@ float fbm3(vec3 p) {
 
 vec3 skyColor(vec3 d) {
     float h = clamp(d.z, 0.0, 1.0);
-    vec3 horizon = vec3(0.74, 0.80, 0.84);
-    vec3 zenith = vec3(0.20, 0.38, 0.68);
-    vec3 col = mix(horizon, zenith, pow(h, 0.5));
+@SKY@
     float s = max(dot(d, u_sun), 0.0);
     col += vec3(1.0, 0.78, 0.52) * (pow(s, 6.0) * 0.20 + pow(s, 64.0) * 0.25);
     col += vec3(1.0, 0.92, 0.80) * pow(s, 900.0) * 14.0;
@@ -68,8 +66,8 @@ vec3 skyColor(vec3 d) {
 vec3 fogColor(vec3 view) {
     // Haze takes the colour of the sky it sits in front of, warmer toward the sun.
     float s = max(dot(normalize(vec3(view.xy, 0.0)), normalize(vec3(u_sun.xy, 0.0001))), 0.0);
-    vec3 base = vec3(0.70, 0.76, 0.80);
-    return base + vec3(0.28, 0.18, 0.08) * pow(s, 3.0) * 0.55;
+    vec3 base = @HAZE@;
+    return base + vec3(0.28, 0.18, 0.08) * pow(s, 3.0) * 0.30;
 }
 
 vec3 applyFog(vec3 col, float dist, vec3 view) {
@@ -111,11 +109,22 @@ float shadowAt(vec3 world, vec3 n) {
 vec3 sunLight() { return vec3(1.0, 0.92, 0.78) * 2.5; }
 vec3 skyLight(vec3 n) {
     float up = n.z * 0.5 + 0.5;
-    vec3 sky = vec3(0.30, 0.42, 0.62);
+    vec3 sky = @AMBIENT@;
     vec3 bounce = vec3(0.26, 0.21, 0.14);
     return mix(bounce, sky, up) * 0.9;
 }
 """
+
+def _fill(text: str) -> str:
+    from ocu.render import palette
+
+    return (text.replace("@SKY@", palette.sky_glsl())
+            .replace("@HAZE@", "vec3({:.5f}, {:.5f}, {:.5f})".format(*palette.haze_colour()))
+            .replace("@AMBIENT@", "vec3({:.5f}, {:.5f}, {:.5f})".format(*palette.ambient_sky())))
+
+
+COMMON = _fill(COMMON)
+SHADOWED = _fill(SHADOWED)
 
 TERRAIN_VERT = """
 uniform mat4 u_vp;
@@ -143,10 +152,13 @@ out vec4 f_color;
 uniform int u_has_tex;
 uniform sampler2DArray u_g_albedo;   // ground, scrub, track, dark, slope
 uniform sampler2DArray u_g_normal;
+uniform float u_footage;             // 1 when the ground photographs are the reference footage's, not Poly Haven's
 
 // A tiling photo texture sampled twice at unrelated scales and rotations, so the
 // repeat does not show.
 vec3 layer_grade(int layer) {
+    // The footage's tiles are already this scene's ground, at the colour it was measured to be.
+    if (u_footage > 0.5) return vec3(1.0);
     // The photographs are graded toward this scene's ground: warm, dry, a little
     // darker than a studio capture, olive where there is vegetation.
     if (layer == 0) return vec3(0.74, 0.60, 0.46);
@@ -155,15 +167,18 @@ vec3 layer_grade(int layer) {
     if (layer == 3) return vec3(0.62, 0.50, 0.40);
     return vec3(0.82, 0.78, 0.72);
 }
+// Metres one tile covers. The footage's tiles are patches of ground about a metre across.
+float tile_a() { return u_footage > 0.5 ? 1.35 : 2.6; }
+float tile_b() { return u_footage > 0.5 ? 3.3 : 6.1; }
 vec3 tex_albedo(int layer, vec2 xy) {
-    vec2 a = xy / 2.6;
-    vec2 b = mat2(0.80, -0.60, 0.60, 0.80) * xy / 6.1 + vec2(17.0, 5.0);
+    vec2 a = xy / tile_a();
+    vec2 b = mat2(0.80, -0.60, 0.60, 0.80) * xy / tile_b() + vec2(17.0, 5.0);
     vec3 c = pow(0.5 * (texture(u_g_albedo, vec3(a, layer)).rgb + texture(u_g_albedo, vec3(b, layer)).rgb), vec3(2.2));
     return c * layer_grade(layer);
 }
 vec2 tex_normal(int layer, vec2 xy) {
-    vec2 a = xy / 2.6;
-    vec2 b = mat2(0.80, -0.60, 0.60, 0.80) * xy / 6.1 + vec2(17.0, 5.0);
+    vec2 a = xy / tile_a();
+    vec2 b = mat2(0.80, -0.60, 0.60, 0.80) * xy / tile_b() + vec2(17.0, 5.0);
     vec2 na = texture(u_g_normal, vec3(a, layer)).xy * 2.0 - 1.0;
     vec2 nb = mat2(0.80, 0.60, -0.60, 0.80) * (texture(u_g_normal, vec3(b, layer)).xy * 2.0 - 1.0);
     return 0.5 * (na + nb);
@@ -219,6 +234,11 @@ void main() {
     if (u_has_tex != 0) {
         // Photographic ground. Only the layers that matter here are read.
         float wg = v_mat.x, ws = v_mat.y, wt = v_mat.z, wd = v_mat.w;
+        if (u_footage > 0.5) {
+            // Open ground in the footage is not bare sand: it is sand under dry grass, leaves and stalks. Part of it takes the straw.
+            ws += wg * 0.45;
+            wg *= 0.55;
+        }
         vec3 tex = vec3(0.0);
         vec2 nrm = vec2(0.0);
         float total = 0.0;
@@ -272,7 +292,7 @@ out vec4 v_tint;
 out float v_seed;
 void main() {
     vec3 p = in_pos * i_scale.xyz;
-    if (u_kind == 1 && i_tint.a > 0.0 && abs(in_normal.z) < 2.0) {
+    if (u_kind == 1 && i_tint.a > 0.0 && length(in_normal) < 1.5) {   // wood (normals of length 2) does not wobble
         // Leafy crowns have a broken outline: push the surface in and out along
         // its normal with noise, so a smooth lobe reads as a mass of leaves.
         vec3 q = (in_pos + vec3(i_scale.w)) * 9.0;
@@ -495,7 +515,7 @@ void main() {
         float t = 900.0 / d.z;
         vec2 uv = (u_cam.xy + d.xy * t) * 0.0011 + vec2(u_time * 0.0008, 0.0);
         float c = fbm2(uv * 3.0) * 0.75 + fbm2(uv * 9.0) * 0.25;
-        float cover = smoothstep(0.50, 0.74, c);
+        float cover = smoothstep(0.66, 0.86, c) * 0.55;   // the footage's sky is nearly clear: a few thin wisps
         float edge = smoothstep(0.50, 0.62, c) - smoothstep(0.66, 0.80, c);
         vec3 cloud = mix(vec3(0.80, 0.84, 0.90), vec3(1.0, 0.98, 0.94), edge + 0.3 * fbm2(uv * 21.0));
         cloud *= 0.82 + 0.25 * max(dot(vec3(d.xy, 0.0), vec3(u_sun.xy, 0.0)), 0.0);

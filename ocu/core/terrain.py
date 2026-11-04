@@ -522,8 +522,10 @@ class TerrainWorld:
         patch = np.sin(xs * 0.11 + 1.3) * np.cos(ys * 0.09 - 0.7)
         heights = low + (high - low) * np.clip(0.5 + 0.35 * patch + rng.normal(0.0, 0.16, count), 0.0, 1.0)
         crowns = np.minimum(heights * rng.uniform(*TREE_CROWN_RATIO, size=count), TREE_MAX_CROWN_M)
-        # Conifers on the drier, higher side of a stand, broadleaf in the wet.
-        species = (np.sin(xs * 0.045 - ys * 0.037 + 0.4) + rng.normal(0.0, 0.25, count) > 0.0).astype(np.float64)
+        # The footage's forest: acacia throughout (0), a rounder broadleaf in the wetter parts of a stand (1), and trees
+        # standing leafless in the dry season (2), more of them on the drier, higher side.
+        field = np.sin(xs * 0.045 - ys * 0.037 + 0.4) + rng.normal(0.0, 0.25, count)
+        species = np.where(field > 0.55, 2.0, np.where(field < -0.35, 1.0, 0.0))
         self.trees = np.stack([xs, ys, heights, crowns, species], axis=1)
 
     def _scatter_bushes(self) -> None:

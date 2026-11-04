@@ -1744,3 +1744,48 @@ them. `core/scenario.py` finds the ground; nothing is positioned by hand.
 **Display.** The thermal gain never stretches a picture narrower than 12 K (14 K for the map), and the default palette
 is white-hot: a sun-lit slope at a low sun differs from its shade by several kelvin, and stretching 4 K over a colour
 ramp made that read as noise.
+
+## Reference footage: the world is made to look like the ground it was filmed on
+
+Seven iPhone 15 clips of a dry deciduous foothill forest (about 30.87 N, 76.74 E, 420 to 480 m, early November) are
+the reference for how the simulated ground looks. The raw video (5.3 GB) is not in the repository (`reference_footage/`
+is ignored); what is derived from it is, about 4 MB: `assets/footage/ground/` and `ocu/data/footage_palette.json`.
+
+**Reading the clips** (`scripts/footage_ingest.py`). The video is 10-bit HLG, which a plain decode shows grey and flat,
+so it is converted to sRGB (HLG inverse OETF, BT.2020 to BT.709, a gentle highlight shoulder). Three clips carry a
+rotation flag and two were filmed partly upside down (IMG_5109 for 44 s, IMG_5128 for 61 s) with no flag at all.
+Orientation is decided from where the sky is: upside down after two consecutive samples with the sky clearly at the
+bottom, upright again on one clear sample at the top, unchanged between. The first version used a vote per frame and
+turned 34 upright frames of IMG_5108 over because shaded ground and a sign read as blue; the state machine is the fix.
+
+**Colours** (`scripts/footage_palette.py`). Medians over every sharp frame, by colour and position only: lit trail 199/167/130,
+shaded 94/79/62, lit straw 191/171/115, lit foliage 106/117/76, and a sky profile above the horizon from the hilltop
+clip (178/188/195 at 1 degree, 142/185/218 at 10). Measurements stop at 14 degrees; the sky above that is continued
+to a deeper blue by assumption (`palette.ABOVE_DEG`), which the footage does not show. The renderer finishes in an exposure,
+a filmic curve and a gamma, so each measured colour is run backwards through that ending (`render/palette.py`) to find the
+scene colour that comes out as the measured one. After the change, the rendered sky at the top of a level view is
+150/187/218 against the footage's 151/194/232, lit sand 198/178/147 against 199/167/130 and lit grass 181/163/106
+against 191/171/115. Shade is still lighter in the simulation than in the footage (132/114/90 against 94/79/62): the
+footage's shade is dappled under canopy, and the simulation has fewer and softer shadows.
+
+**Ground** (`scripts/footage_textures.py`). Five tiles (track, ground, scrub, dark, slope), each cut at full video resolution from a
+patch chosen by eye, un-lit by dividing out its slow brightness, made seamless by blending with itself shifted by half
+a tile (variance-preserving, so the join keeps its grain), and given a normal map from the brightness. The normal maps
+are a stand-in for a scan: there is no depth in the footage. A tile covers about 1.35 m (3.3 m for the second sample), not
+the 2.6 and 6.1 of the photographs they replace. Open ground takes 45% of the straw tile, because the footage's ground
+is under dry grass and leaves almost everywhere it is not trail.
+
+**Plants and stone.** The conifers and the round "lollipop" trees are gone. Trees are now three forms built from tapering
+forked limbs and clouds of small leaf sprays: an acacia with an open umbrella crown, a rounder broadleaf, and a tree standing
+leafless as many are in the dry season (`terrain.py` chooses between them by position). Shrubs are open and ragged with a
+share of dead leaves, and grass is a kans tussock, narrow arching blades olive at the root and straw at the tip with a few
+flowering stems. The fynbos shrub and green grass clumps from Poly Haven are no longer used (their downloads remain
+in `fetch_assets.py` and are simply unreferenced). The downloaded boulders are lichen-covered granite, orange, which
+nothing in the footage is; their colour is replaced with a grey-tan and the photograph's grain kept. Grass grows in
+patches and clumps by a slow noise, not evenly. These are choices of look, made from the footage by eye; no count of
+trees or grass was measured from it.
+
+**What this does not do.** The terrain's shape is still the simulation's own rolling ground. The footage has gullies, cut
+banks and steps that the height model does not generate, and nothing was reconstructed from the video in three
+dimensions (photogrammetry would only cover the strip that was walked and would break what the rover's planner and the
+LiDAR rely on).

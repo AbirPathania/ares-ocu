@@ -7,3 +7,6 @@ __pycache__/
 # Downloaded assets (see scripts/fetch_assets.py)
 assets/polyhaven/
 demo/two_device/dist/
+
+# Raw reference video (several GB); only what scripts/footage_ingest.py derives from it is tracked
+reference_footage/

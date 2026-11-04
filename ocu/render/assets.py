@@ -25,6 +25,8 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent.parent / "assets" / "polyhaven"
+#: What was made from the reference footage (scripts/footage_textures.py): the user's own ground, kept in the repository.
+FOOTAGE = Path(__file__).resolve().parent.parent.parent / "assets" / "footage"
 
 _COMPONENT = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16, 5125: np.uint32, 5126: np.float32}
 _WIDTH = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
@@ -244,10 +246,29 @@ def _load_image(path: Path, size: int = 1024) -> np.ndarray:
         return np.asarray(image, dtype=np.uint8).copy()
 
 
+#: The stone in the footage is grey-tan: river cobbles in the cut banks, pale weathered sandstone, nothing orange. The
+#: boulders downloaded for this scene are lichen-covered South African granite, so their colour is taken out and
+#: replaced, keeping the grain (brightness variation) of the photographs.
+STONE_TINT = np.array([1.00, 0.91, 0.78], dtype=np.float32)
+STONE_CHROMA_KEPT = 0.10
+STONE_LEVEL = 0.92
+
+
+def grade_stone(albedo: np.ndarray) -> np.ndarray:
+    f = albedo.astype(np.float32) / 255.0
+    lum = f @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    grey = lum[..., None] * STONE_TINT * STONE_LEVEL
+    graded = grey * (1.0 - STONE_CHROMA_KEPT) + f * STONE_CHROMA_KEPT
+    return (np.clip(graded, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
 def load_textures(model_dir: Path, name: str) -> Textures:
     base = model_dir / "textures"
+    albedo = _load_image(base / f"{name}_diff_1k.jpg")
+    if footage_ground_available() and PLAN.get(name, ("",))[0] in ("rock", "stone"):
+        albedo = grade_stone(albedo)
     return Textures(
-        albedo=_load_image(base / f"{name}_diff_1k.jpg"),
+        albedo=albedo,
         normal=_load_image(base / f"{name}_nor_gl_1k.jpg"),
         arm=_load_image(base / f"{name}_arm_1k.jpg"),
     )
@@ -264,11 +285,10 @@ PLAN = {
     "namaqualand_boulder_06": ("rock", 5500, 900, 0.10, 1),
     "namaqualand_rocks_01": ("rock", 4500, 700, 0.10, 4),
     "namaqualand_stones_01": ("stone", 500, 140, 0.20, 5),
-    "othonna_cerarioides": ("shrub", 3500, 600, 0.05, 7),
-    "grass_medium_02": ("grass", 700, 160, 0.0, 5),
-    "grass_medium_01": ("grass", 700, 160, 0.0, 8),
-    "grass_bermuda_01": ("grass", 500, 130, 0.0, 8),
 }
+# Not used any more: the fynbos shrub and the green grass clumps (othonna_cerarioides, grass_medium_01/02,
+# grass_bermuda_01) do not belong in a dry foothill forest. The footage's kans tussocks and dry shrubs are built in
+# render/meshes.py, which is what the renderer falls back to for any kind with no downloaded model.
 
 
 def _cache_path(name: str) -> Path:
@@ -351,8 +371,34 @@ def load_model(name: str) -> Model | None:
     return model
 
 
+GROUND_ROLES = ("ground", "scrub", "track", "dark", "slope")
+
+
+def footage_ground_available() -> bool:
+    return all((FOOTAGE / "ground" / f"{role}_{kind}.jpg").exists() for role in GROUND_ROLES for kind in ("albedo", "normal"))
+
+
+def load_footage_ground() -> dict[str, Textures] | None:
+    """The terrain's textures as made from the reference footage, or None if they have not been made."""
+    if not footage_ground_available():
+        return None
+    out = {}
+    try:
+        for role in GROUND_ROLES:
+            albedo = _load_image(FOOTAGE / "ground" / f"{role}_albedo.jpg")
+            normal = _load_image(FOOTAGE / "ground" / f"{role}_normal.jpg")
+            arm = np.full_like(albedo, (255, 230, 0))  # occlusion, roughness, metal: dry ground, not shiny; the terrain does not read it
+            out[role] = Textures(albedo, normal, arm)
+    except OSError:
+        return None
+    return out
+
+
 def load_ground_textures() -> dict[str, Textures] | None:
-    """The terrain's textures, keyed by what they are for."""
+    """The terrain's textures, keyed by what they are for: the footage's if made, otherwise Poly Haven's."""
+    footage = load_footage_ground()
+    if footage is not None:
+        return footage
     wanted = {
         "ground": "dry_ground_01",
         "scrub": "aerial_grass_rock",
@@ -378,3 +424,7 @@ def load_ground_textures() -> dict[str, Textures] | None:
 
 def available() -> bool:
     return (ROOT / "models").exists() and (ROOT / "textures").exists()
+
+
+def ground_is_footage() -> bool:
+    return footage_ground_available()

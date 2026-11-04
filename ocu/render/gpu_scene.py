@@ -19,7 +19,7 @@ import time
 import numpy as np
 
 from ocu.core.terrain import Terrain, TerrainWorld
-from ocu.render import assets, figures, meshes, shaders
+from ocu.render import assets, figures, meshes, palette, shaders
 
 SHADOW_SIZE = 4096
 MSAA_SAMPLES = 4
@@ -28,10 +28,10 @@ DUST_HEIGHT_M = {"vehicle": 1.0, "person": 0.5, "animal": 0.4}
 NEAR_M = 0.12
 FAR_M = 5000.0
 FOG_PER_M = 1.0 / 520.0
-EXPOSURE = 0.85
+EXPOSURE = palette.EXPOSURE
 
 #: Things further than this are not drawn: past it they are fog.
-DRAW_DISTANCE = {"rock": 150.0, "pebble": 34.0, "bush": 120.0, "conifer": 190.0, "broadleaf": 190.0, "grass": 22.0}
+DRAW_DISTANCE = {"rock": 150.0, "pebble": 34.0, "bush": 120.0, "acacia": 190.0, "leafy": 190.0, "snag": 190.0, "grass": 22.0}
 
 ROCK_VARIANTS = 5
 FOLIAGE_VARIANTS = 3
@@ -277,8 +277,9 @@ class GpuScene:
             "rock": [meshes.rock_template(100 + k) for k in range(ROCK_VARIANTS)],
             "pebble": [meshes.rock_template(300 + k, 2) for k in range(3)],
             "bush": [meshes.bush_template(500 + k) for k in range(FOLIAGE_VARIANTS)],
-            "conifer": [meshes.conifer_template(700 + k) for k in range(FOLIAGE_VARIANTS)],
-            "broadleaf": [meshes.broadleaf_template(900 + k) for k in range(FOLIAGE_VARIANTS)],
+            "acacia": [meshes.acacia_template(700 + k) for k in range(FOLIAGE_VARIANTS)],
+            "leafy": [meshes.leafy_template(900 + k) for k in range(FOLIAGE_VARIANTS)],
+            "snag": [meshes.snag_template(1300 + k) for k in range(FOLIAGE_VARIANTS)],
             "grass": [meshes.grass_template(1100 + k) for k in range(4)],
         }
         self._rover_mesh = meshes.rover_mesh()
@@ -355,7 +356,7 @@ class GpuScene:
                 [
                     np.stack([k[:, 0], k[:, 1], gz - 0.04, rng.uniform(0, math.tau, len(k))], axis=1),
                     np.stack([k[:, 2], k[:, 2], k[:, 2] * rng.uniform(0.85, 1.1, len(k)), rng.uniform(0, 100, len(k))], axis=1),
-                    np.concatenate([tone * rng.uniform(0.40, 0.58, (len(k), 1)), tone * 0.50, tone * rng.uniform(0.30, 0.45, (len(k), 1)), np.full((len(k), 1), 0.6)], axis=1),
+                    np.concatenate([tone, tone, tone * rng.uniform(0.85, 1.0, (len(k), 1)), np.full((len(k), 1), 0.6)], axis=1),
                 ],
                 axis=1,
             )
@@ -366,19 +367,19 @@ class GpuScene:
         t = world.trees
         if len(t):
             gz = self._ground(t[:, 0], t[:, 1])
-            for species, kind, crown_in_template in ((0, "broadleaf", 0.34), (1, "conifer", 0.30)):
+            for species, kind, crown_in_template in ((0, "acacia", 0.40), (1, "leafy", 0.34), (2, "snag", 0.34)):
                 sel = t[:, 4] == species
                 if not sel.any():
                     continue
                 tt, gg = t[sel], gz[sel]
                 n = len(tt)
-                tone = rng.uniform(0.82, 1.18, (n, 1))
-                warm = rng.uniform(0.9, 1.12, (n, 1))
+                tone = rng.uniform(0.85, 1.15, (n, 1))
+                warm = rng.uniform(0.94, 1.08, (n, 1))
                 rows = np.concatenate(
                     [
                         np.stack([tt[:, 0], tt[:, 1], gg - 0.05, rng.uniform(0, math.tau, n)], axis=1),
                         np.stack([tt[:, 3] / crown_in_template, tt[:, 3] / crown_in_template, tt[:, 2], rng.uniform(0, 100, n)], axis=1),
-                        np.concatenate([tone * warm * 0.72, tone * 0.74, tone * 0.62, np.full((n, 1), 1.0)], axis=1),
+                        np.concatenate([tone * warm, tone, tone / warm, np.full((n, 1), 1.0)], axis=1),
                     ],
                     axis=1,
                 )
@@ -388,7 +389,7 @@ class GpuScene:
 
         # Grass: a tuft per cell where the ground carries it, thicker in scrub.
         grid = world._grid
-        for terrain, per_cell in ((Terrain.SCRUB, 1.4), (Terrain.GROUND, 0.36), (Terrain.BUSH, 0.7)):
+        for terrain, per_cell in ((Terrain.SCRUB, 1.6), (Terrain.GROUND, 0.9), (Terrain.BUSH, 0.9)):
             ix, iy = np.nonzero(grid == int(terrain))
             count = rng.poisson(per_cell, len(ix))
             ix, iy = np.repeat(ix, count), np.repeat(iy, count)
@@ -396,16 +397,25 @@ class GpuScene:
                 continue
             gx = (ix - self._extent + rng.uniform(0, 1, len(ix))) * self._cell
             gy = (iy - self._extent + rng.uniform(0, 1, len(ix))) * self._cell
+            # Grass grows in patches and in clumps, not evenly: thin it by a slow noise, then give each survivor a few
+            # close neighbours.
+            patch = meshes.fbm3(np.stack([gx * 0.30, gy * 0.30, np.zeros_like(gx)], axis=1), 4242, 3)
+            keep = rng.uniform(0.0, 1.0, len(gx)) < np.clip((patch - 0.28) / 0.34, 0.06, 1.0)
+            gx, gy = gx[keep], gy[keep]
+            rep = rng.integers(1, 4, len(gx))
+            gx = np.repeat(gx, rep) + rng.normal(0.0, 0.20, int(rep.sum()))
+            gy = np.repeat(gy, rep) + rng.normal(0.0, 0.20, int(rep.sum()))
             ground = self._ground(gx, gy)
             n = len(gx)
-            straw = rng.uniform(0.0, 1.0, n) < (0.55 if terrain == Terrain.GROUND else 0.3)
-            tone = rng.uniform(0.75, 1.2, (n, 1))
-            colour = np.where(straw[:, None], np.array([1.05, 0.92, 0.62]), np.array([0.62, 0.95, 0.5])) * tone
-            height = rng.uniform(0.25, 0.55, n) * (1.3 if terrain == Terrain.SCRUB else 0.9)
+            # the template is the colour of dry grass; an instance only varies from it, a little greener or more bleached
+            straw = rng.uniform(0.0, 1.0, n) < 0.7
+            tone = rng.uniform(0.75, 1.25, (n, 1))
+            colour = np.where(straw[:, None], np.array([1.05, 0.98, 0.80]), np.array([0.85, 1.05, 0.75])) * tone
+            height = np.exp(rng.normal(np.log(0.62 if terrain == Terrain.SCRUB else 0.40), 0.32, n))
             rows = np.concatenate(
                 [
                     np.stack([gx, gy, ground - 0.02, rng.uniform(0, math.tau, n)], axis=1),
-                    np.stack([height * 0.9, height * 0.9, height, rng.uniform(0, 100, n)], axis=1),
+                    np.stack([height * 0.62, height * 0.62, height, rng.uniform(0, 100, n)], axis=1),
                     np.concatenate([colour, np.full((n, 1), 0.8)], axis=1),
                 ],
                 axis=1,
@@ -806,6 +816,7 @@ class GpuScene:
             self._set(program, "u_shadow", 0)
         textured = self.ground_albedo is not None
         self._set(self.p_terrain, "u_has_tex", 1 if textured else 0)
+        self._set(self.p_terrain, "u_footage", 1.0 if (textured and assets.ground_is_footage()) else 0.0)
         if textured:
             self.ground_albedo.use(location=1)
             self.ground_normal.use(location=2)

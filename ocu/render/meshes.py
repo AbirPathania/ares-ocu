@@ -169,149 +169,200 @@ def rock_template(seed: int, subdivisions: int = 3) -> tuple[np.ndarray, np.ndar
 
 
 def bush_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """A shrub: footprint radius one, about 0.9 tall, standing on the origin.
+    """A dry-season shrub (lantana, a thorn bush): footprint radius one, about 0.9 tall, standing on the origin.
 
-    A clump of overlapping leafy lobes. Each is a displaced sphere, darker
-    toward its inside and underneath, so the mass reads as foliage with depth
-    and not as one green ball.
-    """
+    Several thin stems from the root, a loose mass of olive leaf sprays held on them, a share of the leaves brown and
+    dead, and gaps you can see through. Not a lobed ball: the footage's shrubs are open and ragged."""
     rng = np.random.default_rng(seed)
     parts = []
-    lobes = int(rng.integers(5, 8))
-    for k in range(lobes):
-        radius = rng.uniform(0.38, 0.62)
-        angle = rng.uniform(0, math.tau)
-        spread = 0.52 if k else 0.0
-        centre = np.array(
-            [math.cos(angle) * spread * rng.uniform(0.5, 1.0), math.sin(angle) * spread * rng.uniform(0.5, 1.0), radius * 0.72 + rng.uniform(0, 0.18)]
-        )
-        d, faces = icosphere(2)
-        wobble = 1.0 + 0.30 * (fbm3(d * 3.2 + k * 3.7, seed + k, 3) - 0.5) + 0.12 * (fbm3(d * 9.0, seed + 5 + k, 2) - 0.5)
-        positions = d * radius * wobble[:, None] * np.array([1.0, 1.0, 0.86]) + centre
-        normals = vertex_normals(positions, faces)
-        # Leaves face outward and up, which is what a crown catches light on.
-        normals = normals + np.array([0.0, 0.0, 0.35])
-        normals /= np.linalg.norm(normals, axis=1, keepdims=True)
-        top = np.clip((positions[:, 2] - 0.1) / 0.9, 0.0, 1.0)
-        tone = 0.70 + 0.55 * fbm3(positions * 4.0, seed + 9 + k, 3)
-        colours = np.stack([0.24 * tone, 0.31 * tone, 0.10 * tone], axis=1)
-        occlusion = np.clip(0.42 + 0.72 * top, 0.3, 1.0)
-        # Cut off below the ground so nothing hangs under it.
-        keep = np.ones(len(positions), dtype=bool)
-        parts.append((_pack(positions, normals, colours, occlusion), faces.reshape(-1).astype(np.uint32)))
-    vertices, indices = _merge(parts)
-    return vertices, indices
+    for k in range(int(rng.integers(5, 8))):
+        a = rng.uniform(0.0, math.tau)
+        out = np.array([math.cos(a), math.sin(a), 0.0])
+        end = np.array([0.0, 0.0, 0.0])
+        points = [end]
+        d = out * 0.55 + np.array([0.0, 0.0, 0.85])
+        for _ in range(4):
+            d = d + rng.normal(0.0, 0.12, 3)
+            d /= np.linalg.norm(d)
+            points.append(points[-1] + d * 0.22)
+        points = np.array(points)
+        parts.append(_tube(points, np.linspace(0.028, 0.012, len(points)), 5, BARK_LIGHT, 0.9))
+        parts.append(_fronds(points[-1] + np.array([0.0, 0.0, 0.05]), np.array([0.40, 0.40, 0.28]), 60, 0.105, rng, dry=0.30))
+    return _merge(parts)
 
 
 # --- trees ------------------------------------------------------------------
 
 
-def _cylinder(radius_bottom, radius_top, height, sides, z0=0.0) -> tuple[np.ndarray, np.ndarray]:
-    angles = np.linspace(0, math.tau, sides, endpoint=False)
-    cos, sin = np.cos(angles), np.sin(angles)
-    bottom = np.stack([cos * radius_bottom, sin * radius_bottom, np.full(sides, z0)], axis=1)
-    top = np.stack([cos * radius_top, sin * radius_top, np.full(sides, z0 + height)], axis=1)
-    positions = np.concatenate([bottom, top])
+# Colours are linear albedo, set from the reference footage (scripts/footage_palette.py): a dry-season foothill forest,
+# its leaves olive and dull, its bark grey-brown, its dead leaves the colour of the straw under them.
+LEAF_LIT = np.array([0.105, 0.128, 0.050])
+LEAF_DEEP = np.array([0.040, 0.055, 0.024])
+LEAF_DRY = np.array([0.26, 0.20, 0.09])
+BARK = np.array([0.070, 0.055, 0.045])
+BARK_LIGHT = np.array([0.13, 0.105, 0.085])
+#: Wood is marked by normals of length two, which the instance shader reads as "do not wobble this": the wobble that
+#: breaks up a crown would bend a twig.
+WOOD = 2.0
+
+
+def _tube(points: np.ndarray, radii: np.ndarray, sides: int, colour: np.ndarray, occlusion: float) -> tuple[np.ndarray, np.ndarray]:
+    """A tapering tube along a polyline, rings joined by quads, ends left open (a branch ends in leaves or in a thinner branch)."""
+    n = len(points)
+    rings, normals = [], []
+    angles = np.linspace(0.0, math.tau, sides, endpoint=False)
+    previous_side = None
+    for i in range(n):
+        tangent = points[min(i + 1, n - 1)] - points[max(i - 1, 0)]
+        tangent = tangent / max(float(np.linalg.norm(tangent)), 1e-9)
+        helper = np.array([0.0, 0.0, 1.0]) if abs(tangent[2]) < 0.95 else np.array([1.0, 0.0, 0.0])
+        side = np.cross(tangent, helper)
+        side /= max(float(np.linalg.norm(side)), 1e-9)
+        if previous_side is not None and float(np.dot(side, previous_side)) < 0.0:
+            side = -side
+        previous_side = side
+        up = np.cross(tangent, side)
+        ring = np.cos(angles)[:, None] * side + np.sin(angles)[:, None] * up
+        rings.append(points[i] + ring * radii[i])
+        normals.append(ring)
+    positions = np.concatenate(rings)
+    normal = np.concatenate(normals) * WOOD
     faces = []
-    for i in range(sides):
-        j = (i + 1) % sides
-        faces += [(i, j, sides + j), (i, sides + j, sides + i)]
-    faces = np.array(faces, dtype=np.uint32)
-    normals = np.concatenate([np.stack([cos, sin, np.zeros(sides)], axis=1)] * 2)
-    return positions, faces, normals
+    for i in range(n - 1):
+        for k in range(sides):
+            j = (k + 1) % sides
+            a, b, c, d = i * sides + k, i * sides + j, (i + 1) * sides + j, (i + 1) * sides + k
+            faces += [(a, b, c), (a, c, d)]
+    rng_tone = 0.85 + 0.3 * np.linspace(0.0, 1.0, n).repeat(sides)
+    colours = np.tile(colour, (len(positions), 1)) * rng_tone[:, None]
+    return _pack(positions, normal, colours, np.full(len(positions), occlusion)), np.array(faces, dtype=np.uint32).reshape(-1)
 
 
-def conifer_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """A pine or fir: height one, crown radius about 0.30, trunk on the origin.
-
-    A trunk with whorls of boughs up it, each bough a drooping fan of needles,
-    long and low on the tree and short at the top. Built from boughs, not from
-    cones, so the outline is ragged the way a conifer's is and the light gets
-    in between them.
-    """
-    rng = np.random.default_rng(seed)
-    parts = []
-
-    trunk_positions, trunk_faces, trunk_normals = _cylinder(0.030, 0.006, 1.0, 7)
-    trunk_colour = np.tile(np.array([0.27, 0.19, 0.12]), (len(trunk_positions), 1))
-    parts.append(
-        (_pack(trunk_positions, trunk_normals, trunk_colour, np.full(len(trunk_positions), 0.8)), trunk_faces.reshape(-1))
-    )
-
+def _fronds(centre: np.ndarray, radii: np.ndarray, count: int, size: float, rng: np.random.Generator, dry: float = 0.0,
+            top_bias: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """A cloud of small leaf sprays in a flattened ellipsoid: each a pair of triangles turned a random way, so the
+    outline of the crown is ragged and the light comes through it. Lit on the outside, dark in the middle."""
     positions, normals, colours, occlusion, faces = [], [], [], [], []
-    whorls = 30
-    first_whorl = 0.15
-    for w in range(whorls):
-        f = w / (whorls - 1)
-        z = first_whorl + f * (0.985 - first_whorl)
-        length = 0.34 * (1.0 - f) ** 0.85 + 0.03
-        boughs = max(4, int(round(8 - 4 * f)))
-        offset = rng.uniform(0, math.tau)
-        for k in range(boughs):
-            angle = offset + k * math.tau / boughs + rng.normal(0, 0.18)
-            L = length * rng.uniform(0.78, 1.14)
-            droop = L * rng.uniform(0.18, 0.36)
-            width = max(L * 0.34, 0.022)
-            direction = np.array([math.cos(angle), math.sin(angle), 0.0])
-            across = np.array([-direction[1], direction[0], 0.0])
-            base_index = len(positions)
-            levels = (0.0, 0.33, 0.66, 1.0)
-            for t in levels:
-                centre = direction * (L * t) + np.array([0.0, 0.0, z - droop * t * t + 0.02 * (1 - t)])
-                half = width * (np.sin(math.pi * min(t * 0.85 + 0.1, 1.0)) * 0.9 + 0.1) * (1.0 - 0.55 * t)
-                tint = 0.75 + 0.5 * t
-                shade = 0.30 + 0.70 * t  # the inner boughs are in shadow
-                for side in (-1, 1) if t < 1.0 else (0,):
-                    positions.append(centre + across * half * side)
-                    n = np.array([direction[0] * 0.25, direction[1] * 0.25, 0.92])
-                    normals.append(n / np.linalg.norm(n))
-                    green = np.array([0.10, 0.18, 0.08]) * (0.8 + 0.4 * rng.uniform())
-                    colours.append(green * tint)
-                    occlusion.append(shade * (0.62 + 0.38 * f))
-            for q in range(3):
-                a, b = base_index + 2 * q, base_index + 2 * q + 1
-                if q < 2:
-                    c, d = base_index + 2 * q + 2, base_index + 2 * q + 3
-                    faces += [(a, b, d), (a, d, c)]
-                else:
-                    faces += [(a, b, base_index + 6)]
-    parts.append(
-        (
-            _pack(np.array(positions), np.array(normals), np.array(colours), np.array(occlusion)),
-            np.array(faces, dtype=np.uint32).reshape(-1),
-        )
-    )
+    for _ in range(count):
+        while True:
+            q = rng.uniform(-1.0, 1.0, 3)
+            if float(q @ q) <= 1.0:
+                break
+        p = centre + q * radii
+        depth = 1.0 - float(np.linalg.norm(q))  # 0 at the surface, 1 in the middle
+        facing = q / max(float(np.linalg.norm(q)), 1e-6)
+        a = rng.uniform(0.0, math.tau)
+        axis_u = np.array([math.cos(a), math.sin(a), rng.uniform(-0.45, 0.65)])
+        axis_u /= np.linalg.norm(axis_u)
+        axis_v = np.cross(axis_u, np.array([0.0, 0.0, 1.0]))
+        axis_v /= max(float(np.linalg.norm(axis_v)), 1e-6)
+        s = size * rng.uniform(0.7, 1.3)
+        corners = [p - axis_u * s * 0.6, p + axis_v * s * 0.45, p + axis_u * s, p - axis_v * s * 0.45]
+        n = facing * 0.55 + np.array([0.0, 0.0, 0.55 + top_bias]) + rng.normal(0.0, 0.18, 3)
+        n /= np.linalg.norm(n)
+        height_lit = float(np.clip(0.5 + 0.5 * q[2] + 0.25 * rng.normal(), 0.0, 1.0))
+        is_dry = rng.uniform() < dry
+        colour = LEAF_DRY * rng.uniform(0.7, 1.2) if is_dry else (LEAF_DEEP + (LEAF_LIT - LEAF_DEEP) * height_lit) * rng.uniform(0.8, 1.25)
+        ao = float(np.clip(0.38 + 0.62 * (1.0 - depth) ** 0.7 + 0.15 * q[2], 0.3, 1.0))
+        base = len(positions)
+        for corner in corners:
+            positions.append(corner)
+            normals.append(n)
+            colours.append(colour)
+            occlusion.append(ao)
+        faces += [(base, base + 1, base + 2), (base, base + 2, base + 3)]
+    return _pack(np.array(positions), np.array(normals), np.array(colours), np.array(occlusion)), np.array(faces, dtype=np.uint32).reshape(-1)
+
+
+class _Tree:
+    """Accumulates limbs and foliage for one tree."""
+
+    def __init__(self, seed: int) -> None:
+        self.rng = np.random.default_rng(seed)
+        self.parts: list[tuple[np.ndarray, np.ndarray]] = []
+        self.tips: list[tuple[np.ndarray, np.ndarray, float]] = []  # where a limb ended: position, direction, radius
+
+    def limb(self, start, direction, length, radius, bend, segments=5, colour=BARK, taper=0.55) -> tuple[np.ndarray, np.ndarray]:
+        rng = self.rng
+        direction = np.asarray(direction, dtype=np.float64)
+        direction /= np.linalg.norm(direction)
+        points = [np.asarray(start, dtype=np.float64)]
+        for _ in range(segments):
+            direction = direction + rng.normal(0.0, bend, 3) + np.array([0.0, 0.0, 0.05])
+            direction /= np.linalg.norm(direction)
+            points.append(points[-1] + direction * length / segments)
+        points = np.array(points)
+        radii = np.linspace(radius, radius * taper, len(points))
+        self.parts.append(_tube(points, radii, 6 if radius > 0.006 else 4, colour, 0.9))
+        return points[-1], direction
+
+    def grow(self, start, direction, length, radius, depth, spread, lean=0.0, fork=(2, 3)):
+        """A limb, then at its end forks of shorter, thinner limbs that go out and up."""
+        end, d = self.limb(start, direction, length, radius, 0.10)
+        if depth == 0:
+            self.tips.append((end, d, radius))
+            return
+        rng = self.rng
+        for k in range(int(rng.integers(fork[0], fork[1] + 1))):
+            a = rng.uniform(0.0, math.tau)
+            out = np.array([math.cos(a), math.sin(a), 0.0])
+            child = d * 0.55 + out * spread * rng.uniform(0.7, 1.2) + np.array([0.0, 0.0, 0.35])
+            self.grow(end, child, length * rng.uniform(0.62, 0.8), radius * 0.62, depth - 1, spread, lean, fork)
+
+    def finish(self) -> tuple[np.ndarray, np.ndarray]:
+        return _merge(self.parts)
+
+
+def acacia_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """An acacia of the kind that lines the footage's trails: height one, crown radius about 0.40, trunk on the origin.
+
+    A slender, leaning trunk that forks low into three or four limbs, which fork again and carry thin, flat layers of
+    feathery leaves at their ends: an open crown you can see sky through, not a ball."""
+    tree = _Tree(seed)
+    rng = tree.rng
+    lean = np.array([rng.normal(0.0, 0.10), rng.normal(0.0, 0.10), 1.0])
+    end, d = tree.limb([0, 0, 0], lean, 0.26, 0.024, 0.07, segments=5, taper=0.72)
+    for k in range(int(rng.integers(3, 6))):
+        a = rng.uniform(0.0, math.tau)
+        out = np.array([math.cos(a), math.sin(a), 0.0])
+        tree.grow(end, d * 0.7 + out * 0.85 + np.array([0.0, 0.0, 0.3]), 0.36, 0.0125, 2, 0.85)
+    parts = tree.parts
+    for tip, direction, radius in tree.tips:
+        centre = tip + np.array([0.0, 0.0, 0.02])
+        parts.append(_fronds(centre, np.array([0.155, 0.155, 0.045]), 46, 0.078, rng, dry=0.06))
     return _merge(parts)
 
 
-def broadleaf_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """A broadleaf: height one, crown radius about 0.34, trunk on the origin."""
-    rng = np.random.default_rng(seed)
-    parts = []
-    trunk_positions, trunk_faces, trunk_normals = _cylinder(0.045, 0.02, 0.5, 8)
-    trunk_colour = np.tile(np.array([0.34, 0.25, 0.17]), (len(trunk_positions), 1))
-    parts.append(
-        (_pack(trunk_positions, trunk_normals, trunk_colour, np.full(len(trunk_positions), 0.85)), trunk_faces.reshape(-1))
-    )
+def leafy_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """A rounder broadleaf of the same forest (a bauhinia, a terminalia): height one, crown radius about 0.34."""
+    tree = _Tree(seed)
+    rng = tree.rng
+    lean = np.array([rng.normal(0.0, 0.08), rng.normal(0.0, 0.08), 1.0])
+    end, d = tree.limb([0, 0, 0], lean, 0.32, 0.028, 0.06, segments=5, taper=0.72)
+    for k in range(int(rng.integers(2, 4))):
+        a = rng.uniform(0.0, math.tau)
+        out = np.array([math.cos(a), math.sin(a), 0.0])
+        tree.grow(end, d * 0.9 + out * 0.6 + np.array([0.0, 0.0, 0.25]), 0.30, 0.014, 2, 0.65)
+    parts = tree.parts
+    for tip, direction, radius in tree.tips:
+        parts.append(_fronds(tip + np.array([0.0, 0.0, 0.04]), np.array([0.135, 0.135, 0.105]), 60, 0.074, rng, dry=0.05))
+    return _merge(parts)
 
-    clusters = int(rng.integers(6, 10))
-    for k in range(clusters):
-        angle = rng.uniform(0, math.tau)
-        spread = rng.uniform(0.0, 0.22) if k else 0.0
-        centre = np.array([math.cos(angle) * spread, math.sin(angle) * spread, rng.uniform(0.52, 0.80)])
-        radius = rng.uniform(0.17, 0.26)
-        d, faces = icosphere(2)
-        wobble = 1.0 + 0.34 * (fbm3(d * 3.0 + k * 2.9, seed + k, 3) - 0.5) + 0.16 * (fbm3(d * 8.0, seed + 3 + k, 2) - 0.5)
-        positions = d * radius * wobble[:, None] * np.array([1.0, 1.0, 0.82]) + centre
-        normals = vertex_normals(positions, faces)
-        normals = normals + np.array([0.0, 0.0, 0.3])
-        normals /= np.linalg.norm(normals, axis=1, keepdims=True)
-        top = np.clip((positions[:, 2] - 0.45) / 0.5, 0.0, 1.0)
-        shade = 0.62 + 0.6 * fbm3(positions * 5.5, seed + 5 + k, 3)
-        green = np.array([0.19, 0.27, 0.11])
-        colours = np.tile(green, (len(positions), 1)) * shade[:, None]
-        occlusion = np.clip(0.34 + 0.78 * top + 0.2 * np.clip(d[:, 2], 0, 1), 0.28, 1.0)
-        parts.append((_pack(positions, normals, colours, occlusion), faces.reshape(-1).astype(np.uint32)))
+
+def snag_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """A tree with its leaves off, as many of them are in the dry season: height one, crown radius about 0.34. Fine
+    bare twigs against the sky, and a few dead leaves hanging on."""
+    tree = _Tree(seed)
+    rng = tree.rng
+    lean = np.array([rng.normal(0.0, 0.10), rng.normal(0.0, 0.10), 1.0])
+    end, d = tree.limb([0, 0, 0], lean, 0.30, 0.024, 0.08, segments=5, taper=0.72)
+    for k in range(int(rng.integers(3, 5))):
+        a = rng.uniform(0.0, math.tau)
+        out = np.array([math.cos(a), math.sin(a), 0.0])
+        tree.grow(end, d * 0.75 + out * 0.85 + np.array([0.0, 0.0, 0.3]), 0.30, 0.011, 3, 0.9, fork=(2, 3))
+    parts = tree.parts
+    for tip, direction, radius in tree.tips[: len(tree.tips) // 3]:
+        parts.append(_fronds(tip, np.array([0.05, 0.05, 0.03]), 6, 0.040, rng, dry=1.0))
     return _merge(parts)
 
 
@@ -396,38 +447,62 @@ def rover_mesh(length: float = 1.15, width: float = 0.85, height: float = 0.8) -
 
 
 def grass_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """A tuft: height one, a handful of curved blades fanning from the origin."""
+    """A tussock of dry-season grass (kans, the tall grass that closes in over the footage's trails): height one,
+    footprint radius about 0.5.
+
+    Many long narrow blades that rise from a tight base and arch outward, olive-green at the root and straw to pale at
+    the tip, a few stiff stems standing above them with a pale plume. Narrow, because real grass blades are."""
     rng = np.random.default_rng(seed)
     positions, normals, colours, occlusion, faces = [], [], [], [], []
-    blades = int(rng.integers(8, 12))
+    blades = int(rng.integers(34, 48))
     for _ in range(blades):
-        angle = rng.uniform(0, math.tau)
-        base = np.array([math.cos(angle), math.sin(angle), 0.0]) * rng.uniform(0.0, 0.09)
-        lean = np.array([math.cos(angle + rng.normal(0, 0.5)), math.sin(angle + rng.normal(0, 0.5)), 0.0])
+        angle = rng.uniform(0.0, math.tau)
+        reach = rng.uniform(0.0, 0.10)
+        base = np.array([math.cos(angle), math.sin(angle), 0.0]) * reach
+        lean = np.array([math.cos(angle + rng.normal(0.0, 0.35)), math.sin(angle + rng.normal(0.0, 0.35)), 0.0])
         height = rng.uniform(0.55, 1.0)
-        bend = rng.uniform(0.15, 0.55)
-        width = rng.uniform(0.030, 0.045)
+        bend = rng.uniform(0.25, 0.75)  # how far the tip falls outward, as a fraction of height
+        width = rng.uniform(0.020, 0.034)
         across = np.array([-lean[1], lean[0], 0.0])
         first = len(positions)
-        levels = (0.0, 0.4, 0.75, 1.0)
-        for k, t in enumerate(levels):
-            centre = base + lean * (bend * t * t * height) + np.array([0.0, 0.0, t * height])
-            w = width * (1.0 - t * 0.92)
-            tint = 0.30 + 0.70 * t
+        levels = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+        for t in levels:
+            centre = base + lean * (bend * t * t * height) + np.array([0.0, 0.0, t * height * (1.0 - 0.25 * bend * t)])
+            w = width * (1.0 - t * 0.95)
             for side in (-1, 1) if t < 1.0 else (0,):
                 positions.append(centre + across * w * side)
                 normals.append(np.array([lean[0] * 0.5, lean[1] * 0.5, 0.85]))
-                colours.append(np.array([0.22, 0.25, 0.10]) * (1 - t) + np.array([0.70, 0.66, 0.34]) * t)
-                occlusion.append(0.45 + 0.55 * t)
-        # Strip: three quads then the tip triangle.
-        for k in range(3):
+                green = np.array([0.050, 0.060, 0.024])
+                straw = np.array([0.205, 0.158, 0.068])
+                pale = np.array([0.290, 0.245, 0.135])
+                colours.append(green * (1 - t) ** 1.5 + straw * (1 - abs(2 * t - 1.0)) * 0.9 + pale * t ** 2.0 * 0.8 + straw * 0.22)
+                occlusion.append(0.35 + 0.65 * t)
+        for k in range(len(levels) - 2):
             a, b = first + 2 * k, first + 2 * k + 1
-            if k < 2:
-                c, d = first + 2 * k + 2, first + 2 * k + 3
-                faces += [(a, b, d), (a, d, c)]
-            else:
-                tip = first + 6
-                faces += [(a, b, tip)]
+            c, d = first + 2 * k + 2, first + 2 * k + 3
+            faces += [(a, b, d), (a, d, c)]
+        faces += [(first + 2 * (len(levels) - 2), first + 2 * (len(levels) - 2) + 1, first + 2 * (len(levels) - 1))]
+    for _ in range(int(rng.integers(2, 5))):  # flowering stems
+        angle = rng.uniform(0.0, math.tau)
+        top = np.array([math.cos(angle), math.sin(angle), 0.0]) * rng.uniform(0.05, 0.25) + np.array([0.0, 0.0, rng.uniform(1.0, 1.3)])
+        first = len(positions)
+        for t in (0.0, 0.6, 1.0):
+            centre = np.array([0.0, 0.0, 0.0]) * (1 - t) + top * t
+            positions += [centre + np.array([0.008, 0.0, 0.0]) * (1 - 0.5 * t), centre - np.array([0.008, 0.0, 0.0]) * (1 - 0.5 * t)]
+            normals += [np.array([0.0, 0.0, 1.0])] * 2
+            colours += [np.array([0.22, 0.18, 0.10])] * 2
+            occlusion += [0.9, 0.9]
+        faces += [(first, first + 1, first + 3), (first, first + 3, first + 2), (first + 2, first + 3, first + 5), (first + 2, first + 5, first + 4)]
+        # the plume: a soft fan of pale strands at the top
+        for k in range(5):
+            a = angle + (k - 2) * 0.35
+            tip = top + np.array([math.cos(a) * 0.035, math.sin(a) * 0.035, 0.11])
+            i0 = len(positions)
+            positions += [top + np.array([0.005, 0.0, 0.0]), top - np.array([0.005, 0.0, 0.0]), tip]
+            normals += [np.array([0.0, 0.0, 1.0])] * 3
+            colours += [np.array([0.34, 0.31, 0.23])] * 3
+            occlusion += [0.9, 0.95, 1.0]
+            faces += [(i0, i0 + 1, i0 + 2)]
     positions = np.array(positions)
     normals = np.array(normals)
     normals /= np.linalg.norm(normals, axis=1, keepdims=True)

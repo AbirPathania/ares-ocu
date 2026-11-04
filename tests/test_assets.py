@@ -81,6 +81,7 @@ def test_the_ground_textures_load_as_a_matching_set():
 
 def test_a_missing_model_is_not_an_error(tmp_path, monkeypatch):
     monkeypatch.setattr(assets, "ROOT", tmp_path)
+    monkeypatch.setattr(assets, "FOOTAGE", tmp_path)
     assert assets.load_model("namaqualand_boulder_03") is None
     assert assets.load_ground_textures() is None
     assert not assets.available()
