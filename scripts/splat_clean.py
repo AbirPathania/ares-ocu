@@ -24,6 +24,8 @@ from ocu.render import splats, trail  # noqa: E402
 NEAR_M = 0.30
 TOO_BIG_M = 1.2
 MAST_HEIGHT_M = 0.6
+#: A splat longer than this many times its middle axis is a needle: right from the poses it was trained at, a streak from a pose to one side of them.
+MAX_ASPECT = 6.0
 
 
 def read_raw(path: Path) -> tuple[list[str], np.ndarray, bytes]:
@@ -57,11 +59,24 @@ def main() -> None:
     for path in (centres, lowered):
         for c in path:
             near |= np.linalg.norm(position - c, axis=1) < radius
+    max_aspect = float(sys.argv[5]) if len(sys.argv) > 5 else MAX_ASPECT
+    too_big_m = float(sys.argv[6]) if len(sys.argv) > 6 else TOO_BIG_M
+    mode = sys.argv[4] if len(sys.argv) > 4 else "remove"  # "remove" the too-big ones, or "shrink" them (and the needles) to the limits instead
     largest = np.exp(np.maximum.reduce([data["scale_0"], data["scale_1"], data["scale_2"]])) * route.scale
-    big = largest > TOO_BIG_M
-    keep = ~near & ~big
-    print(f"{len(data):,} splats: {int(near.sum()):,} near the camera path, {int(big.sum()):,} too big, {int(keep.sum()):,} kept")
-    kept = data[keep]
+    big = largest > too_big_m
+    keep = ~near & (~big if mode == "remove" else np.ones(len(data), dtype=bool))
+    kept = data[keep].copy()
+    if mode == "shrink":
+        logs = np.stack([kept["scale_0"], kept["scale_1"], kept["scale_2"]], axis=1)
+        limit = np.log(too_big_m / route.scale)
+        logs = np.minimum(logs, limit)
+        ordered = np.sort(logs, axis=1)  # ascending: the needle is the last
+        cap = ordered[:, 1] + np.log(max_aspect)
+        logs = np.minimum(logs, cap[:, None])
+        for k in range(3):
+            kept[f"scale_{k}"] = logs[:, k]
+        print(f"shrunk {int(big.sum()):,} too big and {int((ordered[:, 2] > cap).sum()):,} needles")
+    print(f"{len(data):,} splats: {int(near.sum()):,} near the camera path, {int(big.sum()):,} too big, {len(kept):,} kept")
     header = header.replace(f"element vertex {len(data)}".encode(), f"element vertex {len(kept)}".encode())
     with open(folder / target, "wb") as handle:
         handle.write(header)

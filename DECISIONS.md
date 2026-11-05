@@ -1935,3 +1935,13 @@ Two more stalls the new layout showed, and the fix for both:
   * `settle_entities` moves anything that cannot stand where it was put to the nearest ground it can stand on. Past the carved strip the ground is still the simulated
     world's trees and rocks, so that nearest ground was usually the track, and walkers ended up on it (a buck 0.4 m from the rover's goal for minutes). It now takes
     an `allowed(x, y)` constraint, and on a trail that is "at least 4.3 m from the line". The patrol of the whole chain then runs without a stop at any join.
+
+**Cleaning the splats did not pay, so none were cleaned.** Rendered from a pose a rover can be in (0.9 m to one side, turned 10 degrees) the splats show long smears and, in IMG_5108 B,
+a milky patch where huge splats stand in for a background nothing else explains. `scripts/splat_clean.py` can remove splats near the camera's path and splats too big to be
+anything, and now also shrinks instead of removing (`shrink`, with `MAX_ASPECT` for needle-shaped splats and a size cap). Measured on the views each splat was trained on
+(mean error 0-255; lower is better), on IMG_5108 B (17.8 untouched): removing the over-1.2 m splats 24.4, shrinking them and the needles 22.6, needle cap alone (6) 19.4, size cap alone
+1.2 m 21.1, 2 m 19.9, 3 m 19.2. Across all eleven trails a 2 m cap with an aspect limit of 8 raised the error everywhere, from 12.0 to 22.6 on IMG_5129 and 17.9 to 27.3 on IMG_5128. The
+gain on the novel views was a little less fog in B and shorter smears; the bright rays at the top of some frames stayed under every setting. There is no way to measure novel-view quality
+without footage from those poses, and eyeballing a few frames is not enough to justify a loss that large in the views that can be measured, so the packed splats are the trained ones. What
+would help is data, not post-processing: footage that wanders from the line (the rover is allowed 1 m to either side), or a training set of rendered novel views.
+The frame in B about 16 m in (a ruined wall and thick growth) is poor from every pose, including the trained ones: the reconstruction there is simply thin.
