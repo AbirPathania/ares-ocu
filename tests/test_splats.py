@@ -63,20 +63,33 @@ def test_colmap_cameras_are_read_and_the_centre_is_where_the_camera_is(tmp_path)
     assert np.allclose(poses[1].rotation @ np.array([1.0, 0.0, 0.0]) , [0.0, 0.0, -1.0], atol=1e-5) or np.allclose(poses[1].rotation @ np.array([1.0, 0.0, 0.0]), [0.0, 0.0, 1.0], atol=1e-5)
 
 
-def test_the_route_scale_comes_from_the_walking_pace_and_up_from_the_cameras():
+def straight_walk(ground_points: int):
     n = 61
     t = np.arange(n) * 0.1
     centres = np.stack([t * 0.5, np.zeros(n), np.zeros(n)], axis=1)  # a straight walk along x, model units
-    # cameras level, looking along +x with y down: rotation world-to-camera
     rot = np.array([[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])  # x_cam = R x_world: world x -> camera z
     poses = [splats.Pose(rot, -rot @ c) for c in centres]
     rng = np.random.default_rng(0)
-    ground = np.stack([rng.uniform(0, 3.0, 4000), np.full(4000, 0.3), rng.uniform(-1.0, 1.0, 4000)], axis=1)  # a floor 0.3 below the cameras (y is down, so +y)
-    sand = np.tile([200.0, 165.0, 125.0], (4000, 1))
-    route, report = trail.build_route(poses, ground, sand, seconds_per_frame=0.1)
-    assert report["path_length_m"] == pytest.approx(trail.WALK_PACE_MS * 6.0, rel=0.02), "scale makes the walk take as long as it did at a walking pace"
+    ground = np.stack([rng.uniform(0, 3.0, ground_points), np.full(ground_points, 0.3), rng.uniform(-1.0, 1.0, ground_points)], axis=1)  # a floor 0.3 below the cameras
+    return poses, ground, np.tile([200.0, 165.0, 125.0], (ground_points, 1))
+
+
+def test_the_route_scale_comes_from_how_high_the_phone_was_held_when_there_is_ground_to_say_so():
+    poses, ground, colour = straight_walk(4000)
+    route, report = trail.build_route(poses, ground, colour, seconds_per_frame=0.1)
+    assert report["scale_from"] == "camera height"
+    assert report["implied_camera_height_m"] == pytest.approx(trail.REFERENCE_CAMERA_HEIGHT_M, rel=1e-6)
+    assert report["scale_m_per_unit"] == pytest.approx(trail.REFERENCE_CAMERA_HEIGHT_M * trail.LOWEST_SURFACE_BIAS / 0.3, rel=1e-6), "the floor is 0.3 model units down"
+    assert report["implied_pace_ms"] == pytest.approx(3.0 * report["scale_m_per_unit"] / 6.0, rel=0.08), "the pace the height implies (3 units in 6 s) is reported; smoothing trims the ends a little"
     assert report["up"][1] < -0.9, "up is the opposite of the cameras' downward axis"
-    assert report["implied_camera_height_m"] == pytest.approx(0.3 * route.scale, rel=0.2)
+
+
+def test_the_route_scale_falls_back_to_the_walking_pace_when_too_little_is_under_the_cameras():
+    poses, ground, colour = straight_walk(30)
+    route, report = trail.build_route(poses, ground, colour, seconds_per_frame=0.1)
+    assert report["scale_from"] == "walking pace"
+    assert report["path_length_m"] == pytest.approx(trail.WALK_PACE_MS * 6.0, rel=0.02), "scale makes the walk take as long as it did at a walking pace"
+    assert report["up"][1] < -0.9
 
 
 def test_a_pose_on_the_route_can_be_moved_sideways_and_turned():

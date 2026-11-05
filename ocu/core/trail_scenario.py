@@ -392,6 +392,10 @@ class TrailWorld:
     def camera(self, state: TrailState) -> TrailCamera:
         return self.legs[state.leg].camera(state)
 
+    def distance_to_line(self, x: float, y: float) -> float:
+        """How far (x, y) is from the nearest part of the chained path, metres."""
+        return float(self._tree.query([x, y])[0])
+
     def keep_off_line(self, x: float, y: float, side: float = 0.0, min_m: float = KEEP_OFF_M) -> tuple[float, float]:
         """The point nearest (x, y) that is at least `min_m` from the path, moved out along the path's normal. `side` (+1 right, -1 left) says
         which way if (x, y) is too close to tell; 0 keeps the side it is on."""
@@ -402,6 +406,13 @@ class TrailWorld:
         right = np.array([ty, -tx])
         offset = float((np.array([x, y]) - self.xy[int(i)]) @ right)
         direction = side if side else (1.0 if offset >= 0.0 else -1.0)
+        # Straight out to `min_m` is clear of the nearest part of the line but can land on another part of it where the chain runs back close beside itself
+        # (two arms 5 m apart), so go further out, then try the other side, until the point is clear of all of it.
+        for extra in np.arange(0.0, 12.0, 0.5):
+            for d in (direction, -direction):
+                out = self.xy[int(i)] + right * d * (min_m + extra)
+                if self._tree.query(out)[0] >= min_m - 1e-6:
+                    return float(out[0]), float(out[1])
         out = self.xy[int(i)] + right * direction * min_m
         return float(out[0]), float(out[1])
 

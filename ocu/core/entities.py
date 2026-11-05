@@ -162,7 +162,7 @@ def _offsets(max_m: float = 24.0):
         r += 1.0
 
 
-def settle_entities(world: TerrainWorld, entities: list[SurfaceEntity]) -> list[SurfaceEntity]:
+def settle_entities(world: TerrainWorld, entities: list[SurfaceEntity], allowed=None) -> list[SurfaceEntity]:
     """Move each entity to the nearest ground it can honestly stand or walk on.
 
     A vehicle parked inside a stand of trees, a person walking through a boulder: placed on purpose does
@@ -170,6 +170,9 @@ def settle_entities(world: TerrainWorld, entities: list[SurfaceEntity]) -> list[
     metre round it); a walker or animal needs every point it will pass over clear, with room either side.
     The first place that works, nearest to the one asked for, is used. Raises if there is none within 24 m,
     which would mean the scenario is not possible on this ground.
+
+    `allowed(x, y)`, if given, must hold at every point an entity will be at: a place it may not be (the track a rover has to drive) is skipped
+    like ground it cannot stand on, instead of being where the nearest standable ground happens to be.
     """
     out = []
     for e in entities:
@@ -183,14 +186,14 @@ def settle_entities(world: TerrainWorld, entities: list[SurfaceEntity]) -> list[
                 if any(max(abs(x), abs(y)) > world.half_extent_m - WORLD_EDGE_MARGIN_M for x, y in path):
                     continue  # off the edge of the map is not ground
                 if e.static:
-                    ok = _passable(world, *path[0], radius + CLEAR_MARGIN_M) and _level(world, *path[0], radius)
+                    ok = _passable(world, *path[0], radius + CLEAR_MARGIN_M) and _level(world, *path[0], radius) and (allowed is None or allowed(*path[0]))
                 else:
                     pts = [
                         (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
                         for a, b in zip(path, path[1:], strict=False)
                         for f in np.linspace(0.0, 1.0, max(2, int(math.dist(a, b) / 0.5)))
                     ]
-                    ok = all(_passable(world, x, y, radius + 0.4) for x, y in pts or [path[0]])
+                    ok = all(_passable(world, x, y, radius + 0.4) and (allowed is None or allowed(x, y)) for x, y in pts or [path[0]])
                 if ok:
                     found = replace(e, path=path, heading_deg=(e.heading_deg + dh) % 360.0)
                     break

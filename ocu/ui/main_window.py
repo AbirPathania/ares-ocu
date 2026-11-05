@@ -298,7 +298,12 @@ class MainWindow(QMainWindow):
                 _replace(e, path=self.trail.keep_path_off_line(e.path, side=1.0 if n % 2 == 0 else -1.0))
                 for n, e in enumerate(entities)
             ]
-        self.surface_entities = settle_entities(self.terrain, entities)
+        # on a trail, settling may not carry anything back onto the track: the verge past the carved strip is still the simulated world's trees and rocks,
+        # and the nearest standable ground to a place beside the track is often the track
+        from ocu.core.trail_scenario import KEEP_OFF_M
+
+        off_track = None if self.trail is None else (lambda x, y: self.trail.distance_to_line(x, y) >= KEEP_OFF_M - 0.3)
+        self.surface_entities = settle_entities(self.terrain, entities, allowed=off_track)
         stamp_static_entities(self.terrain, self.surface_entities)
         self.dynamic_obstacles = DynamicObstacles()
         #: Seconds each walking entity has spent stopped for the rover; its pose is read at mission time minus this.

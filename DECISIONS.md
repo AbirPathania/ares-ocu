@@ -1918,3 +1918,20 @@ Two more things the full chain showed:
     every step is kept off the line (`TrailWorld.keep_path_off_line`). Objects added for the later legs also keep 7 m (`TARGET_GAP_M`) from every other object, because
     five of them had landed within 5 m of the join, which is more exclusion zones than a 3 m track can be planned through.
   * Open: the IMG_5108 scales; segment B's hazy frame; IMG_5132 is to be retrained at 14 000 steps and 800 000 splats.
+
+**Scale from how high the phone was held, not from pace.** The eleven trails did not agree about the pace: with the pace fixed at 1.25 m/s the implied phone height
+was 1.16 m on IMG_5129 and IMG_5132 but 0.62-2.0 m across the IMG_5108 segments and the other clips (1.7-2.0 m on four, which no hand holds). The colour-based
+ground estimate (sand) could not say which was wrong: under trees there is leaf litter, grass and shade, and along one segment it varied by 150% of itself. A second
+estimate that ignores colour (the 75th percentile of the depths of all points under each camera, `trail.lowest_surface_depth`) reads 5% deeper than the sand plane
+on the two trails where sand is certain (1.21 and 1.22 m against 1.16 and 1.15) and agrees with the sand estimate within 5% on six of the other nine. The scale is now
+set so that this height is `REFERENCE_CAMERA_HEIGHT_M` = 1.16 m (measured on those two walks, which pace and sand both support) when more than half the cameras have ground
+under them, and pace remains the fallback. Result: implied paces of 0.75-1.36 m/s on all eleven (before: 1.25 by assumption, with phone heights up to 2.0 m); the
+slowest are the climbing segments D, E, F and IMG_5114 (0.75-0.86 m/s), which is what climbing looks like. Routes changed length accordingly (IMG_5108 E
+50 m -> 30 m, IMG_5114 31 m -> 20 m, IMG_5108 A 50 m -> 41 m) and the chain is 241 m. What this does not do: it does not measure the scale, it moves the
+assumption from "walks at 1.25 m/s" to "holds the phone at 1.16 m", which the two good walks support and nothing contradicts; a ruler in the footage would replace both.
+Two more stalls the new layout showed, and the fix for both:
+  * `keep_off_line` pushed a point to 4.6 m from the *nearest* part of the line, which on a chain that runs back beside itself (arms about 5.6 m apart) can be on
+    another part of it; it now searches outward and to the other side until the point is clear of all of it.
+  * `settle_entities` moves anything that cannot stand where it was put to the nearest ground it can stand on. Past the carved strip the ground is still the simulated
+    world's trees and rocks, so that nearest ground was usually the track, and walkers ended up on it (a buck 0.4 m from the rover's goal for minutes). It now takes
+    an `allowed(x, y)` constraint, and on a trail that is "at least 4.3 m from the line". The patrol of the whole chain then runs without a stop at any join.

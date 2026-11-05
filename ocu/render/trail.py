@@ -6,11 +6,12 @@ from the reconstruction itself:
 
   * Up. The mean of the cameras' downward axes, reversed. The phone was held a little pitched down, so this is tilted a
     few degrees from true up; the error is small against what it is used for (a camera height).
-  * Scale. The path's length in model units over the time it took to walk it, at `WALK_PACE_MS`. That is an
-    assumption, stated as one, good to perhaps a quarter either way. Under each camera the trail surface (sand-coloured
-    points, fitted by a local plane, because a climbing trail has no single ground plane) gives the phone's height
-    above the ground in model units; at the chosen scale that comes out as a height in metres, which is reported as a
-    check on the pace (a phone is held between about 0.9 and 1.6 m).
+  * Scale. Under each camera the points below it give the phone's height above the ground in model units
+    (`lowest_surface_depth`), and the phone is taken to be held at `REFERENCE_CAMERA_HEIGHT_M`, which fixes the scale. The
+    older anchor, the path's length over the time it took to walk it at `WALK_PACE_MS`, is the fallback when too few frames
+    have ground under them, and its implied pace is reported either way: it is the number that says whether the height
+    can be believed (a walker's pace is between about 0.5 and 1.8 m/s). Pace alone gave phone heights of 1.7-2.0 m on four
+    IMG_5108 segments, which cannot be held by hand; heights give paces of 0.74-1.5 m/s, which are walks.
 
 The path is the cameras' positions, smoothed so that the camera's walking sway does not become the rover's.
 
@@ -32,6 +33,21 @@ from ocu.render.splats import Intrinsics, Pose
 #: again, which is the honest uncertainty: how fast someone walks up a trail (this one), and how high they held the phone
 #: (reported, not used). A real measurement of anything in the scene replaces both: see `rescale_to`.
 WALK_PACE_MS = 1.25
+
+#: How high the phone was held, measured on the two walks whose ground is certain (IMG_5129 and IMG_5132: sand under almost every camera, the height
+#: varying by under 10% along the walk): 1.163 m and 1.154 m at the pace above, which they both agree with. Another walk by the same person with the
+#: same phone is taken to hold it at the same height, which is a better anchor than the pace: the pace is the one thing that varies along a hike, and
+#: implied phone heights of 1.7-2.0 m (what pace gave for four of the IMG_5108 segments) cannot be held by hand.
+REFERENCE_CAMERA_HEIGHT_M = 1.16
+#: The lowest-surface depth (`lowest_surface_depth`) reads this much deeper than the plane through the sand on those two walks (1.21 and 1.22 m against
+#: 1.16 and 1.15 m): leaves and grass stand above the ground the cameras saw the least of.
+LOWEST_SURFACE_BIAS = 1.05
+#: A walk with half or fewer of its cameras having enough points under them to say how high they were keeps the pace as its scale (the height is
+#: the median over the walk, so up to half of it can be filled in from neighbours).
+MIN_GROUND_FRACTION = 0.5
+#: Percentile of the depths of the points under a camera taken as the ground: not the deepest (floaters and mistakes lie below it) and not the median
+#: (grass and bushes lie above it).
+GROUND_PERCENTILE = 75.0
 
 
 TRAIL_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "footage" / "trail"
@@ -168,11 +184,37 @@ def local_ground(centres: np.ndarray, points: np.ndarray, rgb: np.ndarray, up0: 
         ups[i], heights[i] = normal, float((c - centroid) @ normal)
     good = np.isfinite(heights) & (heights > 0)
     index = np.arange(len(centres))
+    if not good.any():  # no sand under any camera: up stays the cameras' own, and the height is not known
+        return np.tile(up0, (len(centres), 1)), heights
     for k in range(3):
         ups[:, k] = np.interp(index, index[good], ups[good, k])
     heights = np.interp(index, index[good], heights[good])
     ups /= np.linalg.norm(ups, axis=1, keepdims=True)
     return ups, heights
+
+
+def lowest_surface_depth(centres: np.ndarray, points: np.ndarray, up: np.ndarray, radius: float) -> tuple[np.ndarray, float]:
+    """The camera's height above the ground at every frame, in model units, from the points under it whatever their colour, and the fraction of frames it could be said for.
+
+    The colour filter of `local_ground` needs sand, and under trees there is leaf litter, grass and shade instead (its estimate along one IMG_5108 segment varied
+    by 150% of itself). Here every point within `radius` (measured across `up`) and below the camera counts, and the ground is the `GROUND_PERCENTILE`th of
+    their depths. Frames with too few points are filled in from their neighbours."""
+    along = points @ up
+    depth = np.full(len(centres), np.nan)
+    for i, c in enumerate(centres):
+        d = points - c
+        vertical = along - c @ up
+        horizontal = np.linalg.norm(d - np.outer(vertical, up), axis=1)
+        below = -vertical[(horizontal < radius) & (vertical < 0.0)]
+        if len(below) < 60:
+            continue
+        below = below[below <= np.percentile(below, 98.0)]
+        depth[i] = np.percentile(below, GROUND_PERCENTILE)
+    good = np.isfinite(depth)
+    if not good.any():
+        return depth, 0.0
+    index = np.arange(len(centres))
+    return np.interp(index, index[good], depth[good]), float(good.mean())
 
 
 #: A net grade steeper than this over a whole walk is taken to be the camera's pitch mistaken for slope, not the trail: with no gravity sensor,
@@ -207,8 +249,14 @@ def build_route(poses: list[Pose], points: np.ndarray, rgb: np.ndarray, seconds_
     up = ups.mean(axis=0)
     up /= np.linalg.norm(up)
     up, estimated_grade, grade_reliable = level_if_implausible(centres, up)
+    sand_height_model = float(np.median(heights))
+    sand_spread = float(np.std(heights) / sand_height_model)
+    depth, ground_fraction = lowest_surface_depth(centres, points, up, radius=6.0 * spacing)
+    by_height = ground_fraction >= MIN_GROUND_FRACTION
+    if by_height:
+        heights = ndimage.gaussian_filter1d(depth, 3.0, mode="nearest") / LOWEST_SURFACE_BIAS  # what the carved ground is built from, too
     height_model = float(np.median(heights))
-    smooth = ndimage.gaussian_filter1d(centres, smoothing_frames, axis=0, mode="nearest")
+    smooth =ndimage.gaussian_filter1d(centres, smoothing_frames, axis=0, mode="nearest")
     quats = np.array([_quat(p.rotation) for p in poses])
     for i in range(1, len(quats)):
         if quats[i] @ quats[i - 1] < 0:
@@ -217,15 +265,21 @@ def build_route(poses: list[Pose], points: np.ndarray, rgb: np.ndarray, seconds_
     quats /= np.linalg.norm(quats, axis=1, keepdims=True)
     units = np.linalg.norm(np.diff(smooth, axis=0), axis=1)
     duration = seconds_per_frame * (len(poses) - 1)
-    scale = WALK_PACE_MS * duration / float(units.sum())
+    pace_scale = WALK_PACE_MS * duration / float(units.sum())
+    scale = REFERENCE_CAMERA_HEIGHT_M / height_model if by_height else pace_scale
     arc = np.concatenate([[0.0], np.cumsum(units * scale)])
     route = TrailRoute(smooth, quats, arc, scale, up, heights, height_model * scale)
     rise = float((smooth[-1] - smooth[0]) @ up) * scale
     report = {
         "scale_m_per_unit": scale,
+        "scale_from": "camera height" if by_height else "walking pace",
         "implied_camera_height_m": height_model * scale,
         "camera_height_spread": float(np.std(heights) / height_model),
+        "sand_height_m_at_pace": sand_height_model * pace_scale,
+        "sand_height_spread": sand_spread,
+        "ground_fraction": ground_fraction,
         "walk_pace_ms": WALK_PACE_MS,
+        "implied_pace_ms": WALK_PACE_MS * scale / pace_scale,
         "path_length_m": route.length_m,
         "net_rise_m": rise,
         "up": up.round(3).tolist(),

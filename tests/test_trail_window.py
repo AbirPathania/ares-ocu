@@ -155,3 +155,13 @@ def test_a_world_built_on_several_trails_has_content_on_every_leg_and_asks_for_t
     request = window._camera_request("rover")
     assert request["trail_name"] == "c" and request["trail_s"] == pytest.approx(leg.start_m + 6.0, abs=1.0)
     window.close()
+
+
+def test_nobody_stands_or_walks_on_the_track_anywhere_along_the_chain_of_trails(app):
+    from ocu.core.trail_scenario import KEEP_OFF_M, TrailWorld
+
+    if len(TrailWorld.load(None).legs) < 3:
+        pytest.skip("needs three reconstructed trails in assets/footage/trail")
+    window = MainWindow(trail=True)
+    nearest = min(window.trail.distance_to_line(x, y) for e in window.surface_entities for x, y in e.path)
+    assert nearest >= KEEP_OFF_M - 0.5, "settling to standable ground must not carry a walker back onto the line"
