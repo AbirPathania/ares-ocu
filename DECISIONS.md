@@ -1877,3 +1877,10 @@ separate stages with marker files, so the scheduler can be stopped and started a
 this one. It tidies as it goes (feature database, frames and intermediate checkpoints are deleted once the stage after them has what it needs),
 because nine more trails would otherwise want more disk than there is. Each trail is trained for 9 000 steps with up to 600 000 splats,
 against 14 000 and 800 000 for the first.
+
+**One bad lens estimate.** IMG_5108 segment A reconstructed all 200 frames but with focal lengths of 1404 and 1073 px, which cannot be (square pixels), while
+segments of the other clips agreed within 0.5%. A side-by-side on 67 frames of segment B showed the lens model was not the cause (RADIAL and
+OPENCV both fit at 0.455 px with a focal length of 1391 px, OPENCV's x and y within 0.3%): segment A had found a bad solution of its own. So for the
+IMG_5108 segments (one camera, one setting) the lens is pinned at B's values (`LENS_5108` in `scripts/recon_scheduler.py`; `recon_sfm.py`
+takes the parameters and does not refine them), and A was re-reconstructed. A lens that a reconstruction is free to get wrong stretches the
+whole world it builds; pinning it removes that, and is faster.

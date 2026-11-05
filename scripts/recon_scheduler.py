@@ -43,21 +43,26 @@ class Job:
     end_s: float | None = None
     steps: int = STEPS
     splats: int = SPLATS
+    camera_model: str = "OPENCV"
+    camera_params: str | None = None  # a pinned lens (see recon_sfm.py)
 
+
+#: IMG_5108's camera (the 1x lens, 1600 px wide frames) as calibrated on segment B, where the geometry pins it down: f, cx, cy, k1, k2.
+LENS_5108 = {"camera_model": "RADIAL", "camera_params": "1391.22,800,450,0.08,-0.13"}
 
 #: Every trail in the footage that can be walked: IMG_5117 is someone standing at a viewpoint (no walk to reconstruct from).
 JOBS = [
     Job("IMG_5129_hq", "IMG_5129", steps=14000, splats=800_000),
     Job("IMG_5132_hq", "IMG_5132"),
-    Job("IMG_5108_A", "IMG_5108", 160, 200),
+    Job("IMG_5108_A", "IMG_5108", 160, 200, **LENS_5108),
     Job("IMG_5108_B", "IMG_5108", 40, 80),
     Job("IMG_5114", "IMG_5114"),
-    Job("IMG_5108_C", "IMG_5108", 0, 40),
+    Job("IMG_5108_C", "IMG_5108", 0, 40, **LENS_5108),
     Job("IMG_5128", "IMG_5128"),
     Job("IMG_5109", "IMG_5109"),
-    Job("IMG_5108_D", "IMG_5108", 80, 120),
-    Job("IMG_5108_E", "IMG_5108", 120, 160),
-    Job("IMG_5108_F", "IMG_5108", 200, 240),
+    Job("IMG_5108_D", "IMG_5108", 80, 120, **LENS_5108),
+    Job("IMG_5108_E", "IMG_5108", 120, 160, **LENS_5108),
+    Job("IMG_5108_F", "IMG_5108", 200, 240, **LENS_5108),
 ]
 
 
@@ -159,7 +164,7 @@ def main() -> None:
             for job in JOBS:
                 if done(job, "frames") and not done(job, "sfm") and not done(job, "sfm.failed"):
                     say(f"sfm {job.name}")
-                    children[f"sfm:{job.name}"] = (job, subprocess.Popen([str(SFM_PY), str(ROOT / "scripts" / "recon_sfm.py"), job.name, "OPENCV"],
+                    children[f"sfm:{job.name}"] = (job, subprocess.Popen([str(SFM_PY), str(ROOT / "scripts" / "recon_sfm.py"), job.name, job.camera_model] + ([job.camera_params] if job.camera_params else []),
                                                                          stdout=open(RECON / f"{job.name}.sfm.log", "w"), stderr=subprocess.STDOUT))
                     busy.add("sfm")
                     break
