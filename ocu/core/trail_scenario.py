@@ -405,6 +405,16 @@ class TrailWorld:
         out = self.xy[int(i)] + right * direction * min_m
         return float(out[0]), float(out[1])
 
+    def keep_path_off_line(self, path, side: float = 1.0, min_m: float = KEEP_OFF_M, step_m: float = 1.5) -> tuple[tuple[float, float], ...]:
+        """A walking path with every point of it, not only its corners, at least `min_m` from the line. Where the line bends back on itself the
+        straight run between two corners that are each clear of it can still cross it, so the run is cut into short steps first."""
+        pts = [np.asarray(p[:2], dtype=float) for p in path]
+        dense = [pts[0]]
+        for a, b in zip(pts[:-1], pts[1:]):
+            n = max(1, int(math.ceil(float(np.linalg.norm(b - a)) / step_m)))
+            dense.extend(a + (b - a) * (k / n) for k in range(1, n + 1))
+        return tuple(self.keep_off_line(float(p[0]), float(p[1]), side=side, min_m=min_m) for p in dense)
+
     def leg_sweep(self, index: int) -> TrailSweep:
         """The sweep of one leg alone, relative to that leg's own deploy point: what the scenario code places things by."""
         return self.legs[index].sweep()

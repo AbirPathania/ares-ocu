@@ -267,7 +267,11 @@ class MainWindow(QMainWindow):
             # every later leg gets a few of its own: the objects laid along a trail, alternating so that no two legs repeat each other
             for index in range(1, len(self.trail.legs)):
                 extra = default_field(sweep=self.trail.leg_sweep(index), world=None)
-                self.target_field.targets.extend(extra.targets[index % 2::2][:3])
+                for candidate in extra.targets[index % 2::2][:3]:
+                    # Legs meet end to end, so the objects of two of them can land in the same few metres, and the rover
+                    # cannot plan between that many exclusion zones on a 3 m track (it sat there for minutes).
+                    if all(math.hypot(candidate.x - t.x, candidate.y - t.y) >= self.TARGET_GAP_M for t in self.target_field.targets):
+                        self.target_field.targets.append(candidate)
         self._target_evidence: dict[int, dict[str, float]] = {}
         #: What the scouts have seen of each object, kept apart from the rover's
         #: evidence: they are different replicas and cannot share it over a cut link.
@@ -291,7 +295,7 @@ class MainWindow(QMainWindow):
         if self.trail is not None:
             # nobody stands or walks on a three-metre track the rover has to drive: every waypoint is moved out beside it, one side each, alternating between them
             entities = [
-                _replace(e, path=tuple(self.trail.keep_off_line(x, y, side=1.0 if n % 2 == 0 else -1.0) for x, y in e.path))
+                _replace(e, path=self.trail.keep_path_off_line(e.path, side=1.0 if n % 2 == 0 else -1.0))
                 for n, e in enumerate(entities)
             ]
         self.surface_entities = settle_entities(self.terrain, entities)
@@ -1077,6 +1081,8 @@ class MainWindow(QMainWindow):
     TRAIL_PACE_MS = 1.25
     #: The first stretch of the reconstructed walk was seen by few frames and is the poorest part of it, so the replay starts after it.
     TRAIL_START_M = 10.0
+    #: Objects added for the later legs keep at least this far from every other object (twice the track's width and a little more).
+    TARGET_GAP_M = 7.0
 
     def _on_feed_trail_toggled(self, unit_id: str, on: bool) -> None:
         if on:

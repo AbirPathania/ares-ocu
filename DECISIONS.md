@@ -1907,3 +1907,14 @@ supports the pace-based scale; and IMG_5132's splat is clearly softer than IMG_5
   * *Haze.* Splats were drawn over the simulated blue sky. They are trained against black, so where they are only partly opaque they should fade to
     black; over blue the whole frame went lavender. A trail frame is now drawn over black, with no simulated sky (the real sky is in the splats).
 Two of my own tests had hidden behind that sky (one gave green and blue splats negative colour, so red always won); both now test what they claim.
+
+**All eleven trails reconstructed (patrol of 295 m).** Every job finished with no failed stage; colour error on the training views (`splat_check.py`):
+5129 12.0, 5108 C 13.0, F 14.3, A 15.4, E 15.8, D 16.1, 5132 16.7, 5109 17.1, B 17.8, 5128 17.9, 5114 18.7. The scales are not all alike: implied phone height is
+1.15-1.16 m for 5129 and 5132 but 0.62 m to 2.0 m across the six IMG_5108 segments (0.62, 0.95, 1.43, 1.71, 2.0, 1.7), so the pace assumption (1.25 m/s) is
+wrong for some of that walk and those segments are scaled wrongly by up to a factor of two. All eleven drive end to end ("SWEEP COMPLETE" at about 310 s).
+Two more things the full chain showed:
+  * *A stall at a join.* Where two legs met, the rover sat for minutes. Cause: a walking person's two waypoints were each 4.6 m off the line, but the straight run
+    between them crossed it where the line bends back, and the walker, who stops for the rover, stood on the track. A walking path is now cut into 1.5 m steps and
+    every step is kept off the line (`TrailWorld.keep_path_off_line`). Objects added for the later legs also keep 7 m (`TARGET_GAP_M`) from every other object, because
+    five of them had landed within 5 m of the join, which is more exclusion zones than a 3 m track can be planned through.
+  * Open: the IMG_5108 scales; segment B's hazy frame; IMG_5132 is to be retrained at 14 000 steps and 800 000 splats.

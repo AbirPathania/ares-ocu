@@ -236,3 +236,12 @@ def test_things_that_stand_beside_the_trail_are_kept_off_it_and_on_their_own_sid
     px, py = world.keep_off_line(*world.point(30.0, lateral_m=-1.0))
     left = world.point(30.0, lateral_m=-5.0)
     assert math.hypot(px - left[0], py - left[1]) < 1.5, "it stays on the side it was on"
+
+
+def test_a_walking_path_stays_off_the_trail_along_its_whole_length_not_only_at_its_corners():
+    world = chain(count=2)
+    a = world.point(10.0, lateral_m=-8.0)  # both corners are clear of the line, with the line between them
+    b = world.point(40.0, lateral_m=8.0)
+    path = world.keep_path_off_line([a, b], side=1.0)
+    assert len(path) > 2, "cut into steps, so that the run between the corners is checked"
+    assert min(world._tree.query([x, y])[0] for x, y in path) >= 4.6 - 1e-6
