@@ -89,7 +89,8 @@ def test_carving_gives_the_ground_the_trails_rise_and_makes_it_track(scenario):
     x, y = scenario.point(10.0, lateral_m=HALF_TRACK_M + 1.0)
     assert world.classify(x, y) == Terrain.SCRUB
     x, y = scenario.point(10.0, lateral_m=40.0)
-    assert world.classify(x, y) == Terrain.GROUND and world.elevation_at(world.to_cell(x, y)) == pytest.approx(3.0, abs=0.05)
+    i = int(np.searchsorted(scenario.arc, scenario.start_m + 10.0))
+    assert world.classify(x, y) == Terrain.GROUND and world.elevation_at(world.to_cell(x, y)) == pytest.approx(3.0 + scenario.ground_z[i], abs=1.0), "far from the line the ground is at the trail's height, not a cliff away from it"
 
 
 def test_carving_clears_what_stood_on_the_trail_and_leaves_the_rest(scenario):
@@ -245,3 +246,15 @@ def test_a_walking_path_stays_off_the_trail_along_its_whole_length_not_only_at_i
     path = world.keep_path_off_line([a, b], side=1.0)
     assert len(path) > 2, "cut into steps, so that the run between the corners is checked"
     assert min(world._tree.query([x, y])[0] for x, y in path) >= 4.6 - 1e-6
+
+
+def test_a_trail_carved_through_much_higher_hills_is_not_a_trench(scenario):
+    world = TerrainWorld.blank(half_extent_m=110.0)
+    yy, xx = np.meshgrid(np.arange(world._span), np.arange(world._span), indexing="ij")
+    world._elevation[:] = 0.4 * np.hypot(xx - world._span / 2, yy - world._span / 2) * world.cell_size_m * 0.3 + 12.0  # a bowl of hills tens of metres above the trail
+    scenario.carve(world)
+    rise = np.abs(np.diff(world._elevation, axis=0)) / world.cell_size_m
+    assert rise.max() < 1.2, "no wall steeper than about 50 degrees anywhere"
+    x, y = scenario.point(15.0, lateral_m=25.0)
+    line = world.elevation_at(world.to_cell(*scenario.point(15.0)))
+    assert abs(world.elevation_at(world.to_cell(x, y)) - line) < 6.0, "25 m from the line the ground is within a few metres of the line's height"

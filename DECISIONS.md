@@ -1945,3 +1945,12 @@ gain on the novel views was a little less fog in B and shorter smears; the brigh
 without footage from those poses, and eyeballing a few frames is not enough to justify a loss that large in the views that can be measured, so the packed splats are the trained ones. What
 would help is data, not post-processing: footage that wanders from the line (the rover is allowed 1 m to either side), or a training set of rendered novel views.
 The frame in B about 16 m in (a ruined wall and thick growth) is poor from every pose, including the trained ones: the reconstruction there is simply thin.
+
+**Scouts: the splats cannot serve them, and the ground was a trench.** A scout flies tens of metres up looking down; the splats are trained from a phone at 1.2 m. Rendered from a trail's own poses
+raised and pitched down, they hold up to about 3 m at 25 degrees, are smeared by 6 m at 40 and are black by 12 m, where the view leaves what the walk saw. So the scouts keep the simulated
+world, drawn with the corridor cut into it (as they were). Looking at what they showed, though, found a worse fault: the ground was carved to the trail's own height (relative to the deploy point)
+and blended back to the simulated world's over 7 m, and the simulated hills are tens of metres above and below that, so the track ran along the bottom of a trench with walls of 20 m/m or more (21 in
+the steepest cell). The ground past the blend is now the trail's height from the nearest stretches of it (a Gaussian of 12 m over points taken every 4 m), with only the simulated world's own
+bumps on it (its height less its 15 m smoothing, limited to 2 m); the strip itself takes a tight (1.5 m) Gaussian average of the line's height, which is continuous where two stretches of the chain pass
+close by (the nearest sample alone stepped between them). The steepest slope in the carved world is now 1.8 (the simulated hills alone reach 1.4) and the track winds across a hillside.
+The rover's patrol is unchanged. The far hills the scouts see on the horizon are the simulated world's, flattened round the trail: the simulated sky and distance are not the trail's.

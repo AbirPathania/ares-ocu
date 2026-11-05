@@ -46,6 +46,19 @@ GROUND_SMOOTH_M = 3.0
 HALF_TRACK_M = 1.6
 VERGE_M = 2.5
 BLEND_M = 7.0
+#: Past the blend the ground is not the simulated world's own hills but the trail's height, from the nearest stretches of it (weighted by a Gaussian this wide),
+#: with only the simulated world's small bumps on it: a trail carved to its own height through hills of the world's, tens of metres higher or lower, is a trench with
+#: sheer walls (seen from the scouts), and a chain of trails goes through all of them.
+HEIGHT_REACH_M = 12.0
+#: Bumps kept: the world's height less its own smoothing over this many metres, limited to this much either way.
+RELIEF_SMOOTH_M = 15.0
+RELIEF_LIMIT_M = 2.0
+#: The surrounding height averages this many of the line's points, taken every `HEIGHT_SAMPLE_M`; the line's own height at and beside it averages the nearest
+#: `LINE_NEIGHBOURS` of its samples with a Gaussian `LINE_REACH_M` wide.
+HEIGHT_NEIGHBOURS = 24
+HEIGHT_SAMPLE_M = 4.0
+LINE_NEIGHBOURS = 48
+LINE_REACH_M = 1.5
 #: Clear of trees, boulders and bushes this much past the verge (their own radius is added).
 CLEAR_MARGIN_M = 1.0
 #: The reconstruction supports a camera this far to either side of the walk and turned this far from its direction. A rover that is
@@ -77,7 +90,23 @@ def carve_world(world: TerrainWorld, xy: np.ndarray, ground_z: np.ndarray, tree:
     # elevation follows the walk's ground along the line and blends back to the world's own past the verge
     t = np.clip(1.0 - (d - HALF_TRACK_M) / BLEND_M, 0.0, 1.0)
     w = t * t * (3.0 - 2.0 * t)
-    world._elevation = (1.0 - w) * world._elevation + w * (base_z + ground_z[nearest])
+    line_z = base_z + ground_z
+    sim = world._elevation
+    relief = np.clip(sim - ndimage.gaussian_filter(sim, RELIEF_SMOOTH_M / cell, mode="nearest"), -RELIEF_LIMIT_M, RELIEF_LIMIT_M)
+    cells = np.stack([gx.ravel(), gy.ravel()], axis=1)
+    # the line's own height under and beside it: a tight Gaussian average of the nearest stretches, so that it is continuous where two stretches of a
+    # chain pass close to each other (the nearest sample alone jumps from one stretch's height to the other's halfway between them)
+    near_d, near_i = tree.query(cells, k=min(LINE_NEIGHBOURS, len(xy)))
+    near_w = np.exp(-0.5 * (near_d / LINE_REACH_M) ** 2) + 1e-12
+    on_line = ((near_w * line_z[near_i]).sum(axis=1) / near_w.sum(axis=1)).reshape(gx.shape)
+    # and the height round it, from the line sampled every few metres so that the reach is metres, not the span of the nearest samples
+    stride = max(1, int(round(HEIGHT_SAMPLE_M / SAMPLE_STEP_M)))
+    pick = np.unique(np.concatenate([np.arange(0, len(xy), stride), [len(xy) - 1]]))
+    sparse = cKDTree(xy[pick])
+    far_d, far_i = sparse.query(cells, k=min(HEIGHT_NEIGHBOURS, len(pick)))
+    far_w = np.exp(-0.5 * (far_d / HEIGHT_REACH_M) ** 2) + 1e-12
+    around = ((far_w * line_z[pick][far_i]).sum(axis=1) / far_w.sum(axis=1)).reshape(gx.shape)
+    world._elevation = w * on_line + (1.0 - w) * (around + relief)
     near = d <= HALF_TRACK_M + VERGE_M
     world._rock_height[near] = 0.0
     world._pothole_depth[near] = 0.0
