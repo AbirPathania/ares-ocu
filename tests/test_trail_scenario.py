@@ -213,3 +213,26 @@ def test_the_ground_is_carved_continuously_across_a_join():
         heights.append(ground.elevation_at(ground.to_cell(*p)))
     assert max(heights) - min(heights) < 0.5
     assert ground.classify(*join) == Terrain.TRACK
+
+
+def test_the_carved_ground_does_not_jump_when_the_height_estimates_are_noisy():
+    route, k = make_route()
+    rng = np.random.default_rng(3)
+    route.ground_height = 0.6 * (1.0 + rng.normal(0.0, 0.27, len(route.ground_height)))  # a quarter of the camera's height, frame to frame
+    scenario = TrailScenario.build("noisy", route, k, start_m=10.0)
+    slope = np.abs(np.diff(scenario.ground_z)) / 0.25
+    assert slope.max() < 0.45, "a trail does not climb faster than a person can"
+    assert scenario.ground_z[scenario.start_index] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_things_that_stand_beside_the_trail_are_kept_off_it_and_on_their_own_side():
+    world = chain(count=2)
+    x, y = world.point(20.0)
+    for side in (1.0, -1.0):
+        px, py = world.keep_off_line(x, y, side=side)
+        assert world._tree.query([px, py])[0] == pytest.approx(4.6, abs=0.4)
+    far = world.point(20.0, lateral_m=9.0)
+    assert world.keep_off_line(*far) == far, "already clear of it: not moved"
+    px, py = world.keep_off_line(*world.point(30.0, lateral_m=-1.0))
+    left = world.point(30.0, lateral_m=-5.0)
+    assert math.hypot(px - left[0], py - left[1]) < 1.5, "it stays on the side it was on"

@@ -67,6 +67,8 @@ from ocu.core.power import (
     tricopter_drain_pct_per_s,
     tricopter_endurance_s,
 )
+from dataclasses import replace as _replace
+
 from ocu.core.sweep import cut_washouts_on_lanes, plan_lane_sweep, sweep_from_first_scan
 from ocu.core.targets import default_field
 from ocu.core.terrain import IMPASSABLE, CELL_SIZE_M, WORLD_HALF_EXTENT_M, PerceptionMap, TerrainWorld
@@ -263,8 +265,6 @@ class MainWindow(QMainWindow):
         self.target_field = default_field(sweep=self.sweep if self.trail is None else self.trail.leg_sweep(0), world=scenario_world)
         if self.trail is not None:
             # every later leg gets a few of its own: the objects laid along a trail, alternating so that no two legs repeat each other
-            from dataclasses import replace as _replace
-
             for index in range(1, len(self.trail.legs)):
                 extra = default_field(sweep=self.trail.leg_sweep(index), world=None)
                 self.target_field.targets.extend(extra.targets[index % 2::2][:3])
@@ -288,6 +288,12 @@ class MainWindow(QMainWindow):
             for index in range(1, len(self.trail.legs)):
                 pool = [e for e in default_entities(sweep=self.trail.leg_sweep(index), world=None) if e.kind != "vehicle"]
                 entities.extend(_replace(e, name=f"{e.name} {index + 1}") for e in (pool[index % len(pool)], pool[(index + 2) % len(pool)]))
+        if self.trail is not None:
+            # nobody stands or walks on a three-metre track the rover has to drive: every waypoint is moved out beside it, one side each, alternating between them
+            entities = [
+                _replace(e, path=tuple(self.trail.keep_off_line(x, y, side=1.0 if n % 2 == 0 else -1.0) for x, y in e.path))
+                for n, e in enumerate(entities)
+            ]
         self.surface_entities = settle_entities(self.terrain, entities)
         stamp_static_entities(self.terrain, self.surface_entities)
         self.dynamic_obstacles = DynamicObstacles()

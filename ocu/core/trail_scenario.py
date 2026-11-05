@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from scipy import ndimage
 from scipy.spatial import cKDTree
 
 from ocu.core.sweep import LaneSweep
@@ -39,6 +40,8 @@ from ocu.render import trail as trail_assets
 from ocu.render.splats import Intrinsics
 
 SAMPLE_STEP_M = 0.25
+#: Length over which the carved ground's height is smoothed along the path.
+GROUND_SMOOTH_M = 3.0
 #: Half the width of the track, and how far past it the verge of scrub goes and the ground blends back to the world's own.
 HALF_TRACK_M = 1.6
 VERGE_M = 2.5
@@ -158,6 +161,9 @@ class TrailScenario:
         origin = dense[i0].copy()
         world = ((dense - origin) * route.scale) @ rotation.T
         ground = world[:, 2] - gh * route.scale
+        # the height of the ground under each camera is estimated frame by frame and is noisy (a quarter of the camera's height, on some
+        # trails); a trail does not jump a half metre in half a metre, so the ground along it is smoothed before it is carved
+        ground = ndimage.gaussian_filter1d(ground, GROUND_SMOOTH_M / SAMPLE_STEP_M, mode="nearest")
         ground -= ground[i0]
         x0, y0, z0, bearing = placement
         c, sn = math.cos(math.radians(bearing)), math.sin(math.radians(bearing))
@@ -254,6 +260,10 @@ class TrailScenario:
         # in the walk's frame the camera at the deploy point is at height zero, and the ground there is `start_camera_height_m` below it
         return TrailCamera((float(local[0]), float(local[1]), float(self.base_z + local[2] + self.start_camera_height_m)), heading, pitch_down)
 
+
+#: People and animals stand at least this far from the path: outside the carved track and verge (4.1 m), where the rover can pass and the
+#: planner is not asked to squeeze by someone on a three-metre track.
+KEEP_OFF_M = 4.6
 
 #: Chained legs: a leg may turn this far from the way the one before it ended, and the path steers back toward the middle of the map
 #: once it is this far from it, so that a long patrol stays inside the world. Far out, where the world's edge is near, it may turn
@@ -381,6 +391,19 @@ class TrailWorld:
 
     def camera(self, state: TrailState) -> TrailCamera:
         return self.legs[state.leg].camera(state)
+
+    def keep_off_line(self, x: float, y: float, side: float = 0.0, min_m: float = KEEP_OFF_M) -> tuple[float, float]:
+        """The point nearest (x, y) that is at least `min_m` from the path, moved out along the path's normal. `side` (+1 right, -1 left) says
+        which way if (x, y) is too close to tell; 0 keeps the side it is on."""
+        dist, i = self._tree.query([x, y])
+        if dist >= min_m:
+            return x, y
+        tx, ty = self.tangent[int(i)]
+        right = np.array([ty, -tx])
+        offset = float((np.array([x, y]) - self.xy[int(i)]) @ right)
+        direction = side if side else (1.0 if offset >= 0.0 else -1.0)
+        out = self.xy[int(i)] + right * direction * min_m
+        return float(out[0]), float(out[1])
 
     def leg_sweep(self, index: int) -> TrailSweep:
         """The sweep of one leg alone, relative to that leg's own deploy point: what the scenario code places things by."""

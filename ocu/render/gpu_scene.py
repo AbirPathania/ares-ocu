@@ -855,7 +855,7 @@ class GpuScene:
         """One frame, (height, width, 3) uint8. `eye` is absolute (x, y, z).
 
         With `trail_s` (metres along the reconstructed trail) and a trail loaded, the picture is the real place, drawn
-        from the splats, over the sky, and the simulated world's terrain and plants are not drawn. By default `eye`, the
+        from the splats over black (the splats were trained against it, and carry the real sky), and the simulated world's terrain, plants and sky are not drawn. By default `eye`, the
         heading and the pitch are then ignored (a replay of the walk, with no figures). With `trail_world_view` they are the
         camera's place in the simulated world, which the caller has worked out to be where the trail camera is, and the
         figures standing in that world are drawn, with depth, so that the splats in front of one hide it."""
@@ -893,10 +893,13 @@ class GpuScene:
         }
         # Sky first, behind everything.
         ctx.disable(self.mgl.DEPTH_TEST)
-        for name, value in common.items():
-            self._set(self.p_sky, name, value)
-        self._set(self.p_sky, "u_inv_vp", np.linalg.inv(vp))
-        ctx.vertex_array(self.p_sky, []).render(self.mgl.TRIANGLES, vertices=3)
+        if view_pose is None:
+            # On a reconstructed trail there is no simulated sky: the splats were trained against black, so wherever they are only partly opaque
+            # they are meant to fade to black, and the real sky is already in them. Drawn over a blue sky they come out hazy.
+            for name, value in common.items():
+                self._set(self.p_sky, name, value)
+            self._set(self.p_sky, "u_inv_vp", np.linalg.inv(vp))
+            ctx.vertex_array(self.p_sky, []).render(self.mgl.TRIANGLES, vertices=3)
 
         ctx.enable(self.mgl.DEPTH_TEST)
         ctx.disable(self.mgl.CULL_FACE)

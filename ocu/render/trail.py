@@ -19,6 +19,7 @@ No Qt and no GL import belongs in this file.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -174,6 +175,26 @@ def local_ground(centres: np.ndarray, points: np.ndarray, rgb: np.ndarray, up0: 
     return ups, heights
 
 
+#: A net grade steeper than this over a whole walk is taken to be the camera's pitch mistaken for slope, not the trail: with no gravity sensor,
+#: the way a phone is tilted while walking uphill (or down) cannot be told from the slope itself. Beyond it the walk is levelled.
+MAX_GRADE = 0.25
+
+
+def level_if_implausible(centres: np.ndarray, up: np.ndarray) -> tuple[np.ndarray, float, bool]:
+    """Return (up, grade, reliable): `up` turned about the walk's own cross axis so that the walk's net rise is zero, if its grade is too steep to be believed."""
+    d = centres[-1] - centres[0]
+    along = float(d @ up)
+    perp = d - along * up
+    flat = float(np.linalg.norm(perp))
+    grade = along / flat if flat > 1e-9 else 0.0
+    if abs(grade) <= MAX_GRADE or flat <= 1e-9:
+        return up, grade, True
+    theta = math.atan2(-along, flat)  # tan(theta) = -(d . up) / |d_perp| makes d . up' = 0
+    w = perp / flat
+    levelled = math.cos(theta) * up + math.sin(theta) * w
+    return levelled / np.linalg.norm(levelled), grade, False
+
+
 def build_route(poses: list[Pose], points: np.ndarray, rgb: np.ndarray, seconds_per_frame: float, smoothing_frames: float = 4.0) -> tuple[TrailRoute, dict]:
     """Find up and scale, smooth the path, and say how far the assumptions can be trusted."""
     centres = np.array([p.centre for p in poses])
@@ -185,6 +206,7 @@ def build_route(poses: list[Pose], points: np.ndarray, rgb: np.ndarray, seconds_
     heights = ndimage.gaussian_filter1d(heights, 3.0, mode="nearest")
     up = ups.mean(axis=0)
     up /= np.linalg.norm(up)
+    up, estimated_grade, grade_reliable = level_if_implausible(centres, up)
     height_model = float(np.median(heights))
     smooth = ndimage.gaussian_filter1d(centres, smoothing_frames, axis=0, mode="nearest")
     quats = np.array([_quat(p.rotation) for p in poses])
@@ -207,5 +229,7 @@ def build_route(poses: list[Pose], points: np.ndarray, rgb: np.ndarray, seconds_
         "path_length_m": route.length_m,
         "net_rise_m": rise,
         "up": up.round(3).tolist(),
+        "grade_estimated": estimated_grade,
+        "grade_reliable": grade_reliable,
     }
     return route, report

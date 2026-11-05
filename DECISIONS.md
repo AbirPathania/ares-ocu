@@ -1893,3 +1893,17 @@ the path. That makes the picture a little wrong about exactly where the rover is
 Also found on that patrol: the scale estimate of IMG_5132 (phone height implied 1.154 m) agrees with IMG_5129's (1.163 m) from an independent walk, which
 supports the pace-based scale; and IMG_5132's splat is clearly softer than IMG_5129's (colour error 18.0 against 11.7) at 9 000 steps and
 600 000 splats, so it should be retrained with the larger budget the first trail had.
+
+**Four things the first three-trail patrol showed** (IMG_5129, IMG_5132, IMG_5108 segment B, 107 m):
+  * *Slope from camera pitch.* Segment B's estimated net grade was -105% (a 26 m fall over a 50 m walk). Camera orientation cannot tell the slope of a
+    trail from the way a phone is tilted while walking up it, and there is no gravity sensor in the footage. A walk whose estimated grade is steeper than
+    25% (`MAX_GRADE`, `trail.level_if_implausible`) is taken to be that confusion and levelled to zero net rise; the report says `grade_reliable: False`.
+    Flat errs by the true grade, which is small; the wrong estimate erred by tens of metres. The other trails were within range and are unchanged.
+  * *Noisy height under the camera.* The ground under each camera is estimated frame by frame (spread up to 27% of the camera's height), and carved
+    unfiltered it made slopes of 115%. It is now smoothed over 3 m along the path before carving.
+  * *The rover stalled for 70 s* on a three-metre track because the scenario code, written for open ground, put people and animals on or within 1-3 m
+    of the line, and the planner will not squeeze past a person (and an armed one raises an alert). Every person and animal is now at least 4.6 m off the
+    line, one side each. The patrol then runs end to end (all three legs, 107 m) and completes.
+  * *Haze.* Splats were drawn over the simulated blue sky. They are trained against black, so where they are only partly opaque they should fade to
+    black; over blue the whole frame went lavender. A trail frame is now drawn over black, with no simulated sky (the real sky is in the splats).
+Two of my own tests had hidden behind that sky (one gave green and blue splats negative colour, so red always won); both now test what they claim.

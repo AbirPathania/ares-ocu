@@ -145,6 +145,10 @@ def test_the_scene_draws_the_trail_when_asked_and_the_world_when_not(tmp_path, m
     world = scene.render(**args)
     on_trail = scene.render(**args, trail_s=1.0)
     assert np.abs(world.astype(int) - on_trail.astype(int)).mean() > 8.0, "the trail replaces the world's terrain and plants"
+    real_draw = scene.trail["renderer"].render
+    scene.trail["renderer"].render = lambda *a, **k: None  # no splats at all: what is behind them is what shows
+    assert scene.render(**args, trail_s=1.0).max() == 0, "a trail frame is drawn over black, not over the simulated sky"
+    scene.trail["renderer"].render = real_draw
     red = on_trail[..., 0].astype(int) - on_trail[..., 2].astype(int)
     assert (red > 40).sum() > 300, "the splats are in the picture"
     # the world still renders as itself after a trail frame: no more different from the first world frame than the world is from itself a moment
@@ -164,9 +168,9 @@ def test_the_scene_loads_each_trail_when_a_frame_asks_for_it_and_keeps_only_the_
     poses = [splats.Pose(rot, -rot @ np.array([i * 0.1, 0.0, 0.0])) for i in range(31)]
     rng = np.random.default_rng(5)
     points = np.stack([np.linspace(0, 3, 400), np.full(400, 0.3), rng.uniform(-0.3, 0.3, 400)], axis=1)
-    for name, dc in (("red", 1.2), ("green", -1.0), ("blue", -1.4)):
-        rows = [one_splat(x=float(x), y=0.3, z=float(z), f_dc_0=dc if name == "red" else -0.8, f_dc_1=dc if name == "green" else -0.8,
-                          f_dc_2=dc if name == "blue" else -0.8, scale_0=np.log(0.08), scale_1=np.log(0.08), scale_2=np.log(0.08))
+    for name in ("red", "green", "blue"):
+        rows = [one_splat(x=float(x), y=0.3, z=float(z), f_dc_0=1.2 if name == "red" else -0.8, f_dc_1=1.2 if name == "green" else -0.8,
+                          f_dc_2=1.2 if name == "blue" else -0.8, scale_0=np.log(0.08), scale_1=np.log(0.08), scale_2=np.log(0.08))
                 for x, z in zip(rng.uniform(0, 4, 300), rng.uniform(-0.6, 0.6, 300))]
         write_ply(tmp_path / f"{name}.ply", rows)
         route, _ = trail.build_route(poses, points, np.tile([200.0, 165.0, 125.0], (400, 1)), seconds_per_frame=0.1)
@@ -177,8 +181,26 @@ def test_the_scene_loads_each_trail_when_a_frame_asks_for_it_and_keeps_only_the_
         pytest.skip("no GL context")
     args = dict(eye=(0.0, 0.0, 3.0), heading_deg=0.0, pitch_down_deg=5.0, hfov_deg=90.0, width=200, height=112, trail_s=1.0)
     frames = {name: scene.render(**args, trail_name=name) for name in ("red", "green", "blue")}
-    dominant = {name: int(np.argmax(frame.reshape(-1, 3).astype(int).sum(axis=0) - frame.reshape(-1, 3).astype(int).mean() * 0)) for name, frame in frames.items()}
-    assert dominant["red"] != dominant["green"] or dominant["green"] != dominant["blue"], "each trail is drawn from its own splat"
+    dominant = {name: int(np.argmax(frame.reshape(-1, 3).astype(int).sum(axis=0))) for name, frame in frames.items()}
+    assert dominant == {"red": 0, "green": 1, "blue": 2}, "each trail is drawn from its own splat"
     assert len(scene.trails) == scene.TRAILS_RESIDENT and list(scene.trails) == ["green", "blue"], "the oldest was given up"
     scene.render(**args, trail_name="red")  # asked for again: read in again, the least recently used given up
     assert "red" in scene.trails and len(scene.trails) == scene.TRAILS_RESIDENT
+
+
+def test_a_walk_whose_estimated_grade_is_absurd_is_levelled_and_a_plausible_one_is_left_alone():
+    n = 41
+    t = np.arange(n) * 0.1
+    centres = np.stack([t, np.zeros(n), np.zeros(n)], axis=1)  # walked along +x
+    up = np.array([0.0, 0.0, 1.0])
+    same, grade, ok = trail.level_if_implausible(centres, up)
+    assert ok and grade == pytest.approx(0.0) and np.allclose(same, up)
+    gentle = np.array([0.1, 0.0, 0.995]) / np.linalg.norm([0.1, 0.0, 0.995])  # about a 10% climb along the walk
+    _, g, ok = trail.level_if_implausible(centres, gentle)
+    assert ok and g == pytest.approx(0.1, abs=0.01)
+    tilted = np.array([-0.7, 0.0, 0.714])  # camera pitch mistaken for slope: a descent of about 100%
+    tilted /= np.linalg.norm(tilted)
+    levelled, g, ok = trail.level_if_implausible(centres, tilted)
+    assert not ok and abs(g) > 0.9
+    assert abs((centres[-1] - centres[0]) @ levelled) < 1e-9, "the net rise is zero after levelling"
+    assert np.linalg.norm(levelled) == pytest.approx(1.0)
