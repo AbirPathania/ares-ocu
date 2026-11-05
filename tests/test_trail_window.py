@@ -106,7 +106,10 @@ def test_the_rover_tile_on_a_trail_draws_from_the_real_place_where_it_was_walked
     assert request["trail_s"] == pytest.approx(window.trail.legs[0].start_m + 5.0, abs=1.0) and request["trail_name"] == "synthetic"
     assert abs(request["eye"][0] - rover.x) < 1.0 and abs(request["eye"][1] - rover.y) < 1.0, "the splat camera is where the rover is"
     rover.heading = (window.trail.bearing_deg + 120.0) % 360.0  # turned away from the walk
-    assert "trail_s" not in window._camera_request("rover"), "facing a way the walk never looked: the simulated world"
+    turned = window._camera_request("rover")
+    assert turned.get("trail_world_view") is True and abs(turned["trail_yaw_deg"]) <= 30.0 + 1e-6, "facing a way the walk never looked: the real place, from the nearest camera it supports"
+    rover.x, rover.y = window.trail.point(5.0, lateral_m=9.0)
+    assert "trail_s" not in window._camera_request("rover"), "far from the path: the simulated world"
     window.close()
 
 

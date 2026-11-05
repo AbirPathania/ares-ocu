@@ -116,10 +116,15 @@ def test_a_rover_on_the_track_facing_along_it_is_on_the_trail_and_one_beside_or_
     assert state.on_trail
     assert state.s_m == pytest.approx(scenario.start_m + 12.0, abs=0.5)
     assert state.lateral_m == pytest.approx(0.3, abs=0.1) and abs(state.yaw_deg) < 1.0
-    assert not scenario.camera_state(x, y, along + 90.0).on_trail, "turned across the trail: not what the walk saw"
-    assert not scenario.camera_state(x, y, along + 180.0).on_trail
+    # turned across the trail, or a metre or two off it: still the real place, from the nearest camera the walk supports
+    across = scenario.camera_state(x, y, along + 90.0)
+    assert across.on_trail and across.yaw_deg == pytest.approx(30.0), "turned past what the walk saw: limited to what it did"
+    assert scenario.camera_state(x, y, along + 180.0).on_trail
     bx, by = scenario.point(12.0, lateral_m=3.0)
-    assert not scenario.camera_state(bx, by, along).on_trail
+    beside = scenario.camera_state(bx, by, along)
+    assert beside.on_trail and beside.lateral_m == pytest.approx(1.0), "3 m beside the line: drawn from 1 m beside it"
+    far = scenario.point(12.0, lateral_m=6.0)
+    assert not scenario.camera_state(*far, along).on_trail, "far from the path: the simulated world"
     assert scenario.camera_state(*scenario.point(-8.0), along).on_trail, "the walk starts 10 m before the deploy point, and that stretch can be drawn"
     assert not scenario.camera_state(*scenario.point(-12.0), along).on_trail, "before the start of the walk"
     assert not scenario.camera_state(*scenario.point(80.0), along).on_trail, "past its end"

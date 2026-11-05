@@ -45,9 +45,13 @@ VERGE_M = 2.5
 BLEND_M = 7.0
 #: Clear of trees, boulders and bushes this much past the verge (their own radius is added).
 CLEAR_MARGIN_M = 1.0
-#: The reconstruction supports a camera this far to either side of the walk and turned this far from its direction.
+#: The reconstruction supports a camera this far to either side of the walk and turned this far from its direction. A rover that is
+#: further off or turned further than that still gets the real place, drawn from the nearest camera the walk supports (a picture
+#: that is a little wrong about where the rover is, and real, rather than a cut to the simulated world), until it is more than
+#: `FALL_BACK_M` from the path.
 MAX_LATERAL_M = 1.0
 MAX_YAW_DEG = 30.0
+FALL_BACK_M = 3.5
 #: The first stretch of the walk was seen by few frames and is the poorest; the deploy point is this far along it.
 DEFAULT_START_M = 10.0
 #: The walk's last metres have the filmer's own shadow in them, and are where the camera slowed to stop; the patrol ends this short of them.
@@ -224,7 +228,10 @@ class TrailScenario:
     # --- the camera -----------------------------------------------------------------------------------------------------------
 
     def camera_state(self, x: float, y: float, heading_deg: float) -> TrailState:
-        """Where a rover at (x, y) facing `heading_deg` is on the walk, and whether the walk can be drawn from there."""
+        """Where a rover at (x, y) facing `heading_deg` is on the walk, and whether the walk can be drawn from there.
+
+        The lateral offset and the turn are limited to what the walk supports (MAX_LATERAL_M, MAX_YAW_DEG): further than that the real place is
+        still drawn, from the nearest supported camera, until the rover is more than FALL_BACK_M from the path."""
         dist, i = self._tree.query([x, y])
         i = int(i)
         tx, ty = self.tangent[i]
@@ -233,8 +240,8 @@ class TrailScenario:
         bearing = math.degrees(math.atan2(tx, ty))
         yaw = (heading_deg - bearing + 180.0) % 360.0 - 180.0
         s = float(self.arc[i])
-        ok = abs(lateral) <= MAX_LATERAL_M and abs(yaw) <= MAX_YAW_DEG and 0.5 < s < self.length_m - 0.5
-        return TrailState(s, lateral, yaw, ok)
+        ok = float(dist) <= FALL_BACK_M and 0.5 < s < self.length_m - 0.5
+        return TrailState(s, float(np.clip(lateral, -MAX_LATERAL_M, MAX_LATERAL_M)), float(np.clip(yaw, -MAX_YAW_DEG, MAX_YAW_DEG)), ok)
 
     def camera(self, state: TrailState) -> TrailCamera:
         """The splat camera for a state, as a place and direction in the simulated world."""
@@ -369,8 +376,8 @@ class TrailWorld:
         right = np.array([ty, -tx])
         lateral = float((np.array([x, y]) - self.xy[i]) @ right)
         yaw = (heading_deg - math.degrees(math.atan2(tx, ty)) + 180.0) % 360.0 - 180.0
-        ok = abs(lateral) <= MAX_LATERAL_M and abs(yaw) <= MAX_YAW_DEG and float(dist) <= MAX_LATERAL_M + 0.5
-        return TrailState(float(self.local_arc[i]), lateral, yaw, ok, int(self.leg_of[i]))
+        ok = float(dist) <= FALL_BACK_M
+        return TrailState(float(self.local_arc[i]), float(np.clip(lateral, -MAX_LATERAL_M, MAX_LATERAL_M)), float(np.clip(yaw, -MAX_YAW_DEG, MAX_YAW_DEG)), ok, int(self.leg_of[i]))
 
     def camera(self, state: TrailState) -> TrailCamera:
         return self.legs[state.leg].camera(state)

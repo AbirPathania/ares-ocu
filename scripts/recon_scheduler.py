@@ -85,7 +85,7 @@ def running(pattern: str) -> bool:
 
 
 def final_splat(job: Job) -> Path:
-    return RECON / job.name / "out" / f"splat_{job.steps:05d}.ply"
+    return RECON / job.name / "out" / f"splat_{job.steps}.ply"  # Brush pads the iteration to the width of the total, so a 9000-step run writes splat_9000.ply
 
 
 def tidy(job: Job) -> None:
@@ -142,7 +142,7 @@ def main() -> None:
         for job in JOBS:
             if done(job, "trained") and not done(job, "packed") and not done(job, "pack.failed") and "pack" not in busy:
                 say(f"pack {job.name}")
-                children[f"pack:{job.name}"] = (job, subprocess.Popen([str(PY), str(ROOT / "scripts" / "trail_pack.py"), job.name, f"out/splat_{job.steps:05d}.ply"],
+                children[f"pack:{job.name}"] = (job, subprocess.Popen([str(PY), str(ROOT / "scripts" / "trail_pack.py"), job.name, f"out/splat_{job.steps}.ply"],
                                                                       stdout=open(RECON / job.name / "pack.log", "w"), stderr=subprocess.STDOUT))
                 busy.add("pack")
         # GPU: train the first reconstructed trail that has not been

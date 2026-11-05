@@ -1884,3 +1884,12 @@ OPENCV both fit at 0.455 px with a focal length of 1391 px, OPENCV's x and y wit
 IMG_5108 segments (one camera, one setting) the lens is pinned at B's values (`LENS_5108` in `scripts/recon_scheduler.py`; `recon_sfm.py`
 takes the parameters and does not refine them), and A was re-reconstructed. A lens that a reconstruction is free to get wrong stretches the
 whole world it builds; pinning it removes that, and is faster.
+
+**Never cut to the simulated world on a trail.** On the first real two-trail patrol the rover's camera fell back to the simulated world whenever the rover was
+more than 1 m from the line or turned more than 30 degrees from the walk's direction, which on a narrow winding trail is often, and a cut
+from photographic frames to the CG world is the jarring thing the whole exercise is meant to remove. The state now carries the offset and the turn
+limited to what the walk supports (1 m, 30 degrees), and the real place is drawn from that nearest supported camera until the rover is more than 3.5 m from
+the path. That makes the picture a little wrong about exactly where the rover is (a rover 2 m to one side is drawn from 1 m), and always real.
+Also found on that patrol: the scale estimate of IMG_5132 (phone height implied 1.154 m) agrees with IMG_5129's (1.163 m) from an independent walk, which
+supports the pace-based scale; and IMG_5132's splat is clearly softer than IMG_5129's (colour error 18.0 against 11.7) at 9 000 steps and
+600 000 splats, so it should be retrained with the larger budget the first trail had.
