@@ -132,6 +132,25 @@ def test_a_splat_in_front_of_the_camera_is_drawn_where_the_camera_says_and_behin
     assert np.frombuffer(fbo.read(components=3), dtype=np.uint8).max() == 0
 
 
+def test_splats_are_sorted_far_to_near_closely_enough_that_no_pair_is_visibly_out_of_order(tmp_path):
+    pytest.importorskip("moderngl")
+    rng = np.random.default_rng(7)
+    rows = [one_splat(x=float(x), y=float(y), z=float(z)) for x, y, z in zip(rng.uniform(-3, 3, 4000), rng.uniform(-2, 2, 4000), rng.uniform(-1, 25, 4000))]
+    write_ply(tmp_path / "s.ply", rows)
+    cloud = splats.load_ply(tmp_path / "s.ply")
+
+    class Holder:  # sort_for needs only the cloud
+        pass
+
+    holder = Holder()
+    holder.cloud = cloud
+    pose = splats.Pose(np.eye(3), np.zeros(3))
+    order = splats.SplatRenderer.sort_for(holder, pose)
+    depth = cloud.position[order, 2]
+    assert len(order) == int((cloud.position[:, 2] > 0.15).sum()), "everything in front of the camera, and nothing behind it"
+    assert depth[0] > depth[-1] and np.all(depth[1:] <= depth[:-1] + 25.0 / 65535.0 + 1e-6), "far to near, to within one quantum of the depth range"
+
+
 def test_drawing_splats_against_a_depth_buffer_does_not_write_to_it(tmp_path):
     """Whatever is drawn after the photographs (a figure's contact shadow) is tested against the depth of the figures; if the splats wrote their own
     depth, every ground splat would hide it."""

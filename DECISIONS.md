@@ -2001,3 +2001,8 @@ frames; I then deleted the old C's intermediates on that reading and they have t
 trail out. (3) The scheduler's tidy step deleted the 14 000-step IMG_5132 retrain's splat because its job still said 9 000 steps; the packed copy survived, and the job now says 14 000.
 Also: each route now stores how sharply its splats draw the walk's own view along it (`sharpness`, from the camera and 0.6 m either side), and a stretch under 0.2 of the walk's median is treated as broken like a wrong pose is (IMG_5108 C2's
 first 21 m, drawn from its own camera positions, were at a few percent of it, with dark smears and starbursts). Final chain: ten legs, 215 m, each leg between 0.25 and 0.45 of the real video's sharpness, none broken.
+
+**The frame rate.** Profiled: of a 120 ms trail frame, 97 ms was sorting 800 000 splats far to near on the CPU (float depths, a stable comparison sort) and 23 ms was drawing. The depth is now quantised to 16 bits over the visible range and sorted
+by numpy's radix sort (linear time): 9 ms for the sort. The picture is unchanged (mean difference from the old sort 0.08 of 255, over three trails and six poses each; the worst pixels are a few where depths tie), the whole suite passes
+(824 tests), and live with the real worker thread the rover's feed went from a median of 116 ms a frame (8.6 fps) to 71 ms (14 fps), 95th percentile 246 to 194 ms, worst gap 555 to 282 ms. What is left of the 71 ms is the draw, the
+read-back, the sharpening and the rest of the window sharing the process.
