@@ -1960,3 +1960,13 @@ but still alive keeps its `QTimer`s running (nothing stopped them), and with a t
 so an animation that takes 4 steps got 1 or 2. `MainWindow.closeEvent` now stops its timers, which is also right for the application, and the trail window tests close their windows. The suite passes
 after that (the second run was stopped from outside after 761 tests with none failed; the remaining 58 were run separately and passed). Also checked this session: the thermal camera on the trail world (the
 carved ground, people hot against it), detections firing along the whole patrol, and the real window with the GPU worker thread and event loop showing the splat frames, the TRAIL chip and the detection boxes.
+
+**Figures on the trail (people and animals): what could be done without new assets.** The plan was to replace the CG figures with real ones. Looking for them: IMG_5117, thought to be "someone standing at a viewpoint", has
+nobody in it (it is a panorama of forest and hills; the person is the one filming), so there is nothing to cut out of the footage, and the machine has no segmentation tooling (no torch or opencv). Free
+CC0 models that are rigged and walk are low-poly and stylised; realistic scanned deer, ibex and goat models are paid ($100 and up) or carry custom licences; one free deer is CC BY. None was downloaded.
+What was done instead, in `gpu_scene.py` and `shaders.py`, for figures drawn over a trail: (1) a grade on the figure's colour (`u_grade`: 32% of the saturation off, warmed, blacks lifted, contrast
+flattened), because clean flat colour is what marks a figure out among photographs; (2) a soft contact shadow on the ground, cast away from the sun and drawn after the photographs (before them the
+opaque ground splats would cover it). That second one exposed a bug in the splat renderer: `ctx.depth_mask = False` does nothing in moderngl (the mask belongs to the framebuffer), so the splat pass had been
+writing depth for every splat; it now sets `ctx.fbo.depth_mask`, and a test checks the depth buffer is left as found. The figures still read as CG, plainly: a flat modelled hiker and deer beside a photographic
+trail cannot be made photographic by shading. What would: a person and an animal filmed turning on the spot or walking past (the pipeline that made the trails would reconstruct them as splats), or a scanned
+model bought or licensed for the purpose.

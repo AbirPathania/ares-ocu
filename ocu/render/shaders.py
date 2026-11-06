@@ -339,6 +339,7 @@ void main() {
 
 INSTANCE_FRAG = COMMON + SHADOWED + """
 uniform int u_kind;        // 0 rock, 1 foliage, 2 machine, 3 grass, 4 figure
+uniform float u_grade;     // how far a figure is matched to a photograph beside it: 0 none, 1 fully
 in vec3 v_world;
 in vec3 v_normal;
 in vec3 v_local;
@@ -484,6 +485,14 @@ void main() {
         // Light through thin flesh when the sun is behind it.
         lit += albedo * vec3(0.70, 0.18, 0.06) * pow(max(dot(-view, u_sun), 0.0), 2.0) * sss * sh;
         lit += albedo * emit;
+        if (u_grade > 0.0) {
+            // Clean flat colour is what marks a figure out among photographs: take some of the saturation off, warm it to the light the
+            // photographs were taken in, and lift the blacks and flatten the contrast a little, as haze and a lens do.
+            float lum = dot(lit, vec3(0.299, 0.587, 0.114));
+            lit = mix(lit, vec3(lum), 0.32 * u_grade);
+            lit *= mix(vec3(1.0), vec3(1.0, 0.95, 0.88), u_grade);
+            lit = mix(lit, lit * 0.82 + vec3(0.035, 0.032, 0.026), u_grade);
+        }
     }
     lit = applyFog(lit, dist, view);
     f_color = vec4(finish(lit), 1.0);
@@ -646,5 +655,34 @@ void main() {
 
     lit = applyFog(lit, dist, view);
     f_color = vec4(finish(lit), 1.0);
+}
+"""
+
+
+#: A soft dark patch on the ground, drawn after the photographs, so that a figure is standing in the picture and not pasted on it.
+BLOB_VERT = """
+uniform mat4 u_vp;
+uniform vec3 u_centre;
+uniform vec2 u_radius;     // along the shadow, across it
+uniform vec2 u_dir;        // unit, the way the shadow falls
+in vec2 in_pos;
+out vec2 v_p;
+void main() {
+    v_p = in_pos;
+    vec2 across = vec2(-u_dir.y, u_dir.x);
+    vec2 w = u_centre.xy + u_dir * in_pos.x * u_radius.x + across * in_pos.y * u_radius.y;
+    gl_Position = u_vp * vec4(w, u_centre.z + 0.15, 1.0);  // a little above the simulated ground that is in the depth buffer, which the figures stand on only to within its mesh
+}
+"""
+
+BLOB_FRAG = """
+#version 330
+uniform float u_strength;
+in vec2 v_p;
+out vec4 f_color;
+void main() {
+    float r = length(v_p);
+    float a = u_strength * (1.0 - smoothstep(0.1, 1.0, r));
+    f_color = vec4(0.0, 0.0, 0.0, a);
 }
 """

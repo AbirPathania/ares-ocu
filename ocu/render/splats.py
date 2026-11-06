@@ -325,8 +325,8 @@ class SplatRenderer:
         if depth is not None:
             self.ctx.enable(self.ctx.DEPTH_TEST)
             self.ctx.depth_func = "<"
-            self.ctx.depth_mask = False
+            self.ctx.fbo.depth_mask = False  # (the mask belongs to the framebuffer: on the context it is only an attribute that does nothing)
         else:
             self.ctx.disable(self.ctx.DEPTH_TEST)
         self.vao.render(instances=len(order))
-        self.ctx.depth_mask = True
+        self.ctx.fbo.depth_mask = True

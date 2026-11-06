@@ -132,6 +132,26 @@ def test_a_splat_in_front_of_the_camera_is_drawn_where_the_camera_says_and_behin
     assert np.frombuffer(fbo.read(components=3), dtype=np.uint8).max() == 0
 
 
+def test_drawing_splats_against_a_depth_buffer_does_not_write_to_it(tmp_path):
+    """Whatever is drawn after the photographs (a figure's contact shadow) is tested against the depth of the figures; if the splats wrote their own
+    depth, every ground splat would hide it."""
+    moderngl = pytest.importorskip("moderngl")
+    try:
+        ctx = moderngl.create_standalone_context()
+    except Exception:
+        pytest.skip("no GL context")
+    write_ply(tmp_path / "s.ply", [one_splat(x=0.0, z=3.0)])
+    renderer = splats.SplatRenderer(ctx, splats.load_ply(tmp_path / "s.ply"))
+    k = splats.Intrinsics(320, 240, 300.0, 300.0, 160.0, 120.0)
+    colour, depth = ctx.texture((320, 240), 4), ctx.depth_texture((320, 240))
+    fbo = ctx.framebuffer(color_attachments=[colour], depth_attachment=depth)
+    fbo.use()
+    fbo.clear(0.0, 0.0, 0.0, 1.0, depth=1.0)
+    renderer.render(splats.Pose(np.eye(3), np.zeros(3)), k, depth=(1.0, 0.1, 100.0))
+    assert np.frombuffer(fbo.read(components=3), dtype=np.uint8).max() > 0, "it was drawn"
+    assert np.frombuffer(fbo.read(attachment=-1, components=1, dtype="f4"), dtype="f4").min() == 1.0, "and left the depth buffer as it found it"
+
+
 def test_the_scene_draws_the_trail_when_asked_and_the_world_when_not(tmp_path, monkeypatch):
     pytest.importorskip("moderngl")
     from ocu.core.terrain import TerrainWorld

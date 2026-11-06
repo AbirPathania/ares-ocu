@@ -123,6 +123,8 @@ class GpuScene:
         self.p_sky = self._program(shaders.SKY_VERT, shaders.SKY_FRAG)
         self.p_shadow_terrain = self._program(shaders.SHADOW_TERRAIN_VERT, shaders.SHADOW_FRAG)
         self.p_shadow_inst = self._program(shaders.SHADOW_INSTANCE_VERT, shaders.SHADOW_FRAG)
+        self.p_blob = self._program(shaders.BLOB_VERT, shaders.BLOB_FRAG)
+        self._blob_vao = self.ctx.vertex_array(self.p_blob, [(self.ctx.buffer(np.array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1], dtype=np.float32).tobytes()), "2f", "in_pos")])
 
     def _texture(self, image: np.ndarray):
         tex = self.ctx.texture((image.shape[1], image.shape[0]), 3, np.ascontiguousarray(image).tobytes())
@@ -746,6 +748,28 @@ class GpuScene:
         pts = [np.array([x, y]) + fwd * ay + side * ax for ay in (1.55, -1.62) for ax in (-0.92, 0.92)]
         return float(np.mean(self._ground(np.array([p[0] for p in pts]), np.array([p[1] for p in pts]))))
 
+    #: How long and how wide a figure's shadow on the ground is, in metres, and how dark: a person and an animal, a truck, by kind.
+    CONTACT_SHADOW_M = {"person": (1.25, 0.38, 0.55), "animal": (1.5, 0.45, 0.5), "vehicle": (3.4, 1.4, 0.55)}
+
+    def _draw_contact_shadows(self, entities, vp: np.ndarray) -> None:
+        """A soft shadow on the ground under and away from each figure, drawn over the photographs (they would cover it if it were under them)."""
+        away = -self._sun[:2]
+        norm = float(np.linalg.norm(away))
+        away = away / norm if norm > 1e-6 else np.array([0.0, -1.0])
+        ctx = self.ctx
+        ctx.enable(self.mgl.BLEND)
+        ctx.blend_func = self.mgl.SRC_ALPHA, self.mgl.ONE_MINUS_SRC_ALPHA
+        ctx.enable(self.mgl.DEPTH_TEST)
+        self._set(self.p_blob, "u_vp", vp)
+        self._set(self.p_blob, "u_dir", (float(away[0]), float(away[1])))
+        for kind, x, y, heading, *_ in entities:
+            length, width, strength = self.CONTACT_SHADOW_M.get(kind, self.CONTACT_SHADOW_M["person"])
+            z = self._entity_ground(kind, x, y, heading)
+            self._set(self.p_blob, "u_centre", (float(x + away[0] * 0.45 * length), float(y + away[1] * 0.45 * length), float(z)))
+            self._set(self.p_blob, "u_radius", (length, width))
+            self._set(self.p_blob, "u_strength", strength)
+            self._blob_vao.render()
+
     def _draw_entity(self, entity, shadow: bool) -> None:
         kind, x, y, heading, *rest = entity
         phase = rest[0] if rest else 0.0
@@ -962,6 +986,7 @@ class GpuScene:
             self._set(self.p_inst, "u_kind", 2)
             self._rover_vao.render(instances=1)
 
+        self._set(self.p_inst, "u_grade", 1.0 if view_pose is not None else 0.0)
         for e in entities or ():
             self._draw_entity(e, shadow=False)
 
@@ -969,6 +994,8 @@ class GpuScene:
             # the real place, over the sky and under nothing; against the figures' depth when there are any
             scale = float(self.trail["route"].scale)
             self.trail["renderer"].render(view_pose, view_k, depth=(scale, NEAR_M, FAR_M) if trail_world_view else None)
+            if entities and trail_world_view:
+                self._draw_contact_shadows(entities, vp)
             ctx.disable(self.mgl.BLEND)
             ctx.enable(self.mgl.DEPTH_TEST)
 
