@@ -68,6 +68,9 @@ CLEAR_MARGIN_M = 1.0
 MAX_LATERAL_M = 1.0
 MAX_YAW_DEG = 30.0
 FALL_BACK_M = 3.5
+#: Where two stretches of the chain run close together, the camera stays on the leg it is on unless the other is nearer by more than this: otherwise it would cut between two
+#: real places with every centimetre the rover moved.
+LEG_STICK_M = 1.5
 #: The first stretch of the walk was seen by few frames and is the poorest; the deploy point is this far along it.
 DEFAULT_START_M = 10.0
 #: The walk's last metres have the filmer's own shadow in them, and are where the camera slowed to stop; the patrol ends this short of them.
@@ -377,6 +380,11 @@ class TrailWorld:
         steps[np.diff(self.leg_of) != 0] = 0.0  # a join is a cut, not distance
         self.arc = np.concatenate([[0.0], np.cumsum(steps)])
         self._tree = cKDTree(self.xy)
+        self._leg_trees = {}
+        for index in range(len(legs)):
+            where = np.where(self.leg_of == index)[0]
+            if len(where):
+                self._leg_trees[index] = (cKDTree(self.xy[where]), where)
         self.base_z = 0.0
 
     @classmethod
@@ -458,9 +466,14 @@ class TrailWorld:
         for leg in self.legs:
             leg.base_z = self.base_z
 
-    def camera_state(self, x: float, y: float, heading_deg: float) -> TrailState:
+    def camera_state(self, x: float, y: float, heading_deg: float, previous_leg: int | None = None) -> TrailState:
         dist, i = self._tree.query([x, y])
         i = int(i)
+        if previous_leg is not None and previous_leg != int(self.leg_of[i]) and previous_leg in self._leg_trees:
+            tree, where = self._leg_trees[previous_leg]
+            d_prev, j = tree.query([x, y])
+            if float(d_prev) <= float(dist) + LEG_STICK_M:  # still on the leg it was on, near enough
+                dist, i = d_prev, int(where[int(j)])
         tx, ty = self.tangent[i]
         right = np.array([ty, -tx])
         lateral = float((np.array([x, y]) - self.xy[i]) @ right)

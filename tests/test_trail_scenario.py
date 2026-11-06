@@ -278,3 +278,13 @@ def test_the_patrol_is_the_longest_stretch_whose_camera_poses_the_reconstruction
     assert end < route.arc_m[middle] - POSE_DEVIATION_MARGIN_M + 1e-6, "the patrol stops short of the wrong poses"
     assert end - start >= MIN_PATROL_M and start >= 0.0, "and is the longer clean stretch, the one before them"
     assert all(deviation[(route.arc_m >= start) & (route.arc_m <= end)] < 0.5), "none of its cameras was off the path"
+
+
+def test_the_camera_stays_on_its_leg_where_two_stretches_of_the_chain_are_close_and_moves_on_when_it_is_clearly_in_the_next():
+    world = chain(count=2)
+    first_of_second = int(np.where(world.leg_of == 1)[0][0])
+    x, y = world.xy[first_of_second] + world.tangent[first_of_second] * 0.5  # just past the join, half a metre into the second leg
+    assert world.camera_state(float(x), float(y), 0.0).leg == 1, "with nothing to go on, the nearest"
+    assert world.camera_state(float(x), float(y), 0.0, previous_leg=0).leg == 0, "but one that was on the first stays on it this close to the join"
+    far = world.xy[first_of_second + int(10.0 / 0.25)]
+    assert world.camera_state(float(far[0]), float(far[1]), 0.0, previous_leg=0).leg == 1, "and leaves it when the second is clearly nearer"

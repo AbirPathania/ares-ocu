@@ -303,7 +303,20 @@ class MainWindow(QMainWindow):
         from ocu.core.trail_scenario import KEEP_OFF_M
 
         off_track = None if self.trail is None else (lambda x, y: self.trail.distance_to_line(x, y) >= KEEP_OFF_M - 0.3)
-        self.surface_entities = settle_entities(self.terrain, entities, allowed=off_track)
+        if self.trail is None:
+            self.surface_entities = settle_entities(self.terrain, entities, allowed=off_track)
+        else:
+            # one at a time, because a layout of trails can leave nowhere to stand within reach of a place that is not on the track (a hillside, trees): that one is given a closer
+            # limit and, if there is still nowhere, left out, rather than the whole window refusing to open
+            settled = []
+            for entity in entities:
+                for limit in (KEEP_OFF_M - 0.3, 3.0, 2.2):
+                    try:
+                        settled += settle_entities(self.terrain, [entity], allowed=lambda x, y, limit=limit: self.trail.distance_to_line(x, y) >= limit)
+                        break
+                    except ValueError:
+                        continue
+            self.surface_entities = settled
         stamp_static_entities(self.terrain, self.surface_entities)
         self.dynamic_obstacles = DynamicObstacles()
         #: Seconds each walking entity has spent stopped for the rover; its pose is read at mission time minus this.
@@ -374,6 +387,7 @@ class MainWindow(QMainWindow):
         self._thermal_poll.timeout.connect(self._poll_thermal_build)
         self._camera_turn = 0
         self._gpu_worker = None
+        self._trail_leg: int | None = None  # the leg the rover's camera was last drawn from (see TrailWorld.camera_state)
         #: Vehicles already acted on for a low battery, so it is done once and said once.
         self._low_battery_actioned: set[str] = set()
         self._camera_timer = QTimer(self)
@@ -1120,7 +1134,8 @@ class MainWindow(QMainWindow):
         pose = self.units[unit_id].pose
         rig = self.camera_rig
         if unit_id == "rover" and feed.trail_mode and self.trail is not None:
-            state = self.trail.camera_state(pose.x, pose.y, pose.heading)
+            state = self.trail.camera_state(pose.x, pose.y, pose.heading, previous_leg=self._trail_leg)
+            self._trail_leg = state.leg
             if state.on_trail:
                 cam = self.trail.camera(state)
                 leg = self.trail.legs[state.leg]
