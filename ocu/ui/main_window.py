@@ -71,6 +71,7 @@ from dataclasses import replace as _replace
 
 from ocu.core.sweep import cut_washouts_on_lanes, plan_lane_sweep, sweep_from_first_scan
 from ocu.core.targets import default_field
+from ocu.core import scenery
 from ocu.core.terrain import IMPASSABLE, CELL_SIZE_M, WORLD_HALF_EXTENT_M, PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
 from ocu.sim.mission_clock import MissionClock
@@ -246,8 +247,13 @@ class MainWindow(QMainWindow):
             # The ground is cut to the real trail before anything reads it, the sweep runs along it, and the content
             # (buried objects, people, animals) is laid out along it. See core/trail_scenario.py.
             self.trail.carve(self.terrain)
+            # gravel, cobbles, more rock and stepped ledges; the obstacles keep out of the stretch where the picture is the real place (core/scenery.py)
+            from ocu.core.trail_scenario import CLEAR_ZONE_M
+
+            scenery.dress(self.terrain, protect=self.trail.distances, protect_m=CLEAR_ZONE_M + 0.3)
             self.sweep = self.trail.sweep()
         else:
+            scenery.dress(self.terrain)  # the passable kinds only: gravel, cobbles, ledges
             # The clearance task: a serpentine lane sweep away from the deploy
             # point, laid out on the clearest axis available. The rover chooses
             # it after its first scan (see _plan_sweep_from_first_scan); this is

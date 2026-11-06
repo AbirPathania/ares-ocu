@@ -422,6 +422,22 @@ def load_ground_textures() -> dict[str, Textures] | None:
     return out
 
 
+def load_gravel_texture(size: int | None = None) -> "Textures | None":
+    """Poly Haven's gravelly sand as the terrain's gravel layer, resized to the other layers' size, or None if it was not downloaded."""
+    base = ROOT / "textures" / "gravelly_sand"
+    try:
+        diffuse, normal = next(base.glob("Diffuse.*")), next(base.glob("nor_gl.*"))
+        albedo, nrm = _load_image(diffuse), _load_image(normal)
+    except (StopIteration, OSError):
+        return None
+    if size is not None and albedo.shape[0] != size:
+        from PIL import Image
+
+        albedo = np.asarray(Image.fromarray(albedo).resize((size, size), Image.LANCZOS))
+        nrm = np.asarray(Image.fromarray(nrm).resize((size, size), Image.LANCZOS))
+    return Textures(albedo, nrm, np.full_like(albedo, (255, 230, 0)))
+
+
 def available() -> bool:
     return (ROOT / "models").exists() and (ROOT / "textures").exists()
 

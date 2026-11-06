@@ -313,6 +313,12 @@ class _Tree:
         return _merge(self.parts)
 
 
+#: Foliage: leaf sprays per branch tip and their size (a fraction of the tree's height). The first version had 46 and 60 sprays of 0.078 and 0.074 (on a 6 m tree a spray half a metre across: green
+#: polygons); the same cover in smaller, more numerous sprays reads as foliage. (Leaf area is about the same: count x size squared.)
+ACACIA_LEAVES, ACACIA_LEAF_SIZE = 120, 0.050
+LEAFY_LEAVES, LEAFY_LEAF_SIZE = 150, 0.048
+
+
 def acacia_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
     """An acacia of the kind that lines the footage's trails: height one, crown radius about 0.40, trunk on the origin.
 
@@ -329,7 +335,7 @@ def acacia_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
     parts = tree.parts
     for tip, direction, radius in tree.tips:
         centre = tip + np.array([0.0, 0.0, 0.02])
-        parts.append(_fronds(centre, np.array([0.155, 0.155, 0.045]), 46, 0.078, rng, dry=0.06))
+        parts.append(_fronds(centre, np.array([0.155, 0.155, 0.045]), ACACIA_LEAVES, ACACIA_LEAF_SIZE, rng, dry=0.06))
     return _merge(parts)
 
 
@@ -345,7 +351,7 @@ def leafy_template(seed: int) -> tuple[np.ndarray, np.ndarray]:
         tree.grow(end, d * 0.9 + out * 0.6 + np.array([0.0, 0.0, 0.25]), 0.30, 0.014, 2, 0.65)
     parts = tree.parts
     for tip, direction, radius in tree.tips:
-        parts.append(_fronds(tip + np.array([0.0, 0.0, 0.04]), np.array([0.135, 0.135, 0.105]), 60, 0.074, rng, dry=0.05))
+        parts.append(_fronds(tip + np.array([0.0, 0.0, 0.04]), np.array([0.135, 0.135, 0.105]), LEAFY_LEAVES, LEAFY_LEAF_SIZE, rng, dry=0.05))
     return _merge(parts)
 
 

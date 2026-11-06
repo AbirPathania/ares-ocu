@@ -152,10 +152,15 @@ class GpuScene:
         ground = assets.load_ground_textures()
         if ground is None:
             return
-        layers = ("ground", "scrub", "track", "dark", "slope")
+        layers = ("ground", "scrub", "track", "dark", "slope", "gravel")
+        gravel = assets.load_gravel_texture(size=ground["ground"].albedo.shape[0])
+        if gravel is not None:
+            ground = {**ground, "gravel": gravel}
+        else:
+            ground = {**ground, "gravel": ground["track"]}  # no gravel photograph: the track's, which is the nearest thing
         ctx = self.ctx
         for attribute, field in (("ground_albedo", "albedo"), ("ground_normal", "normal")):
-            stack = np.stack([getattr(ground[name], field) for name in layers])  # (5, h, w, 3)
+            stack = np.stack([getattr(ground[name], field) for name in layers])  # (6, h, w, 3)
             size = stack.shape[1]
             array = ctx.texture_array((size, size, len(layers)), 3, np.ascontiguousarray(stack).tobytes())
             array.build_mipmaps()
@@ -207,7 +212,9 @@ class GpuScene:
         weights = _box_blur(weights, 2)
         weights /= np.maximum(weights.sum(axis=-1, keepdims=True), 1e-4)
         hole = np.clip(world._pothole_depth / 0.75, 0.0, 1.0).astype(np.float32)
-        extra = np.stack([hole, np.zeros_like(hole), np.zeros_like(hole), np.zeros_like(hole)], axis=-1)
+        gravel = getattr(world, "gravel", None)
+        gravel = _box_blur(gravel.astype(np.float32), 1) if gravel is not None else np.zeros_like(hole)
+        extra = np.stack([hole, np.zeros_like(hole), gravel, np.zeros_like(hole)], axis=-1)
 
         # Extend past the edge of the world so the horizon is country and not the end of a table: ground that rises from the
         # edge into rolling hills, forested as the footage's are, fading into the haze.
@@ -286,6 +293,15 @@ class GpuScene:
         self.terrain_shadow_vao = ctx.vertex_array(
             self.p_shadow_terrain, [(self.terrain_vbo, "3f 11x4", "in_pos")], self.terrain_shadow_ibo
         )
+
+    def _gravel_at(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """How much of the ground at each (x, y) is gravel (0 to 1; zero where the world has none), for keeping grass off it."""
+        gravel = getattr(self._world, "gravel", None)
+        if gravel is None:
+            return np.zeros(len(x))
+        ix = np.clip(np.floor(x / self._cell).astype(int) + self._extent, 0, gravel.shape[0] - 1)
+        iy = np.clip(np.floor(y / self._cell).astype(int) + self._extent, 0, gravel.shape[1] - 1)
+        return gravel[ix, iy].astype(np.float64)
 
     def _template_vao(self, vertices: np.ndarray, indices: np.ndarray, instance_buffer):
         ctx = self.ctx
@@ -511,6 +527,7 @@ class GpuScene:
             # close neighbours.
             patch = meshes.fbm3(np.stack([gx * 0.30, gy * 0.30, np.zeros_like(gx)], axis=1), 4242, 3)
             keep = rng.uniform(0.0, 1.0, len(gx)) < np.clip((patch - 0.28) / 0.34, 0.06, 1.0)
+            keep &= rng.uniform(0.0, 1.0, len(gx)) > 0.94 * self._gravel_at(gx, gy)  # gravel is nearly bare
             gx, gy = gx[keep], gy[keep]
             rep = rng.integers(1, 4, len(gx))
             gx = np.repeat(gx, rep) + rng.normal(0.0, 0.20, int(rep.sum()))
@@ -710,6 +727,8 @@ class GpuScene:
                 gx_all.append((ix - self._extent + rng.uniform(0, 1, len(ix))) * self._cell)
                 gy_all.append((iy - self._extent + rng.uniform(0, 1, len(ix))) * self._cell)
             gx, gy = np.concatenate(gx_all), np.concatenate(gy_all)
+            bare = rng.uniform(0.0, 1.0, len(gx)) > 0.94 * self._gravel_at(gx, gy)  # gravel is nearly bare
+            gx, gy = gx[bare], gy[bare]
             gz = self._ground(gx, gy)
             pick = rng.integers(0, len(clumps), len(gx))
             for index, (name, entry) in enumerate(clumps):

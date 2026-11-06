@@ -157,6 +157,7 @@ uniform float u_footage;             // 1 when the ground photographs are the re
 // A tiling photo texture sampled twice at unrelated scales and rotations, so the
 // repeat does not show.
 vec3 layer_grade(int layer) {
+    if (layer == 5) return vec3(1.0);  // gravel: tinted where it is used
     // The footage's tiles are already this scene's ground, at the colour it was measured to be.
     if (u_footage > 0.5) return vec3(1.0);
     // The photographs are graded toward this scene's ground: warm, dry, a little
@@ -247,6 +248,17 @@ void main() {
         if (wt > 0.02) { tex += wt * tex_albedo(2, p.xy); nrm += wt * tex_normal(2, p.xy); total += wt; }
         if (wd > 0.02) { tex += wd * tex_albedo(3, p.xy); nrm += wd * tex_normal(3, p.xy); total += wd; }
         tex /= max(total, 0.001); nrm /= max(total, 0.001);
+        // Gravel that has washed into patches: Poly Haven's gravelly sand, pale and grey-brown, warmed to this ground, with its own relief.
+        // The patch edge is broken up by noise, so that it is the ragged edge of a wash and not a soft blob.
+        float gravel = smoothstep(0.30, 0.62, clamp(v_extra.z, 0.0, 1.0) + (n3 - 0.5) * 0.55);
+        if (gravel > 0.02) {
+            vec3 gc = tex_albedo(5, p.xy);
+            float gl = dot(gc, vec3(0.299, 0.587, 0.114));
+            // stretch its contrast about the middle: from a few metres up fine gravel is a pale patch with dark specks in it, which a flat photograph is not
+            vec3 g = mix(vec3(gl), gc, 0.55) * clamp(pow(max(gl, 0.02) / 0.28, 0.6), 0.35, 2.2) * vec3(1.0, 0.98, 0.94) * 1.35;  // grey-beige, not the sand's orange
+            tex = mix(tex, g, gravel * 0.95);
+            nrm = mix(nrm, tex_normal(5, p.xy) * 1.4, gravel);
+        }
         if (rockiness > 0.02) {
             tex = mix(tex, tex_albedo(4, p.xy), rockiness);
             nrm = mix(nrm, tex_normal(4, p.xy), rockiness);

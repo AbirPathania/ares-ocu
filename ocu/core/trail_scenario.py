@@ -64,10 +64,10 @@ LINE_NEIGHBOURS = 48
 LINE_REACH_M = 1.5
 #: Clear of trees, boulders and bushes this much past the verge (their own radius is added).
 CLEAR_MARGIN_M = 1.0
-#: Within this of the track nothing of the simulated world's is left standing, in the map or in the picture. Up to FALL_BACK_M (3.5 m) the rover's camera shows the real photographed place, in which
+#: Within this of the track (the track, its verge, and a margin) nothing of the simulated world's is left standing, in the map or in the picture. Up to FALL_BACK_M (3.5 m) the rover's camera shows the real photographed place, in which
 #: the simulated world's bushes, rocks and trees do not exist; they were still in the map (and, beyond the track and its verge, in the grid as ghosts, with nothing drawn), so the rover
 #: would not drive where the picture showed open ground. Past this the simulated world's own obstacles are drawn and are real.
-CLEAR_ZONE_M = 10.0
+CLEAR_ZONE_M = 5.5
 #: The reconstruction supports a camera this far to either side of the walk and turned this far from its direction. A rover that is
 #: further off or turned further than that still gets the real place, drawn from the nearest camera the walk supports (a picture
 #: that is a little wrong about where the rover is, and real, rather than a cut to the simulated world), until it is more than
@@ -518,6 +518,10 @@ class TrailWorld:
 
     def camera(self, state: TrailState) -> TrailCamera:
         return self.legs[state.leg].camera(state)
+
+    def distances(self, points: np.ndarray) -> np.ndarray:
+        """How far each of an (n, 2) array of (x, y) is from the nearest part of the chained path, metres."""
+        return self._tree.query(np.asarray(points, dtype=float))[0]
 
     def distance_to_line(self, x: float, y: float) -> float:
         """How far (x, y) is from the nearest part of the chained path, metres."""

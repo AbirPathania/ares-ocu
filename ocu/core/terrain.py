@@ -221,6 +221,8 @@ class TerrainWorld:
     trees: np.ndarray = field(default=None, repr=False)
     bushes: np.ndarray = field(default=None, repr=False)
     pebbles: np.ndarray = field(default=None, repr=False)
+    #: How much of each cell is gravel, 0 to 1 (core/scenery.py): drawn as a patch of loose stone, driven over like any open ground. None where nothing has dressed the world.
+    gravel: np.ndarray = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._extent = int(self.half_extent_m / self.cell_size_m)

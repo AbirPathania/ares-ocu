@@ -2006,3 +2006,20 @@ first 21 m, drawn from its own camera positions, were at a few percent of it, wi
 by numpy's radix sort (linear time): 9 ms for the sort. The picture is unchanged (mean difference from the old sort 0.08 of 255, over three trails and six poses each; the worst pixels are a few where depths tie), the whole suite passes
 (824 tests), and live with the real worker thread the rover's feed went from a median of 116 ms a frame (8.6 fps) to 71 ms (14 fps), 95th percentile 246 to 194 ms, worst gap 555 to 282 ms. What is left of the 71 ms is the draw, the
 read-back, the sharpening and the rest of the window sharing the process.
+
+**The rover's camera and the places it would not go (found from a screenshot).** The tile showed hills at the top and a pale flat area at the bottom, as if upside down. No code path flips a frame
+(the only flip is the one read-back in `gpu_scene.render`, used by every frame, and the sim, trail and IR paths all render upright in the same harness), the camera's ground and the drawn terrain agree to
+the millimetre, and the rover was not inside a solid. What I could reproduce at that spot (just off the track, near the start, manual, mission paused) was the camera sitting at the foot of a **steep-walled
+trench**: the ground beside the track rose up to 11 m within 3 m of it (slopes of 4 to 5, nearly vertical, in 11-17% of the cells within 8 m of the line). So the likeliest reading of the screenshot is a
+wall of ground above and the pale track below; I could not reproduce a literally inverted frame, and if it happens again it is something else, which I would like to see. Two causes of the walls, both mine:
+(1) a leg's net climb was carried into the chain, and ten legs that each end a metre lower leave the chain's last stretch 13 m below its first, so that where the chain loops back past its own start two stretches a few
+metres apart stood 10 m apart in height: each leg's net rise over its patrol stretch is now taken out (the bumps are kept, and the camera's eye is lowered with it); (2) the simulated world's washouts and canyons, clipped at
+2 m, still left cliffs: the relief is now smoothed over 2.5 m and limited to 1.5 m. Slopes by distance from the line are now: within 8 m, 99th percentile 0.3-0.4 (worst 0.8, about 38 degrees); none steeper than that anywhere.
+The same tests also showed why driving stopped: the rover only refused steps toward obstacles in the map, never slid, and inside 3.5 m of the track the picture is the real photographed place, in which the simulated
+bushes, rocks and trees do not exist; they were in the map, and the grid kept "ghost" obstacle cells beyond the strip that was cleared, so the rover would not go where the picture showed open ground. Within `CLEAR_ZONE_M` (5.5 m)
+of the track the simulated world's obstacles are now gone from the map, the grid and the picture; and manual driving, refused straight on, tries 35 and 70 degrees to either side before it stops (`MANUAL_SLIDE_ANGLES_DEG`),
+so it slides along a rock or a wall. A 6-minute manual drive across the world now stops once, in front of a rock 14 m out.
+**Scenery** (`core/scenery.py`, applied to every world, with extra obstacles only where the picture is the simulated world's): gravel patches on about a tenth of the open ground and a fifth of the track (Poly Haven's gravelly sand as
+a sixth terrain texture, a ragged edge, grass kept off it, 7 000 stones); 1 300 cobbles you drive over; more boulders, clustered, 5.5 m or more from the track; and 12 stepped ledges on slopes (0.45 m risers with flat stones along their
+lips). The trees' foliage was 46-60 big leaf sprays per tip (half a metre across on a 6 m tree); it is now 120-150 small ones, the same cover. What I have not done and cannot: make the scouts photographic. They are
+rendered scenes (the ground textures are from your footage, the rest is built), they look better and more varied, and they are not photographs.
