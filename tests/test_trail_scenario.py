@@ -288,3 +288,20 @@ def test_the_camera_stays_on_its_leg_where_two_stretches_of_the_chain_are_close_
     assert world.camera_state(float(x), float(y), 0.0, previous_leg=0).leg == 0, "but one that was on the first stays on it this close to the join"
     far = world.xy[first_of_second + int(10.0 / 0.25)]
     assert world.camera_state(float(far[0]), float(far[1]), 0.0, previous_leg=0).leg == 1, "and leaves it when the second is clearly nearer"
+
+
+def test_a_walk_with_no_clean_stretch_is_left_out_of_the_chain_not_driven_with_its_defaults():
+    from dataclasses import replace
+
+    from ocu.core.trail_scenario import usable_span
+
+    route, k = make_route()
+    n = len(route.arc_m)
+    wrong = np.full(n, 0.05)
+    wrong[::12] = 3.0  # a wrong pose every few metres: no run between them is long enough to drive
+    ruined = replace(route, deviation_m=wrong)
+    assert usable_span(ruined) is None
+    with pytest.raises(ValueError):
+        TrailScenario.build("ruined", ruined, k)
+    world = TrailWorld.build([("good", route, k), ("ruined", ruined, k), ("also good", route, k)])
+    assert [leg.name for leg in world.legs] == ["good", "also good"]

@@ -13,12 +13,44 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+
+import numpy as np
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from ocu.render import splats, trail  # noqa: E402
+
+
+def render_sharpness(ply: Path, route, k, width: int = 480, every: int = 3, laterals=(-0.6, 0.0, 0.6)) -> np.ndarray:
+    """How sharp the splats draw the route's own view at each of its cameras: the least, over the camera and a little to either side of it, of the variance of the picture's Laplacian.
+    Computed every `every` cameras and interpolated between. Returns None if there is no GL to draw with."""
+    try:
+        import moderngl
+
+        ctx = moderngl.create_standalone_context()
+    except Exception:
+        return None
+    from scipy import ndimage
+
+    ks = k.scaled(width)
+    renderer = splats.SplatRenderer(ctx, splats.load_ply(ply))
+    fbo = ctx.simple_framebuffer((ks.width, ks.height), components=4)
+    fbo.use()
+    n = len(route.arc_m)
+    indices = list(range(0, n, every)) + ([n - 1] if (n - 1) % every else [])
+    values = []
+    for i in indices:
+        worst = np.inf
+        for lateral in laterals:
+            fbo.clear(0.0, 0.0, 0.0, 1.0)
+            renderer.render(route.pose_at(float(route.arc_m[i]), lateral_m=lateral), ks)
+            image = np.frombuffer(fbo.read(components=3), dtype=np.uint8).reshape(ks.height, ks.width, 3)[::-1].astype(np.float32)
+            worst = min(worst, float(ndimage.laplace(image @ np.array([0.299, 0.587, 0.114], np.float32)).var()))
+        values.append(worst)
+    renderer.release()
+    return np.interp(np.arange(n), indices, values)
 
 
 def main() -> None:
@@ -31,6 +63,7 @@ def main() -> None:
     if len(sys.argv) > 3:
         route.rescale_to(float(sys.argv[3]))
         print("scale replaced by", sys.argv[3], "m per unit")
+    route.sharpness = render_sharpness(folder / ply, route, k)
     trail.TRAIL_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(folder / ply, trail.TRAIL_DIR / f"{clip}.ply")
     route.save(trail.TRAIL_DIR / f"{clip}.npz", k)

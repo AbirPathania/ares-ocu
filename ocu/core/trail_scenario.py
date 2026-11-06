@@ -81,6 +81,10 @@ END_MARGIN_M = 9.0
 POSE_DEVIATION_LIMIT_M = 0.5
 #: Clean footage is kept this far back from a wrong pose either side (the smear reaches past it).
 POSE_DEVIATION_MARGIN_M = 1.5
+#: A stretch whose splats draw less than this fraction of the walk's median sharpness (at the camera and a little to either side of it) is broken: smeared, dark or streaked (IMG_5108 C's first
+#: frames, drawn from their own camera positions, were at a few percent of it). A third of the median also catches soft stretches that are only soft, and leaves too little to drive.
+SHARPNESS_FLOOR_RATIO = 0.2
+SHARPNESS_MARGIN_M = 0.5
 #: Trimmed off the ends of a clean run (or of the walk), when the margins above and below do not leave a comfortable patrol.
 RUN_TRIM_M = 2.0
 #: A patrol of at least this much, once the head and tail margins are taken off, is taken as it is; less and the margins are given up for the trim.
@@ -167,16 +171,21 @@ class TrailSweep(LaneSweep):
         return self.scenario.point(along_m, lane_index * LANE_LATERAL_M + offset_m * OFFSET_SCALE)
 
 
-def usable_span(route: "trail_assets.TrailRoute") -> tuple[float, float]:
-    """(start_m, end_margin_m) of the stretch of a walk worth driving: the longest run of its cameras that the reconstruction placed on the path, kept
-    back `POSE_DEVIATION_MARGIN_M` from the wrong ones, with the head and tail margins of an ordinary walk where the run is long enough to afford them.
-    A route that was packed without the deviation, or that has no clean stretch to speak of, keeps the defaults."""
+def usable_span(route: "trail_assets.TrailRoute") -> tuple[float, float] | None:
+    """(start_m, end_margin_m) of the stretch of a walk worth driving: the longest run of its cameras that the reconstruction placed on the path and whose splats draw sharply, kept
+    back `POSE_DEVIATION_MARGIN_M` from the wrong poses (and `SHARPNESS_MARGIN_M` from the broken pictures), with the head and tail margins of an ordinary walk where the run is long enough to afford them.
+    A route that was packed without the deviation keeps the defaults. One whose data say it has no clean stretch worth driving (under `MIN_PATROL_M`) gets None: driving the defaults there would
+    drive the very frames the data call broken, so such a trail is left out of the chain (`TrailWorld.build`)."""
     dev = route.deviation_m
     if dev is None or len(dev) != len(route.arc_m) or len(dev) < 4:
         return DEFAULT_START_M, END_MARGIN_M
     arc, length = route.arc_m, route.length_m
     spacing = max(float(np.median(np.diff(arc))), 1e-6)
     bad = ndimage.binary_dilation(dev > POSE_DEVIATION_LIMIT_M, iterations=max(1, int(round(POSE_DEVIATION_MARGIN_M / spacing))))
+    sharp = route.sharpness
+    if sharp is not None and len(sharp) == len(arc):
+        broken = sharp < SHARPNESS_FLOOR_RATIO * float(np.median(sharp))
+        bad = bad | ndimage.binary_dilation(broken, iterations=max(1, int(round(SHARPNESS_MARGIN_M / spacing))))
     best, i = None, 0
     while i < len(arc):
         if bad[i]:
@@ -189,13 +198,13 @@ def usable_span(route: "trail_assets.TrailRoute") -> tuple[float, float]:
             best = (float(arc[i]), float(arc[j]))
         i = j + 1
     if best is None:
-        return DEFAULT_START_M, END_MARGIN_M
+        return None
     a, b = best
     start, end = max(DEFAULT_START_M, a + RUN_TRIM_M), min(length - END_MARGIN_M, b - RUN_TRIM_M)
     if end - start < COMFORT_PATROL_M:
         start, end = a + RUN_TRIM_M, b - RUN_TRIM_M
     if end - start < MIN_PATROL_M:
-        return DEFAULT_START_M, END_MARGIN_M
+        return None
     return start, length - end
 
 
@@ -225,7 +234,10 @@ class TrailScenario:
         """`placement` is where the deploy point goes in the world and which way the trail leaves it: x, y, ground height, compass bearing.
         Without `start_m` the stretch of the walk to drive is chosen from the quality of its reconstruction (`usable_span`)."""
         if start_m is None:
-            start_m, end_margin_m = usable_span(route)
+            span = usable_span(route)
+            if span is None:
+                raise ValueError(f"{name}: no stretch of the walk is clean enough to drive")
+            start_m, end_margin_m = span
         else:
             end_margin_m = END_MARGIN_M
         start_m = min(start_m, max(route.length_m - end_margin_m - 2.0, 0.25 * route.length_m))
@@ -392,6 +404,8 @@ class TrailWorld:
         legs: list[TrailScenario] = []
         placement = (0.0, 0.0, 0.0, 0.0)
         for name, route, k in trails:
+            if start_m is None and usable_span(route) is None:
+                continue  # nothing in it worth driving: left out, not driven badly
             leg = TrailScenario.build(name, route, k, start_m, placement)
             legs.append(leg)
             i0, i1 = leg.patrol_range()

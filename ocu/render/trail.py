@@ -114,6 +114,9 @@ class TrailRoute:
     #: (n,) how far each camera was from the smoothed path, metres: a camera pose that the reconstruction put far from where its neighbours say the walk went is a wrong one, and the
     #: splats trained from it are smeared (None for a route made before this was recorded)
     deviation_m: np.ndarray | None = None
+    #: (n,) how sharp the splats draw the walk's own view at each camera, from that camera and a little to either side of it (the least of the three), by the variance of the picture's
+    #: Laplacian: a stretch where it collapses is smeared, dark or streaked whatever its poses say (None for a route packed without it)
+    sharpness: np.ndarray | None = None
 
     @property
     def length_m(self) -> float:
@@ -124,13 +127,14 @@ class TrailRoute:
             path, centres=self.centres, quats=self.quats, arc_m=self.arc_m, scale=self.scale, up=self.up,
             ground_height=self.ground_height, camera_height_m=self.camera_height_m, k=np.array([k.width, k.height, k.fx, k.fy, k.cx, k.cy]),
             **({"deviation_m": self.deviation_m} if self.deviation_m is not None else {}),
+            **({"sharpness": self.sharpness} if self.sharpness is not None else {}),
         )
 
     @classmethod
     def load(cls, path: str | Path) -> tuple["TrailRoute", Intrinsics]:
         with np.load(path, allow_pickle=False) as d:
             route = cls(d["centres"], d["quats"], d["arc_m"], float(d["scale"]), d["up"], d["ground_height"], float(d["camera_height_m"]),
-                        d["deviation_m"] if "deviation_m" in d.files else None)
+                        d["deviation_m"] if "deviation_m" in d.files else None, d["sharpness"] if "sharpness" in d.files else None)
             w, h, fx, fy, cx, cy = d["k"]
         return route, Intrinsics(int(w), int(h), float(fx), float(fy), float(cx), float(cy))
 

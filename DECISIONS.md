@@ -1988,3 +1988,16 @@ measure (which blur raises, so the two are one fault). Three causes, found in th
 What is still not perfect, plainly: the picture is a reconstruction from phone video and is softer than the video (0.37 of its sharpness by this measure, less in thick growth); busy vegetation streaks from
 poses the footage did not see; the people and animals are CG; the scouts and the thermal camera see the simulated terrain; the feed runs at about 9 frames a second; and three of the eleven legs are short
 because of their reconstructions. The cuts between legs are cuts between different places and different light: the largest brightness jump at a join is 40 of 255 (C to D), the others under 18.
+
+**Redoing the badly posed segments (B, C, D, F).** The cause of the wrong camera poses, from looking at the footage: in IMG_5108 the filmer swings round fast several times (at 87 s from a chain-link fence, in under two
+seconds, to the trail), and a fast pan over a repeating texture breaks the incremental reconstruction. Segments B, C, D and F were re-extracted at 10 frames a second (from 5) and matched against 12 following frames with the
+exponentially spaced ones beyond (`SFM_OVERLAP`). Results, measured by the same test that found the problem (how far each camera is from the smoothed path) and by the training-view error:
+D2 0 bad poses of 400 (the old D had 21 of 200, off by up to 8.6 m), patrol 21.8 m (was 12.5), error 15.4 (was 16.1); F2 0 of 387 (was 11 of 189), patrol 13 m (was 7.8); B2 27 bad of 400 (was 39 of 200), longest clean run 18 m (was 9.4), patrol
+13.5 m (was 5), error 15.2 (was 17.8); **C2 did not improve**: its poses are still wrong in several places (longest clean run about 4 m, the old C's was 10.8 m), and it is left out of the chain.
+Things that went wrong on the way, so that they are not repeated: (1) three reconstructions crashed with "SQLite error: database or disk is full". I first blamed guided matching, which was wrong: my test of it copied a 750 MB
+database onto the same full disk. Peak need is about 2.5 GB free (features and matches 1.3 GB, the undistorted dataset 0.9 GB); the machine's free space is only 2-5 GB because the disk is shared with other volumes. Running two
+reconstructions, or a reconstruction and a training, at once starved both. (2) I read C2's patrol of 30.5 m as a success. It was the default range, which `usable_span` returned when no clean run of 4 m existed, and it contained the broken
+frames; I then deleted the old C's intermediates on that reading and they have to be regenerated if C is wanted (about 1.5 hours). `usable_span` now returns None for a trail with nothing clean, and `TrailWorld.build` leaves such a
+trail out. (3) The scheduler's tidy step deleted the 14 000-step IMG_5132 retrain's splat because its job still said 9 000 steps; the packed copy survived, and the job now says 14 000.
+Also: each route now stores how sharply its splats draw the walk's own view along it (`sharpness`, from the camera and 0.6 m either side), and a stretch under 0.2 of the walk's median is treated as broken like a wrong pose is (IMG_5108 C2's
+first 21 m, drawn from its own camera positions, were at a few percent of it, with dark smears and starbursts). Final chain: ten legs, 215 m, each leg between 0.25 and 0.45 of the real video's sharpness, none broken.

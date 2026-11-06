@@ -55,7 +55,7 @@ LENS_5108 = {"camera_model": "RADIAL", "camera_params": "1391.22,800,450,0.08,-0
 #: Every trail in the footage that can be walked: IMG_5117 is someone standing at a viewpoint (no walk to reconstruct from).
 JOBS = [
     Job("IMG_5129_hq", "IMG_5129", steps=14000, splats=800_000),
-    Job("IMG_5132_hq", "IMG_5132"),
+    Job("IMG_5132_hq", "IMG_5132", steps=14000, splats=800_000),  # retrained at the larger budget; the steps also say which splat file the tidy step keeps
     Job("IMG_5108_A", "IMG_5108", 160, 200, **LENS_5108),
     Job("IMG_5108_B", "IMG_5108", 40, 80),
     Job("IMG_5114", "IMG_5114"),
