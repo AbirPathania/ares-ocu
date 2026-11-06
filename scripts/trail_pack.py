@@ -10,6 +10,7 @@ there and draws the procedural world when it is not. A third argument replaces t
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -26,7 +27,7 @@ def main() -> None:
     sparse = folder / "dataset" / "sparse" / "0"
     k, poses = splats.read_colmap_text(sparse)
     points, rgb = trail.read_points(sparse / "points3D.txt")
-    route, report = trail.build_route(poses, points, rgb, seconds_per_frame=0.2)
+    route, report = trail.build_route(poses, points, rgb, seconds_per_frame=float(os.environ.get("PACK_SECONDS_PER_FRAME", 0.2)))
     if len(sys.argv) > 3:
         route.rescale_to(float(sys.argv[3]))
         print("scale replaced by", sys.argv[3], "m per unit")

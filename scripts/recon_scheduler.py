@@ -45,6 +45,8 @@ class Job:
     splats: int = SPLATS
     camera_model: str = "OPENCV"
     camera_params: str | None = None  # a pinned lens (see recon_sfm.py)
+    keep_per_second: int = 5  # frames kept per second of the clip (recon_frames.py); 10 keeps every frame it decodes
+    sfm_overlap: int | None = None  # frames each is matched against (recon_sfm.py's SFM_OVERLAP); None for the default
 
 
 #: IMG_5108's camera (the 1x lens, 1600 px wide frames) as calibrated on segment B, where the geometry pins it down: f, cx, cy, k1, k2.
@@ -63,6 +65,11 @@ JOBS = [
     Job("IMG_5108_D", "IMG_5108", 80, 120, **LENS_5108),
     Job("IMG_5108_E", "IMG_5108", 120, 160, **LENS_5108),
     Job("IMG_5108_F", "IMG_5108", 200, 240, **LENS_5108),
+    # The same stretches again, with twice the frames and wider matching: B, C and D had runs of cameras put metres off the path where the filmer swung round (D at 87 s: from a chain-link
+    # fence to the trail in under two seconds).
+    Job("IMG_5108_D2", "IMG_5108", 80, 120, keep_per_second=10, sfm_overlap=12, **LENS_5108),
+    Job("IMG_5108_B2", "IMG_5108", 40, 80, keep_per_second=10, sfm_overlap=12, **LENS_5108),
+    Job("IMG_5108_C2", "IMG_5108", 0, 40, keep_per_second=10, sfm_overlap=12, **LENS_5108),
 ]
 
 
@@ -143,7 +150,8 @@ def main() -> None:
             if done(job, "trained") and not done(job, "packed") and not done(job, "pack.failed") and "pack" not in busy:
                 say(f"pack {job.name}")
                 children[f"pack:{job.name}"] = (job, subprocess.Popen([str(PY), str(ROOT / "scripts" / "trail_pack.py"), job.name, f"out/splat_{job.steps}.ply"],
-                                                                      stdout=open(RECON / job.name / "pack.log", "w"), stderr=subprocess.STDOUT))
+                                                                      stdout=open(RECON / job.name / "pack.log", "w"), stderr=subprocess.STDOUT,
+                                                                      env={**os.environ, "PACK_SECONDS_PER_FRAME": str(1.0 / (10 if job.keep_per_second >= 10 else job.keep_per_second))}))
                 busy.add("pack")
         # GPU: train the first reconstructed trail that has not been
         if "train" not in busy and not running("brush_app"):
@@ -165,14 +173,15 @@ def main() -> None:
                 if done(job, "frames") and not done(job, "sfm") and not done(job, "sfm.failed"):
                     say(f"sfm {job.name}")
                     children[f"sfm:{job.name}"] = (job, subprocess.Popen([str(SFM_PY), str(ROOT / "scripts" / "recon_sfm.py"), job.name, job.camera_model] + ([job.camera_params] if job.camera_params else []),
-                                                                         stdout=open(RECON / f"{job.name}.sfm.log", "w"), stderr=subprocess.STDOUT))
+                                                                         stdout=open(RECON / f"{job.name}.sfm.log", "w"), stderr=subprocess.STDOUT,
+                                                                         env={**os.environ, **({"SFM_OVERLAP": str(job.sfm_overlap)} if job.sfm_overlap else {})}))
                     busy.add("sfm")
                     break
         if "frames" not in busy and not running("recon_frames.py"):
             for job in JOBS:
                 if not done(job, "frames") and not done(job, "frames.failed"):
                     say(f"frames {job.name}")
-                    args = [str(PY), str(ROOT / "scripts" / "recon_frames.py"), job.clip, job.name, "1600", "5", str(job.start_s)]
+                    args = [str(PY), str(ROOT / "scripts" / "recon_frames.py"), job.clip, job.name, "1600", str(job.keep_per_second), str(job.start_s)]
                     if job.end_s is not None:
                         args.append(str(job.end_s))
                     children[f"frames:{job.name}"] = (job, subprocess.Popen(args, stdout=open(RECON / f"{job.name}.frames.log", "w"), stderr=subprocess.STDOUT))

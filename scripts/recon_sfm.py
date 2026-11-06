@@ -15,6 +15,7 @@ what the splat trainer reads. Run it with the reconstruction environment, not th
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import time
@@ -39,7 +40,15 @@ def main(name: str, camera_model: str = "OPENCV", fixed_params: str | None = Non
         reader.camera_params = fixed_params
     pycolmap.extract_features(database, images, camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader)
     print(f"  {time.time() - t0:.0f} s; matching neighbours", flush=True)
-    pycolmap.match_sequential(database)
+    # SFM_OVERLAP: how many following frames each frame is matched against (the default is 10), with the exponentially spaced ones beyond; the matching is guided by the first
+    # estimate of the geometry. A fast pan across a repeating texture (a chain-link fence) needs more frames to hold on to than the default gives it.
+    pairing = pycolmap.SequentialPairingOptions()
+    matching = pycolmap.FeatureMatchingOptions()
+    if os.environ.get("SFM_OVERLAP"):
+        pairing.overlap = int(os.environ["SFM_OVERLAP"])
+        pairing.quadratic_overlap = True
+        matching.guided_matching = True
+    pycolmap.match_sequential(database, matching_options=matching, pairing_options=pairing)
     print(f"  {time.time() - t0:.0f} s; reconstructing", flush=True)
     options = pycolmap.IncrementalPipelineOptions()
     if fixed_params:
