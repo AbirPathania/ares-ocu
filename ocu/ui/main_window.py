@@ -1161,6 +1161,8 @@ class MainWindow(QMainWindow):
         return out
 
     def closeEvent(self, event) -> None:
+        for timer in self.findChildren(QTimer):  # a closed window that is still alive (a test's, a second one) must not keep ticking
+            timer.stop()
         self.thermal.stop_background()
         if self._gpu_worker is not None:
             self._gpu_worker.stop()

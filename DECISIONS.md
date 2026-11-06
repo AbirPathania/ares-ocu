@@ -1954,3 +1954,9 @@ the steepest cell). The ground past the blend is now the trail's height from the
 bumps on it (its height less its 15 m smoothing, limited to 2 m); the strip itself takes a tight (1.5 m) Gaussian average of the line's height, which is continuous where two stretches of the chain pass
 close by (the nearest sample alone stepped between them). The steepest slope in the carved world is now 1.8 (the simulated hills alone reach 1.4) and the track winds across a hillside.
 The rover's patrol is unchanged. The far hills the scouts see on the horizon are the simulated world's, flattened round the trail: the simulated sky and distance are not the trail's.
+
+**Whole suite, and a leak between tests.** The first full run of the suite with the trail work in it (819 tests, 34 min) failed four tests in `test_ui_motion.py` that pass alone. Cause: a `MainWindow` that is closed
+but still alive keeps its `QTimer`s running (nothing stopped them), and with a trail world (24 entities, 97 sweep points) the ticks were heavy enough to starve the animation clock of the next test,
+so an animation that takes 4 steps got 1 or 2. `MainWindow.closeEvent` now stops its timers, which is also right for the application, and the trail window tests close their windows. The suite passes
+after that (the second run was stopped from outside after 761 tests with none failed; the remaining 58 were run separately and passed). Also checked this session: the thermal camera on the trail world (the
+carved ground, people hot against it), detections firing along the whole patrol, and the real window with the GPU worker thread and event loop showing the splat frames, the TRAIL chip and the detection boxes.

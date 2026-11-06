@@ -19,6 +19,18 @@ def app():
     yield QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(autouse=True)
+def close_what_the_test_opened(app):
+    """A MainWindow left open keeps its timers, its threads and its thermal build running into whatever test comes next (test_ui_motion's
+    animations then crawl), so every window a test makes is closed when it is done."""
+    yield
+    for widget in QApplication.topLevelWidgets():
+        widget.close()
+        widget.deleteLater()
+    for _ in range(5):
+        QApplication.processEvents()
+
+
 def press(widget, point):
     widget.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress, QPointF(point), QPointF(point), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
 
