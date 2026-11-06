@@ -89,6 +89,10 @@ DYNAMIC_STOP_GAP_M = 1.0
 #: Radius of the ring of points checked round the rover against its map under manual control: a little inside the
 #: footprint's half-diagonal (0.72 m), so that a grazing contact stops it and a near miss does not.
 MANUAL_GUARD_RING_M = 0.55
+#: When the way the operator pointed is blocked, the rover tries these directions (degrees off it, nearest first) at this fraction of the speed, so that it slides along
+#: whatever is in the way instead of stopping dead against it.
+MANUAL_SLIDE_ANGLES_DEG = (35.0, -35.0, 70.0, -70.0)
+MANUAL_SLIDE_SPEED_FRACTION = 0.7
 
 #: A failed plan is retried at 1 Hz, not at tick rate. The map is still
 #: changing so retrying is right, but a search that cannot succeed is the
@@ -991,9 +995,21 @@ class FlightDirector:
                 demand * math.sin(heading_rad), demand * math.cos(heading_rad), dt_s
             )
             if self._manual_step_collides(before, body):
-                # The operator steers; the rover will not drive itself into what it knows is there. It stops, and a key
-                # that backs it away (or turns it) is still obeyed, because only a step that makes things worse is refused.
-                body.x, body.y, body.vx, body.vy = before.x, before.y, 0.0, 0.0
+                # The operator steers; the rover will not drive itself into what it knows is there. A key that backs it away (or turns it) is still obeyed,
+                # because only a step that makes things worse is refused. And it slides: refused straight on, it tries a little to either side of the way it was
+                # told to go (as a wheeled vehicle running along a wall does) before it gives up and stops.
+                moved = False
+                if demand:
+                    for offset_deg in MANUAL_SLIDE_ANGLES_DEG:
+                        trial = copy.copy(before)
+                        a = heading_rad + math.radians(offset_deg)
+                        trial.apply_horizontal_command(demand * MANUAL_SLIDE_SPEED_FRACTION * math.sin(a), demand * MANUAL_SLIDE_SPEED_FRACTION * math.cos(a), dt_s)
+                        if not self._manual_step_collides(before, trial):
+                            body.x, body.y, body.vx, body.vy = trial.x, trial.y, trial.vx, trial.vy
+                            moved = True
+                            break
+                if not moved:
+                    body.x, body.y, body.vx, body.vy = before.x, before.y, 0.0, 0.0
             self._rover_speed_ms = body.speed_ms
             self._rover_velocity = (body.vx, body.vy)
             self._last_rover_xy = (body.x, body.y)

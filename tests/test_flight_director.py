@@ -256,3 +256,31 @@ def test_docking_descends_gently_through_the_stages():
     assert rates, "never entered the docking descent"
     # Nothing during recovery may fall faster than the coarse-stage rate.
     assert max(rates) <= 1.3
+
+
+def test_a_rover_driven_by_hand_slides_along_a_wall_instead_of_stopping_dead_against_it():
+    director = FlightDirector()
+    director.take_manual("rover", 0.0, 0.0, 90.0)  # facing east
+    # a wall along the line y = 0 .. runs north-east: x = y + 6, so driving east meets it at an angle, not square on
+    director.map_blocked_fn = lambda x, y: x > y + 6.0
+    director.set_manual_input("rover", forward=1.0, turn=0.0, vertical=0.0)
+    for _ in range(400):
+        director.tick(0.1, director.rover_body.x, director.rover_body.y, director.rover_body.heading)
+    body = director.rover_body
+    assert body.x < body.y + 6.0 + 0.6, "it never went through the wall"
+    assert body.y > 4.0, "but it slid along it, which a rover that only stops would not"
+
+
+def test_a_rover_in_a_dead_end_still_stops_and_can_back_out():
+    director = FlightDirector()
+    director.take_manual("rover", 0.0, 0.0, 90.0)
+    director.map_blocked_fn = lambda x, y: x > 4.0 or abs(y) > 4.0  # a pocket open only to the west
+    director.set_manual_input("rover", forward=1.0, turn=0.0, vertical=0.0)
+    for _ in range(300):
+        director.tick(0.1, director.rover_body.x, director.rover_body.y, director.rover_body.heading)
+    assert director.rover_body.x < 4.0 and abs(director.rover_body.y) < 4.0
+    director.set_manual_input("rover", forward=-1.0, turn=0.0, vertical=0.0)
+    x_before = director.rover_body.x
+    for _ in range(100):
+        director.tick(0.1, director.rover_body.x, director.rover_body.y, director.rover_body.heading)
+    assert director.rover_body.x < x_before - 1.0, "reversing out is always obeyed"

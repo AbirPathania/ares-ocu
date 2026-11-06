@@ -52,7 +52,10 @@ BLEND_M = 7.0
 HEIGHT_REACH_M = 12.0
 #: Bumps kept: the world's height less its own smoothing over this many metres, limited to this much either way.
 RELIEF_SMOOTH_M = 15.0
-RELIEF_LIMIT_M = 2.0
+RELIEF_LIMIT_M = 1.5
+#: The relief is then smoothed over this many metres: clipping a washout or a canyon of the simulated world at the limit still leaves a cliff of twice the limit within a cell or two (slopes of 4,
+#: nearly vertical, in a quarter of the ground within 8 m of the track at the start of the chain), and the rover's camera sat at the foot of it.
+RELIEF_BLUR_M = 2.5
 #: The surrounding height averages this many of the line's points, taken every `HEIGHT_SAMPLE_M`; the line's own height at and beside it averages the nearest
 #: `LINE_NEIGHBOURS` of its samples with a Gaussian `LINE_REACH_M` wide.
 HEIGHT_NEIGHBOURS = 24
@@ -61,6 +64,10 @@ LINE_NEIGHBOURS = 48
 LINE_REACH_M = 1.5
 #: Clear of trees, boulders and bushes this much past the verge (their own radius is added).
 CLEAR_MARGIN_M = 1.0
+#: Within this of the track nothing of the simulated world's is left standing, in the map or in the picture. Up to FALL_BACK_M (3.5 m) the rover's camera shows the real photographed place, in which
+#: the simulated world's bushes, rocks and trees do not exist; they were still in the map (and, beyond the track and its verge, in the grid as ghosts, with nothing drawn), so the rover
+#: would not drive where the picture showed open ground. Past this the simulated world's own obstacles are drawn and are real.
+CLEAR_ZONE_M = 10.0
 #: The reconstruction supports a camera this far to either side of the walk and turned this far from its direction. A rover that is
 #: further off or turned further than that still gets the real place, drawn from the nearest camera the walk supports (a picture
 #: that is a little wrong about where the rover is, and real, rather than a cut to the simulated world), until it is more than
@@ -112,6 +119,7 @@ def carve_world(world: TerrainWorld, xy: np.ndarray, ground_z: np.ndarray, tree:
     line_z = base_z + ground_z
     sim = world._elevation
     relief = np.clip(sim - ndimage.gaussian_filter(sim, RELIEF_SMOOTH_M / cell, mode="nearest"), -RELIEF_LIMIT_M, RELIEF_LIMIT_M)
+    relief = ndimage.gaussian_filter(relief, RELIEF_BLUR_M / cell, mode="nearest")
     cells = np.stack([gx.ravel(), gy.ravel()], axis=1)
     # the line's own height under and beside it: a tight Gaussian average of the nearest stretches, so that it is continuous where two stretches of a
     # chain pass close to each other (the nearest sample alone jumps from one stretch's height to the other's halfway between them)
@@ -131,7 +139,12 @@ def carve_world(world: TerrainWorld, xy: np.ndarray, ground_z: np.ndarray, tree:
     world._pothole_depth[near] = 0.0
     world._grid[near] = int(Terrain.SCRUB)
     world._grid[d <= HALF_TRACK_M] = int(Terrain.TRACK)
-    keep_clear = HALF_TRACK_M + VERGE_M + CLEAR_MARGIN_M
+    keep_clear = CLEAR_ZONE_M
+    zone = d <= CLEAR_ZONE_M
+    ghosts = zone & np.isin(world._grid, [int(Terrain.ROCK), int(Terrain.TREE), int(Terrain.BUSH), int(Terrain.POTHOLE)])
+    world._grid[ghosts] = int(Terrain.GROUND)
+    world._rock_height[zone] = 0.0
+    world._pothole_depth[zone] = 0.0
     for name, radius_col in (("boulders", 2), ("trees", 3), ("bushes", 2)):
         rows = getattr(world, name)
         if len(rows):
@@ -224,6 +237,7 @@ class TrailScenario:
     offset: np.ndarray = field(default_factory=lambda: np.zeros(3))  # where the deploy point is in the world (x, y, ground height)
     base_z: float = 0.0  # the world's own elevation at the deploy point, set when the ground is carved
     end_margin_m: float = END_MARGIN_M  # how far short of the end of the walk the patrol stops
+    ramp: np.ndarray | None = None  # (n,) the net climb taken out of the ground along the walk (see build); the camera's height has to lose it too
     _tree: cKDTree = field(default=None, repr=False)
 
     # --- building -----------------------------------------------------------------------------------------------------
@@ -259,6 +273,12 @@ class TrailScenario:
         # trails); a trail does not jump a half metre in half a metre, so the ground along it is smoothed before it is carved
         ground = ndimage.gaussian_filter1d(ground, GROUND_SMOOTH_M / SAMPLE_STEP_M, mode="nearest")
         ground -= ground[i0]
+        # A leg's net climb or descent is taken out over its patrol stretch (its bumps are kept). The estimate of it is weak (a camera's pitch cannot be told from the slope), and it
+        # adds up along a chain: ten legs that each end a metre lower than they began leave the chain's last stretch 13 m below its first, and where the chain loops back past its own
+        # start two stretches a few metres apart stood 10 m apart in height, with a wall of the ground between them (slopes of 4 in the cells beside the track at the start).
+        i1 = max(int(np.searchsorted(arc, route.length_m - end_margin_m)), i0 + 2)
+        ramp = np.interp(np.arange(len(arc)), [i0, i1], [0.0, ground[min(i1, len(ground) - 1)] - ground[i0]])
+        ground = ground - ramp
         x0, y0, z0, bearing = placement
         c, sn = math.cos(math.radians(bearing)), math.sin(math.radians(bearing))
         turn = np.array([[c, sn], [-sn, c]])  # a clockwise turn by the bearing: north becomes the bearing
@@ -268,7 +288,7 @@ class TrailScenario:
         step = np.gradient(xy, axis=0)
         tangent = step / np.maximum(np.linalg.norm(step, axis=1, keepdims=True), 1e-9)
         scenario = cls(name, route, intrinsics, start_m, rotation, origin, arc, xy, ground, tangent, start_camera_height_m=float(gh[i0] * route.scale),
-                       offset=np.array([x0, y0, z0]), end_margin_m=end_margin_m)
+                       offset=np.array([x0, y0, z0]), end_margin_m=end_margin_m, ramp=ramp)
         scenario._tree = cKDTree(xy)
         return scenario
 
@@ -352,7 +372,8 @@ class TrailScenario:
         heading = math.degrees(math.atan2(forward[0], forward[1])) % 360.0
         pitch_down = math.degrees(-math.asin(float(np.clip(forward[2], -1.0, 1.0))))
         # in the walk's frame the camera at the deploy point is at height zero, and the ground there is `start_camera_height_m` below it
-        return TrailCamera((float(local[0]), float(local[1]), float(self.base_z + local[2] + self.start_camera_height_m)), heading, pitch_down)
+        lowered = float(np.interp(state.s_m, self.arc, self.ramp)) if self.ramp is not None else 0.0  # the ground lost its net climb, so the camera above it does too
+        return TrailCamera((float(local[0]), float(local[1]), float(self.base_z + local[2] + self.start_camera_height_m - lowered)), heading, pitch_down)
 
 
 #: People and animals stand at least this far from the path: outside the carved track and verge (4.1 m), where the rover can pass and the

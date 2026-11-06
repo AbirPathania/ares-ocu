@@ -85,7 +85,9 @@ def test_carving_gives_the_ground_the_trails_rise_and_makes_it_track(scenario):
         elevation = world.elevation_at(world.to_cell(x, y))
         i = int(np.searchsorted(scenario.arc, scenario.start_m + s))
         assert elevation == pytest.approx(3.0 + scenario.ground_z[i], abs=0.4)
-    assert scenario.ground_z[-1] > scenario.ground_z[scenario.start_index] + 1.5, "it climbs"
+    i0, i1 = scenario.patrol_range()
+    assert abs(scenario.ground_z[i1 - 1] - scenario.ground_z[i0]) < 0.15, "the net climb over the patrol is taken out (a chain of trails would otherwise drift by metres and stand walls of ground between its loops)"
+    assert np.ptp(scenario.ground_z[i0:i1]) > 0.0, "and the bumps are kept"
     x, y = scenario.point(10.0, lateral_m=HALF_TRACK_M + 1.0)
     assert world.classify(x, y) == Terrain.SCRUB
     x, y = scenario.point(10.0, lateral_m=40.0)
@@ -305,3 +307,37 @@ def test_a_walk_with_no_clean_stretch_is_left_out_of_the_chain_not_driven_with_i
         TrailScenario.build("ruined", ruined, k)
     world = TrailWorld.build([("good", route, k), ("ruined", ruined, k), ("also good", route, k)])
     assert [leg.name for leg in world.legs] == ["good", "also good"]
+
+
+def test_a_chain_carved_into_hilly_ground_has_no_walls_beside_the_track():
+    world = chain(count=8)
+    hills = TerrainWorld()  # the simulated world's own hills, canyons and washouts
+    world.carve(hills)
+    e, c = hills._elevation, hills.cell_size_m
+    slope = np.maximum(np.abs(np.diff(e, axis=0))[:, :-1], np.abs(np.diff(e, axis=1))[:-1, :]) / c
+    axis = (np.arange(hills._span) - hills._extent + 0.5) * c
+    gx, gy = np.meshgrid(axis, axis, indexing="ij")
+    dist, _ = world._tree.query(np.stack([gx[:-1, :-1].ravel(), gy[:-1, :-1].ravel()], axis=1))
+    near = dist.reshape(slope.shape) < 8.0
+    assert near.any()
+    assert slope[near].max() < 1.0, "nothing near the track is steeper than 45 degrees (it was 80, a wall, where the chain loops back past its start)"
+    assert np.percentile(slope[near], 99) < 0.6
+
+
+def test_nothing_of_the_simulated_worlds_is_left_standing_near_the_track_in_the_map_or_the_picture():
+    from ocu.core.terrain import IMPASSABLE
+    from ocu.core.trail_scenario import CLEAR_ZONE_M
+
+    world = chain(count=4)
+    hills = TerrainWorld()
+    world.carve(hills)
+    axis = (np.arange(hills._span) - hills._extent + 0.5) * hills.cell_size_m
+    gx, gy = np.meshgrid(axis, axis, indexing="ij")
+    dist, _ = world._tree.query(np.stack([gx.ravel(), gy.ravel()], axis=1))
+    near = (dist.reshape(gx.shape) <= CLEAR_ZONE_M)
+    blocked = np.isin(hills._grid, [int(c) for c in IMPASSABLE])
+    assert not (near & blocked).any(), "no ghost obstacles in the map where the picture shows open ground"
+    for rows in (hills.boulders, hills.trees, hills.bushes):
+        if len(rows):
+            d, _ = world._tree.query(rows[:, :2])
+            assert d.min() > CLEAR_ZONE_M - 1e-6, "and none drawn"
