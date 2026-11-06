@@ -111,6 +111,9 @@ class TrailRoute:
     up: np.ndarray  # unit vector, model frame
     ground_height: np.ndarray  # (n,) the height of each camera above the ground under it, model units
     camera_height_m: float
+    #: (n,) how far each camera was from the smoothed path, metres: a camera pose that the reconstruction put far from where its neighbours say the walk went is a wrong one, and the
+    #: splats trained from it are smeared (None for a route made before this was recorded)
+    deviation_m: np.ndarray | None = None
 
     @property
     def length_m(self) -> float:
@@ -120,12 +123,14 @@ class TrailRoute:
         np.savez_compressed(
             path, centres=self.centres, quats=self.quats, arc_m=self.arc_m, scale=self.scale, up=self.up,
             ground_height=self.ground_height, camera_height_m=self.camera_height_m, k=np.array([k.width, k.height, k.fx, k.fy, k.cx, k.cy]),
+            **({"deviation_m": self.deviation_m} if self.deviation_m is not None else {}),
         )
 
     @classmethod
     def load(cls, path: str | Path) -> tuple["TrailRoute", Intrinsics]:
         with np.load(path, allow_pickle=False) as d:
-            route = cls(d["centres"], d["quats"], d["arc_m"], float(d["scale"]), d["up"], d["ground_height"], float(d["camera_height_m"]))
+            route = cls(d["centres"], d["quats"], d["arc_m"], float(d["scale"]), d["up"], d["ground_height"], float(d["camera_height_m"]),
+                        d["deviation_m"] if "deviation_m" in d.files else None)
             w, h, fx, fy, cx, cy = d["k"]
         return route, Intrinsics(int(w), int(h), float(fx), float(fy), float(cx), float(cy))
 
@@ -134,6 +139,8 @@ class TrailRoute:
         factor = metres_per_unit / self.scale
         self.arc_m = self.arc_m * factor
         self.camera_height_m *= factor
+        if self.deviation_m is not None:
+            self.deviation_m = self.deviation_m * factor
         self.scale = metres_per_unit
 
     def pose_at(self, s_m: float, lateral_m: float = 0.0, yaw_deg: float = 0.0, height_m: float | None = None) -> Pose:
@@ -268,7 +275,8 @@ def build_route(poses: list[Pose], points: np.ndarray, rgb: np.ndarray, seconds_
     pace_scale = WALK_PACE_MS * duration / float(units.sum())
     scale = REFERENCE_CAMERA_HEIGHT_M / height_model if by_height else pace_scale
     arc = np.concatenate([[0.0], np.cumsum(units * scale)])
-    route = TrailRoute(smooth, quats, arc, scale, up, heights, height_model * scale)
+    deviation = np.linalg.norm(centres - smooth, axis=1) * scale
+    route = TrailRoute(smooth, quats, arc, scale, up, heights, height_model * scale, deviation)
     rise = float((smooth[-1] - smooth[0]) @ up) * scale
     report = {
         "scale_m_per_unit": scale,

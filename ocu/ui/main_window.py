@@ -1108,11 +1108,9 @@ class MainWindow(QMainWindow):
 
     def _prefetch_next_leg(self, state, leg) -> None:
         """Ask for the next leg's splat to be read from disk as the rover nears the end of this one, so the cut is not a stall."""
-        from ocu.core.trail_scenario import END_MARGIN_M
-
         if self._gpu_worker is None or state.leg + 1 >= len(self.trail.legs):
             return
-        if state.s_m > leg.length_m - END_MARGIN_M - 12.0:
+        if state.s_m > leg.length_m - leg.end_margin_m - 12.0:
             self._gpu_worker.prefetch(self.trail.legs[state.leg + 1].name)
 
     def _camera_request(self, unit_id: str) -> dict:

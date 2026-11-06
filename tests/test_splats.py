@@ -221,6 +221,33 @@ def test_the_scene_loads_each_trail_when_a_frame_asks_for_it_and_keeps_only_the_
     assert "red" in scene.trails and len(scene.trails) == scene.TRAILS_RESIDENT
 
 
+def test_a_trail_read_in_ahead_on_another_thread_is_loaded_without_reading_the_disk_again(tmp_path, monkeypatch):
+    pytest.importorskip("moderngl")
+    import threading
+
+    from ocu.core.terrain import TerrainWorld
+    from ocu.render import gpu_scene
+
+    rot = np.array([[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    poses = [splats.Pose(rot, -rot @ np.array([i * 0.1, 0.0, 0.0])) for i in range(31)]
+    rng = np.random.default_rng(5)
+    points = np.stack([np.linspace(0, 3, 400), np.full(400, 0.3), rng.uniform(-0.3, 0.3, 400)], axis=1)
+    write_ply(tmp_path / "next.ply", [one_splat(x=float(x), y=0.3, z=float(z)) for x, z in zip(rng.uniform(0, 4, 100), rng.uniform(-0.6, 0.6, 100))])
+    route, _ = trail.build_route(poses, points, np.tile([200.0, 165.0, 125.0], (400, 1)), seconds_per_frame=0.1)
+    route.save(tmp_path / "next.npz", splats.Intrinsics(1280, 720, 640.0, 640.0, 640.0, 360.0))
+    monkeypatch.setattr(trail, "TRAIL_DIR", tmp_path)
+    scene = gpu_scene.GpuScene.create(TerrainWorld.blank(half_extent_m=60.0))
+    if scene is None:
+        pytest.skip("no GL context")
+    reader = threading.Thread(target=scene.preload_trail, args=("next",))
+    reader.start()
+    reader.join()
+    assert "next" in scene._preloaded and "next" not in scene.trails
+    (tmp_path / "next.ply").unlink()
+    (tmp_path / "next.npz").unlink()  # nothing on disk to read any more
+    assert scene.load_trail("next") and scene.trail["name"] == "next" and "next" not in scene._preloaded
+
+
 def test_a_walk_whose_estimated_grade_is_absurd_is_levelled_and_a_plausible_one_is_left_alone():
     n = 41
     t = np.arange(n) * 0.1

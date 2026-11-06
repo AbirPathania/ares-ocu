@@ -14,15 +14,25 @@ None and the caller keeps the numpy renderer.
 from __future__ import annotations
 
 import math
+import threading
 import time
 
 import numpy as np
+from scipy import ndimage
 
 from ocu.core.terrain import Terrain, TerrainWorld
 from ocu.render import assets, figures, meshes, palette, shaders, splats, trail
 
 SHADOW_SIZE = 4096
 MSAA_SAMPLES = 4
+#: A splat scene is softer than the video it came from at the finest scale (measured on the views it was trained on: 0.15-0.22 of the real frame's sharpness at the pixel
+#: scale, 0.3-0.45 at half of it, 0.55-0.75 at a quarter). A camera sharpens its own output, so a trail frame is given a mild unsharp mask: this much of the difference from its
+#: blur, with the blur this many pixels wide at 960 px across (scaled to the frame's width). On that test it brings half-scale sharpness to about 0.8 of the real frame's, with no halos
+#: to speak of; twice as much starts to amplify noise.
+TRAIL_SHARPEN_AMOUNT = 0.6
+TRAIL_SHARPEN_SIGMA_PX = 1.0
+TRAIL_SHARPEN_REFERENCE_WIDTH = 960.0
+
 #: How high up a figure the dust it has driven or walked through reaches, for the shader. Chosen for how each looks.
 DUST_HEIGHT_M = {"vehicle": 1.0, "person": 0.5, "animal": 0.4}
 NEAR_M = 0.12
@@ -92,6 +102,8 @@ class GpuScene:
         self.ctx = moderngl.create_standalone_context()
         self._world = world
         self.trail = None  # the reconstructed trail in use, once load_trail has found one
+        self._preloaded: dict = {}  # trails read from disk ahead of their upload (preload_trail), by name
+        self._preload_lock = threading.Lock()
         self.trails: dict[str, dict] = {}  # every one loaded, least recently used first
         self._t0 = time.monotonic()
         self._cell = world.cell_size_m
@@ -294,6 +306,22 @@ class GpuScene:
     #: How many reconstructed trails are kept on the GPU at once: the one being driven and the next.
     TRAILS_RESIDENT = 2
 
+    def preload_trail(self, name: str) -> None:
+        """Read a trail's splat and route from disk, without touching the GL context, so that it can be done on any thread; `load_trail` then only has to upload it.
+        (Reading and parsing is about 400 ms of a leg's load; the upload is about 130.)"""
+        ply = trail.TRAIL_DIR / f"{name}.ply"
+        route_file = ply.with_suffix(".npz")
+        with self._preload_lock:
+            if name in self.trails or name in self._preloaded:
+                return
+        try:
+            route, k = trail.TrailRoute.load(route_file)
+            cloud = splats.load_ply(ply)
+        except (OSError, ValueError, KeyError):
+            return
+        with self._preload_lock:
+            self._preloaded[name] = (route, k, cloud)
+
     def load_trail(self, name: str | None = None) -> bool:
         """Load a reconstructed trail (a splat and its route) from assets/footage/trail, if there is one, and make it the current
         one. True if it is loaded. Trails already loaded are kept (up to TRAILS_RESIDENT, the least recently used given up).
@@ -307,11 +335,17 @@ class GpuScene:
                 self.trail = self.trails[ply.stem]
                 return True
             route_file = ply.with_suffix(".npz")
-            if not (ply.exists() and route_file.exists()):
+            with self._preload_lock:
+                ready = self._preloaded.pop(ply.stem, None)
+            if ready is None and not (ply.exists() and route_file.exists()):
                 continue
             try:
-                route, k = trail.TrailRoute.load(route_file)
-                renderer = splats.SplatRenderer(self.ctx, splats.load_ply(ply))
+                if ready is not None:
+                    route, k, cloud = ready
+                else:
+                    route, k = trail.TrailRoute.load(route_file)
+                    cloud = splats.load_ply(ply)
+                renderer = splats.SplatRenderer(self.ctx, cloud)
             except (OSError, ValueError, KeyError):
                 continue
             self.trails[ply.stem] = {"name": ply.stem, "route": route, "intrinsics": k, "renderer": renderer}
@@ -1002,4 +1036,15 @@ class GpuScene:
         ctx.copy_framebuffer(resolve, msaa)
         resolve.use()
         raw = resolve.read(components=3, alignment=1)
-        return np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)[::-1].copy()
+        frame = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)[::-1].copy()
+        if view_pose is not None:
+            frame = self._sharpen(frame, width)
+        return frame
+
+    @staticmethod
+    def _sharpen(frame: np.ndarray, width: int) -> np.ndarray:
+        """The mild unsharp mask a trail frame is given (see `TRAIL_SHARPEN_AMOUNT`)."""
+        sigma = max(0.5, TRAIL_SHARPEN_SIGMA_PX * width / TRAIL_SHARPEN_REFERENCE_WIDTH)
+        f = frame.astype(np.float32)
+        blurred = ndimage.gaussian_filter(f, (sigma, sigma, 0.0))
+        return np.clip(f + TRAIL_SHARPEN_AMOUNT * (f - blurred), 0.0, 255.0).astype(np.uint8)

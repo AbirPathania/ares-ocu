@@ -29,6 +29,7 @@ class GpuRenderWorker(QObject):
         self._world = world
         self._trail_name = trail_name
         self._prefetch: str | None = None
+        self._reading: set[str] = set()  # trails being read from disk by prefetch()
         self._pending: dict[str, dict] = {}
         self._wake = threading.Condition()
         self._stop = False
@@ -45,9 +46,21 @@ class GpuRenderWorker(QObject):
 
     def prefetch(self, trail_name: str) -> None:
         """Have a trail's splat read in when the worker next has a moment, so that the first frame drawn from it does not wait for the disk."""
-        with self._wake:
-            self._prefetch = trail_name
-            self._wake.notify()
+        scene = self._scene
+        if scene is None or trail_name in self._reading:
+            return
+        self._reading.add(trail_name)
+
+        def read() -> None:  # off the GL thread: the file is read and parsed here, and the GL thread only has to upload it
+            try:
+                scene.preload_trail(trail_name)
+            finally:
+                with self._wake:
+                    self._reading.discard(trail_name)
+                    self._prefetch = trail_name
+                    self._wake.notify()
+
+        threading.Thread(target=read, name="trail-read", daemon=True).start()
 
     def submit(self, unit_id: str, request: dict) -> None:
         with self._wake:

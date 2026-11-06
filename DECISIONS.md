@@ -1970,3 +1970,21 @@ opaque ground splats would cover it). That second one exposed a bug in the splat
 writing depth for every splat; it now sets `ctx.fbo.depth_mask`, and a test checks the depth buffer is left as found. The figures still read as CG, plainly: a flat modelled hiker and deer beside a photographic
 trail cannot be made photographic by shading. What would: a person and an animal filmed turning on the spot or walking past (the pipeline that made the trails would reconstruct them as splats), or a scanned
 model bought or licensed for the purpose.
+
+**End-to-end audit: haze, blur, and the poses.** Measured, not eyeballed. Over a full patrol (151 frames, every one a splat frame: none fell back to the simulated world) the rendered frames were far
+softer than the real video of the same trails: Laplacian variance, the standard sharpness measure, 0.05-0.18 of the real frames' (mean 0.12), and the darkest areas read hazier by 15-25 on the dark-channel
+measure (which blur raises, so the two are one fault). Three causes, found in this order:
+  * *The splats are soft at the finest scale* even at the poses they were trained on (0.15-0.22 of the real frame's sharpness at the pixel scale, 0.55-0.87 at a quarter of it; part of that is video noise
+    no render reproduces). A camera sharpens its own output, so trail frames now get a mild unsharp mask (`TRAIL_SHARPEN_*` in `gpu_scene.py`, scaled to the frame's width): the settings were chosen by looking at
+    the real frame beside the render and the two masks tried, and the stronger one amplifies noise. 0.12 -> 0.26 of the real sharpness.
+  * *Wrong camera poses in the middle of several walks.* The haze was concentrated in stretches that are smeared even drawn from the footage's own camera positions (IMG_5108 D at 6-10 m, B around 16 m).
+    The reconstruction had put a run of cameras metres off the path their neighbours describe (the distance of each raw camera from the smoothed path, now stored with every route as `deviation_m`):
+    up to 3.7 m on B, 7.4 on C, 8.6 on D, and runs on A, F and IMG_5132; the splats trained from a wrong pose are a smear. The patrol of each leg is now the longest stretch whose cameras were all within
+    0.5 m of the path (1.5 m back from the wrong ones), with the old head and tail margins kept where enough clean footage remains (`usable_span` in `trail_scenario.py`). The chain is 199 m instead of 241; B,
+    C and F are short legs (5, 7 and 8 m) because most of their footage is wrong, and a better route needs those segments re-reconstructed (a different matcher, or the poses refined), not post-processing. With
+    this and the sharpening, 0.26 -> 0.37 of the real sharpness (B 0.11 -> 0.39, C 0.13 -> 0.63, A 0.24 -> 0.48, F 0.27 -> 0.46), and the dark-channel haze 5-10 points lower.
+  * *Loading.* The first frame of each leg took 0.5-0.95 s to render: reading and parsing the splat (about 400 ms) happened on the GL thread. It is now read on its own thread when the rover nears the end of
+    the leg, and the GL thread only uploads it (about 130 ms). Live (real GPU worker, whole patrol): median frame interval 116 ms, 95th percentile 246 ms, no gap near a second.
+What is still not perfect, plainly: the picture is a reconstruction from phone video and is softer than the video (0.37 of its sharpness by this measure, less in thick growth); busy vegetation streaks from
+poses the footage did not see; the people and animals are CG; the scouts and the thermal camera see the simulated terrain; the feed runs at about 9 frames a second; and three of the eleven legs are short
+because of their reconstructions. The cuts between legs are cuts between different places and different light: the largest brightness jump at a join is 40 of 255 (C to D), the others under 18.

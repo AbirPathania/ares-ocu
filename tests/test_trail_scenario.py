@@ -258,3 +258,23 @@ def test_a_trail_carved_through_much_higher_hills_is_not_a_trench(scenario):
     x, y = scenario.point(15.0, lateral_m=25.0)
     line = world.elevation_at(world.to_cell(*scenario.point(15.0)))
     assert abs(world.elevation_at(world.to_cell(x, y)) - line) < 6.0, "25 m from the line the ground is within a few metres of the line's height"
+
+
+def test_the_patrol_is_the_longest_stretch_whose_camera_poses_the_reconstruction_got_right():
+    from dataclasses import replace
+
+    from ocu.core.trail_scenario import END_MARGIN_M, DEFAULT_START_M, MIN_PATROL_M, POSE_DEVIATION_MARGIN_M, usable_span
+
+    route, _ = make_route()
+    n = len(route.arc_m)
+    assert usable_span(route) == (DEFAULT_START_M, END_MARGIN_M), "a route packed without the deviation keeps the defaults"
+    clean = replace(route, deviation_m=np.full(n, 0.05))
+    assert usable_span(clean) == (DEFAULT_START_M, END_MARGIN_M), "nothing wrong: the ordinary head and tail margins"
+    deviation = np.full(n, 0.05)
+    middle = int(np.searchsorted(route.arc_m, 0.55 * route.length_m))
+    deviation[middle : middle + 6] = 3.0  # a few poses several metres off the path, a little past the middle
+    start, margin = usable_span(replace(route, deviation_m=deviation))
+    end = route.length_m - margin
+    assert end < route.arc_m[middle] - POSE_DEVIATION_MARGIN_M + 1e-6, "the patrol stops short of the wrong poses"
+    assert end - start >= MIN_PATROL_M and start >= 0.0, "and is the longer clean stretch, the one before them"
+    assert all(deviation[(route.arc_m >= start) & (route.arc_m <= end)] < 0.5), "none of its cameras was off the path"

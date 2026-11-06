@@ -72,6 +72,18 @@ FALL_BACK_M = 3.5
 DEFAULT_START_M = 10.0
 #: The walk's last metres have the filmer's own shadow in them, and are where the camera slowed to stop; the patrol ends this short of them.
 END_MARGIN_M = 9.0
+#: A camera pose that the reconstruction put further than this from the smoothed path is a wrong one (the camera's own sway is a few centimetres, and its height above
+#: the ground is about a metre): the splats trained from it are smeared. IMG_5108 B, C and D each have a run of poses several metres off (up to 8.6 m), which is where their
+#: frames are milky and streaked even when drawn from the footage's own camera positions.
+POSE_DEVIATION_LIMIT_M = 0.5
+#: Clean footage is kept this far back from a wrong pose either side (the smear reaches past it).
+POSE_DEVIATION_MARGIN_M = 1.5
+#: Trimmed off the ends of a clean run (or of the walk), when the margins above and below do not leave a comfortable patrol.
+RUN_TRIM_M = 2.0
+#: A patrol of at least this much, once the head and tail margins are taken off, is taken as it is; less and the margins are given up for the trim.
+COMFORT_PATROL_M = 12.0
+#: Less than this is not a patrol: the defaults stand.
+MIN_PATROL_M = 4.0
 #: Across the trail, in metres, per lane and per metre of offset in the scenario code written for straight lanes four metres apart.
 LANE_LATERAL_M = 0.7
 OFFSET_SCALE = 0.5
@@ -152,6 +164,38 @@ class TrailSweep(LaneSweep):
         return self.scenario.point(along_m, lane_index * LANE_LATERAL_M + offset_m * OFFSET_SCALE)
 
 
+def usable_span(route: "trail_assets.TrailRoute") -> tuple[float, float]:
+    """(start_m, end_margin_m) of the stretch of a walk worth driving: the longest run of its cameras that the reconstruction placed on the path, kept
+    back `POSE_DEVIATION_MARGIN_M` from the wrong ones, with the head and tail margins of an ordinary walk where the run is long enough to afford them.
+    A route that was packed without the deviation, or that has no clean stretch to speak of, keeps the defaults."""
+    dev = route.deviation_m
+    if dev is None or len(dev) != len(route.arc_m) or len(dev) < 4:
+        return DEFAULT_START_M, END_MARGIN_M
+    arc, length = route.arc_m, route.length_m
+    spacing = max(float(np.median(np.diff(arc))), 1e-6)
+    bad = ndimage.binary_dilation(dev > POSE_DEVIATION_LIMIT_M, iterations=max(1, int(round(POSE_DEVIATION_MARGIN_M / spacing))))
+    best, i = None, 0
+    while i < len(arc):
+        if bad[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(arc) and not bad[j + 1]:
+            j += 1
+        if best is None or arc[j] - arc[i] > best[1] - best[0]:
+            best = (float(arc[i]), float(arc[j]))
+        i = j + 1
+    if best is None:
+        return DEFAULT_START_M, END_MARGIN_M
+    a, b = best
+    start, end = max(DEFAULT_START_M, a + RUN_TRIM_M), min(length - END_MARGIN_M, b - RUN_TRIM_M)
+    if end - start < COMFORT_PATROL_M:
+        start, end = a + RUN_TRIM_M, b - RUN_TRIM_M
+    if end - start < MIN_PATROL_M:
+        return DEFAULT_START_M, END_MARGIN_M
+    return start, length - end
+
+
 @dataclass
 class TrailScenario:
     name: str
@@ -167,15 +211,21 @@ class TrailScenario:
     start_camera_height_m: float = 0.0  # how high above the ground the walk's camera was at the deploy point
     offset: np.ndarray = field(default_factory=lambda: np.zeros(3))  # where the deploy point is in the world (x, y, ground height)
     base_z: float = 0.0  # the world's own elevation at the deploy point, set when the ground is carved
+    end_margin_m: float = END_MARGIN_M  # how far short of the end of the walk the patrol stops
     _tree: cKDTree = field(default=None, repr=False)
 
     # --- building -----------------------------------------------------------------------------------------------------
 
     @classmethod
-    def build(cls, name: str, route: trail_assets.TrailRoute, intrinsics: Intrinsics, start_m: float = DEFAULT_START_M,
+    def build(cls, name: str, route: trail_assets.TrailRoute, intrinsics: Intrinsics, start_m: float | None = None,
               placement: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)) -> "TrailScenario":
-        """`placement` is where the deploy point goes in the world and which way the trail leaves it: x, y, ground height, compass bearing."""
-        start_m = min(start_m, 0.25 * route.length_m)
+        """`placement` is where the deploy point goes in the world and which way the trail leaves it: x, y, ground height, compass bearing.
+        Without `start_m` the stretch of the walk to drive is chosen from the quality of its reconstruction (`usable_span`)."""
+        if start_m is None:
+            start_m, end_margin_m = usable_span(route)
+        else:
+            end_margin_m = END_MARGIN_M
+        start_m = min(start_m, max(route.length_m - end_margin_m - 2.0, 0.25 * route.length_m))
         arc = np.arange(0.0, route.length_m, SAMPLE_STEP_M)
         # dense centreline in the model's frame, and the height of the camera above the ground under it
         dense = np.stack([np.interp(arc, route.arc_m, route.centres[:, k]) for k in range(3)], axis=1)
@@ -203,12 +253,12 @@ class TrailScenario:
         step = np.gradient(xy, axis=0)
         tangent = step / np.maximum(np.linalg.norm(step, axis=1, keepdims=True), 1e-9)
         scenario = cls(name, route, intrinsics, start_m, rotation, origin, arc, xy, ground, tangent, start_camera_height_m=float(gh[i0] * route.scale),
-                       offset=np.array([x0, y0, z0]))
+                       offset=np.array([x0, y0, z0]), end_margin_m=end_margin_m)
         scenario._tree = cKDTree(xy)
         return scenario
 
     @classmethod
-    def load(cls, name: str | None = None, start_m: float = DEFAULT_START_M) -> "TrailScenario | None":
+    def load(cls, name: str | None = None, start_m: float | None = None) -> "TrailScenario | None":
         """The named trail from assets/footage/trail (the first one if no name), or None if there is none."""
         folder = trail_assets.TRAIL_DIR
         candidates = [folder / f"{name}.npz"] if name else sorted(folder.glob("*.npz"))
@@ -232,8 +282,8 @@ class TrailScenario:
         return int(np.searchsorted(self.arc, self.start_m))
 
     def patrol_range(self) -> tuple[int, int]:
-        """Indices of the samples the patrol uses: from the deploy point to `END_MARGIN_M` short of the end of the walk."""
-        return self.start_index, max(int(np.searchsorted(self.arc, self.length_m - END_MARGIN_M)), self.start_index + 2)
+        """Indices of the samples the patrol uses: from the deploy point to `end_margin_m` short of the end of the walk."""
+        return self.start_index, max(int(np.searchsorted(self.arc, self.length_m - self.end_margin_m)), self.start_index + 2)
 
     @property
     def bearing_deg(self) -> float:
@@ -250,7 +300,7 @@ class TrailScenario:
 
     def sweep(self, spacing_m: float = 3.0) -> TrailSweep:
         """Waypoints along the line, from the deploy point to `END_MARGIN_M` short of the end of the walk."""
-        stations = np.arange(spacing_m, self.length_m - self.start_m - END_MARGIN_M, spacing_m)
+        stations = np.arange(spacing_m, self.length_m - self.start_m - self.end_margin_m, spacing_m)
         points = [(*self.point(float(a)), "LANE 1") for a in stations]
         return TrailSweep(origin=(0.0, 0.0), bearing_deg=self.bearing_deg, clear_fraction=1.0, points=points, scenario=self)
 
@@ -330,7 +380,7 @@ class TrailWorld:
         self.base_z = 0.0
 
     @classmethod
-    def build(cls, trails: list[tuple[str, trail_assets.TrailRoute, Intrinsics]], start_m: float = DEFAULT_START_M) -> "TrailWorld":
+    def build(cls, trails: list[tuple[str, trail_assets.TrailRoute, Intrinsics]], start_m: float | None = None) -> "TrailWorld":
         legs: list[TrailScenario] = []
         placement = (0.0, 0.0, 0.0, 0.0)
         for name, route, k in trails:
@@ -349,7 +399,7 @@ class TrailWorld:
         return cls(legs)
 
     @classmethod
-    def load(cls, names: list[str] | str | None = None, start_m: float = DEFAULT_START_M) -> "TrailWorld | None":
+    def load(cls, names: list[str] | str | None = None, start_m: float | None = None) -> "TrailWorld | None":
         """The named trails (or every packed trail) from assets/footage/trail, chained in the order given (sorted by name if all)."""
         folder = trail_assets.TRAIL_DIR
         if isinstance(names, str):
