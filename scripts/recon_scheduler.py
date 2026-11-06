@@ -70,6 +70,7 @@ JOBS = [
     Job("IMG_5108_D2", "IMG_5108", 80, 120, keep_per_second=10, sfm_overlap=12, **LENS_5108),
     Job("IMG_5108_B2", "IMG_5108", 40, 80, keep_per_second=10, sfm_overlap=12, **LENS_5108),
     Job("IMG_5108_C2", "IMG_5108", 0, 40, keep_per_second=10, sfm_overlap=12, **LENS_5108),
+    Job("IMG_5108_F2", "IMG_5108", 200, 240, keep_per_second=10, sfm_overlap=12, **LENS_5108),
 ]
 
 
