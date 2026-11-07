@@ -267,6 +267,39 @@ def test_a_trail_read_in_ahead_on_another_thread_is_loaded_without_reading_the_d
     assert scene.load_trail("next") and scene.trail["name"] == "next" and "next" not in scene._preloaded
 
 
+def test_the_scene_says_which_pixels_of_a_figure_the_photographs_still_show(tmp_path, monkeypatch):
+    pytest.importorskip("moderngl")
+    from ocu.core.terrain import TerrainWorld
+    from ocu.render import gpu_scene
+
+    rot = np.array([[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    poses = [splats.Pose(rot, -rot @ np.array([i * 0.1, 0.0, 0.0])) for i in range(31)]
+    rng = np.random.default_rng(5)
+    points = np.stack([np.linspace(0, 3, 400), np.full(400, 0.3), rng.uniform(-0.3, 0.3, 400)], axis=1)
+    # a wall of photograph one unit in front of the camera, and a scene that has nothing nearer than twelve
+    wall = [one_splat(x=1.5, y=float(y), z=float(z), opacity=9.0, scale_0=np.log(0.4), scale_1=np.log(0.4), scale_2=np.log(0.4)) for y in np.linspace(-1.4, 1.4, 8) for z in np.linspace(-1.8, 1.8, 10)]
+    far = [one_splat(x=14.0, y=float(y), z=float(z), opacity=9.0, scale_0=np.log(0.4), scale_1=np.log(0.4), scale_2=np.log(0.4)) for y in np.linspace(-6, 6, 6) for z in np.linspace(-8, 8, 6)]
+    for name, rows in (("wall", wall), ("far", far)):
+        write_ply(tmp_path / f"{name}.ply", rows)
+        route, _ = trail.build_route(poses, points, np.tile([200.0, 165.0, 125.0], (400, 1)), seconds_per_frame=0.1)
+        route.save(tmp_path / f"{name}.npz", splats.Intrinsics(1280, 720, 640.0, 640.0, 640.0, 360.0))
+    monkeypatch.setattr(trail, "TRAIL_DIR", tmp_path)
+    scene = gpu_scene.GpuScene.create(TerrainWorld.blank(half_extent_m=60.0))
+    if scene is None:
+        pytest.skip("no GL context")
+    args = dict(eye=(0.0, 0.0, 3.0), heading_deg=0.0, pitch_down_deg=5.0, hfov_deg=90.0, width=320, height=180, trail_s=1.0, trail_world_view=True,
+                entities=[("person", 0.0, 7.0, 90.0, 0.0, "")])
+    scene.render(**args, trail_name="far")
+    figure, shown = scene.last_visibility
+    assert figure.sum() > 100, "the figure is drawn"
+    assert shown.sum() / figure.sum() > 0.9, "and nothing is in front of it"
+    scene.render(**args, trail_name="wall")
+    figure, shown = scene.last_visibility
+    assert figure.sum() > 100 and shown.sum() / figure.sum() < 0.1, "with a wall of photograph in front of it, none of it shows"
+    scene.render(**{**args, "entities": None}, trail_name="wall")
+    assert scene.last_visibility is None, "no figures, nothing to say"
+
+
 def test_a_walk_whose_estimated_grade_is_absurd_is_levelled_and_a_plausible_one_is_left_alone():
     n = 41
     t = np.arange(n) * 0.1

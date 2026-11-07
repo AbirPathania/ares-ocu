@@ -519,6 +519,10 @@ class TrailWorld:
     def camera(self, state: TrailState) -> TrailCamera:
         return self.legs[state.leg].camera(state)
 
+    def tree_nearest_index(self, x: float, y: float) -> int:
+        """The index (into `xy`, `arc` and `tangent`) of the part of the chained path nearest (x, y)."""
+        return int(self._tree.query([x, y])[1])
+
     def distances(self, points: np.ndarray) -> np.ndarray:
         """How far each of an (n, 2) array of (x, y) is from the nearest part of the chained path, metres."""
         return self._tree.query(np.asarray(points, dtype=float))[0]

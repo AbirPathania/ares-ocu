@@ -23,6 +23,7 @@ from ocu.core.terrain import TerrainWorld
 class GpuRenderWorker(QObject):
     frameReady = Signal(str, object)  # unit id, (height, width, 3) uint8
     ready = Signal(bool)  # True once the scene is built, False if there is no GPU
+    visibilityReady = Signal(str, object, object)  # unit id, figure pixels, the figure pixels the picture still shows (boolean, frame-sized): see GpuScene.last_visibility
 
     def __init__(self, world: TerrainWorld, parent=None, trail_name: str | None = None) -> None:
         super().__init__(parent)
@@ -104,3 +105,6 @@ class GpuRenderWorker(QObject):
                 except Exception:
                     continue
                 self.frameReady.emit(unit_id, frame)
+                masks = self._scene.last_visibility
+                if masks is not None:
+                    self.visibilityReady.emit(unit_id, masks[0], masks[1])

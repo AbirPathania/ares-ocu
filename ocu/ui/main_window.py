@@ -71,7 +71,7 @@ from dataclasses import replace as _replace
 
 from ocu.core.sweep import cut_washouts_on_lanes, plan_lane_sweep, sweep_from_first_scan
 from ocu.core.targets import default_field
-from ocu.core import scenery
+from ocu.core import population, scenery
 from ocu.core.terrain import IMPASSABLE, CELL_SIZE_M, WORLD_HALF_EXTENT_M, PerceptionMap, TerrainWorld
 from ocu.core.unit import Unit
 from ocu.sim.mission_clock import MissionClock
@@ -115,6 +115,10 @@ DETECTION_REPORT_STEP = 0.05
 #: A person or animal stops when the rover is within this of the edge of it, until it has passed. A choice, not a
 #: measurement (DECISIONS.md).
 YIELD_GAP_M = 2.5
+#: Fewer figure pixels than this inside a detection box and the picture has nothing to say about it (it is tiny, or far off, or the frame is not the one it was drawn for).
+MIN_FIGURE_PIXELS = 24
+#: A figure the picture shows less than this of is hidden to the detector; between this and the next it is found less readily.
+MIN_VISIBLE_FRACTION = 0.35
 
 #: The rover gives up a waypoint after standing this long beside something that will not clear it. Chosen, not measured.
 STALL_GIVE_UP_S = 8.0
@@ -278,6 +282,11 @@ class MainWindow(QMainWindow):
                     # cannot plan between that many exclusion zones on a 3 m track (it sat there for minutes).
                     if all(math.hypot(candidate.x - t.x, candidate.y - t.y) >= self.TARGET_GAP_M for t in self.target_field.targets):
                         self.target_field.targets.append(candidate)
+        self.population = None
+        if self.trail is not None:
+            # the old sim's sites (objects, an armed walker, a parked truck, a civilian, an ibex), a truck that drives a service road, and objects scattered over the whole world (core/population.py)
+            self.population = population.populate(self.terrain, self.trail, self.target_field.targets)
+            self.target_field.targets.extend(self.population.targets)
         self._target_evidence: dict[int, dict[str, float]] = {}
         #: What the scouts have seen of each object, kept apart from the rover's
         #: evidence: they are different replicas and cannot share it over a cut link.
@@ -299,6 +308,7 @@ class MainWindow(QMainWindow):
                 pool = [e for e in default_entities(sweep=self.trail.leg_sweep(index), world=None) if e.kind != "vehicle"]
                 entities.extend(_replace(e, name=f"{e.name} {index + 1}") for e in (pool[index % len(pool)], pool[(index + 2) % len(pool)]))
         if self.trail is not None:
+            entities.extend(self.population.entities)
             # nobody stands or walks on a three-metre track the rover has to drive: every waypoint is moved out beside it, one side each, alternating between them
             entities = [
                 _replace(e, path=self.trail.keep_path_off_line(e.path, side=1.0 if n % 2 == 0 else -1.0))
@@ -393,6 +403,7 @@ class MainWindow(QMainWindow):
         self._thermal_poll.timeout.connect(self._poll_thermal_build)
         self._camera_turn = 0
         self._gpu_worker = None
+        self._figure_visibility: dict[str, tuple[np.ndarray, np.ndarray]] = {}  # per unit: figure pixels and the ones still showing (_on_figure_visibility)
         self._trail_leg: int | None = None  # the leg the rover's camera was last drawn from (see TrailWorld.camera_state)
         #: Vehicles already acted on for a low battery, so it is done once and said once.
         self._low_battery_actioned: set[str] = set()
@@ -1072,6 +1083,7 @@ class MainWindow(QMainWindow):
 
         self._gpu_worker = GpuRenderWorker(self.terrain, self, trail_name=self.trail.legs[0].name if self.trail is not None else None)
         self._gpu_worker.frameReady.connect(self._on_gpu_frame)
+        self._gpu_worker.visibilityReady.connect(self._on_figure_visibility)
         self._gpu_worker.ready.connect(self._on_gpu_ready)
         for feed in self.camera_feeds.values():
             feed.set_starting(True)
@@ -1092,6 +1104,38 @@ class MainWindow(QMainWindow):
             self._camera_timer.setInterval(GPU_CAMERA_TICK_MS)
         else:
             self._gpu_worker = None
+
+    def _on_figure_visibility(self, unit_id: str, figure: np.ndarray, visible: np.ndarray) -> None:
+        """Which pixels of the figures in the last picture drawn from the real place are still showing (the photographs go over them): what the detector is allowed to see."""
+        self._figure_visibility[unit_id] = (figure, visible)
+
+    def _visible_fraction(self, unit_id: str, box: tuple[float, float, float, float]) -> float | None:
+        """How much of the figure pixels inside `box` (fractions of the frame) the picture still shows, or None when there is nothing to go by (too few figure pixels there)."""
+        masks = self._figure_visibility.get(unit_id)
+        if masks is None:
+            return None
+        figure, visible = masks
+        height, width = figure.shape
+        x0, x1 = int(max(box[0], 0.0) * width), int(math.ceil(min(box[2], 1.0) * width))
+        y0, y1 = int(max(box[1], 0.0) * height), int(math.ceil(min(box[3], 1.0) * height))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        pixels = int(figure[y0:y1, x0:x1].sum())
+        if pixels < MIN_FIGURE_PIXELS:
+            return None
+        return float(visible[y0:y1, x0:x1].sum()) / pixels
+
+    def _rover_trail_state(self):
+        """Where the rover's camera is on the reconstructed trail when its tile shows the real place, with the camera that draws it; None when it shows the simulated world."""
+        feed = self.camera_feeds["rover"]
+        if not (feed.trail_mode and self.trail is not None):
+            return None
+        pose = self.units["rover"].pose
+        state = self.trail.camera_state(pose.x, pose.y, pose.heading, previous_leg=self._trail_leg)
+        self._trail_leg = state.leg
+        if not state.on_trail:
+            return None
+        return state, self.trail.camera(state)
 
     def _on_gpu_frame(self, unit_id: str, frame) -> None:
         feed = self.camera_feeds.get(unit_id)
@@ -1140,10 +1184,9 @@ class MainWindow(QMainWindow):
         pose = self.units[unit_id].pose
         rig = self.camera_rig
         if unit_id == "rover" and feed.trail_mode and self.trail is not None:
-            state = self.trail.camera_state(pose.x, pose.y, pose.heading, previous_leg=self._trail_leg)
-            self._trail_leg = state.leg
-            if state.on_trail:
-                cam = self.trail.camera(state)
+            seen = self._rover_trail_state()
+            if seen is not None:
+                state, cam = seen
                 leg = self.trail.legs[state.leg]
                 self._prefetch_next_leg(state, leg)
                 return dict(
@@ -1639,6 +1682,13 @@ class MainWindow(QMainWindow):
         pose = self.units[unit_id].pose
         ground = self.camera_rig.elevation_at(pose.x, pose.y)
         if unit_id == "rover":
+            seen = self._rover_trail_state()
+            if seen is not None:
+                # the tile shows the real place, drawn from the trail's camera with the trail's lens, not from where the rover is with the sim's 112 degrees: the detector looks through the same camera
+                state, cam = seen
+                k = self.trail.legs[state.leg].intrinsics
+                hfov = math.degrees(2.0 * math.atan(k.width / (2.0 * k.fx)))
+                return CameraSpec(cam.eye[0], cam.eye[1], cam.eye[2], cam.heading_deg, cam.pitch_down_deg, hfov, width, height, aerial=False)
             return CameraSpec(pose.x, pose.y, ground + 1.5, pose.heading, 3.0, 112.0, width, height, aerial=False)
         return CameraSpec(pose.x, pose.y, ground + pose.z, pose.heading, SCOUT_PITCH_DOWN_DEG, SCOUT_HFOV_DEG, width, height, aerial=True)
 
@@ -1678,7 +1728,10 @@ class MainWindow(QMainWindow):
             feed = self.camera_feeds.get(unit_id)
             width, height = feed.render_size() if feed is not None else (640, 360)
             cam = self._camera_spec(unit_id, width, height)
-            detections = self.camera_detector.observe(unit_id, cam, self.surface_entities, poses, self.camera_rig, frame)
+            # drawn from the real place, the detector may only find what that picture shows of the figures (a person behind a real bush is not in it)
+            from_picture = unit_id == "rover" and self._rover_trail_state() is not None
+            visibility = (lambda box, uid=unit_id: self._visible_fraction(uid, box)) if from_picture else None
+            detections = self.camera_detector.observe(unit_id, cam, self.surface_entities, poses, self.camera_rig, frame, visibility=visibility)
             self.camera_gate.update(unit_id, frame, detections)
             shown = [t for t in self.camera_gate.tracks if t.sensor_id == unit_id and t.hits and t.hits[-1] == frame]
             if feed is not None:

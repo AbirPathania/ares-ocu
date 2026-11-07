@@ -25,6 +25,12 @@ from ocu.render import assets, figures, meshes, palette, shaders, splats, trail
 
 SHADOW_SIZE = 4096
 MSAA_SAMPLES = 4
+#: A figure pixel counts as still showing when the photographs drawn over it change its colour by less than this (summed over the three channels, of 765): a leaf in front of it
+#: covers it, a haze of faint splats does not. See `last_visibility`.
+FIGURE_VISIBLE_DIFF = 60
+#: A pixel belongs to a figure when it is brighter than this (a figure is drawn over black, and its darkest parts are not black).
+FIGURE_PIXEL_MIN = 6
+
 #: A splat scene is softer than the video it came from at the finest scale (measured on the views it was trained on: 0.15-0.22 of the real frame's sharpness at the pixel
 #: scale, 0.3-0.45 at half of it, 0.55-0.75 at a quarter). A camera sharpens its own output, so a trail frame is given a mild unsharp mask: this much of the difference from its
 #: blur, with the blur this many pixels wide at 960 px across (scaled to the frame's width). On that test it brings half-scale sharpness to about 0.8 of the real frame's, with no halos
@@ -102,6 +108,7 @@ class GpuScene:
         self.ctx = moderngl.create_standalone_context()
         self._world = world
         self.trail = None  # the reconstructed trail in use, once load_trail has found one
+        self.last_visibility = None  # (figure pixels, visible figure pixels) of the last trail frame drawn with figures, as boolean arrays the size of the frame
         self._preloaded: dict = {}  # trails read from disk ahead of their upload (preload_trail), by name
         self._preload_lock = threading.Lock()
         self.trails: dict[str, dict] = {}  # every one loaded, least recently used first
@@ -1043,6 +1050,14 @@ class GpuScene:
         for e in entities or ():
             self._draw_entity(e, shadow=False)
 
+        before_photographs = None
+        if view_pose is not None and trail_world_view and entities:
+            # the figures as they are before the photographs go over them, to tell afterwards which of their pixels the picture still shows
+            ctx.copy_framebuffer(resolve, msaa)
+            resolve.use()
+            raw_before = resolve.read(components=3, alignment=1)
+            before_photographs = np.frombuffer(raw_before, dtype=np.uint8).reshape(height, width, 3)[::-1]
+            msaa.use()
         if view_pose is not None:
             # the real place, over the sky and under nothing; against the figures' depth when there are any
             scale = float(self.trail["route"].scale)
@@ -1056,6 +1071,11 @@ class GpuScene:
         resolve.use()
         raw = resolve.read(components=3, alignment=1)
         frame = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)[::-1].copy()
+        self.last_visibility = None
+        if before_photographs is not None:
+            figure = before_photographs.max(axis=2) > FIGURE_PIXEL_MIN
+            changed = np.abs(frame.astype(np.int16) - before_photographs.astype(np.int16)).sum(axis=2)
+            self.last_visibility = (figure, figure & (changed < FIGURE_VISIBLE_DIFF))
         if view_pose is not None:
             frame = self._sharpen(frame, width)
         return frame

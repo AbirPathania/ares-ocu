@@ -179,3 +179,47 @@ def test_nobody_stands_or_walks_on_the_track_anywhere_along_the_chain_of_trails(
     assert min(nearest) >= 2.2 - 0.05, "settling to standable ground must not carry a walker back onto the line"
     assert sum(d < KEEP_OFF_M - 0.5 for d in nearest) <= 2, "a layout may leave nowhere to stand clear of the track for one or two, which are then given a closer limit"
     assert len(nearest) >= 20, "and none is dropped for want of room unless it truly has none"
+
+
+def test_the_detector_looks_through_the_camera_that_draws_the_picture_and_asks_the_picture_what_it_shows(app):
+    import math
+
+    import numpy as np
+
+    from ocu.core.trail_scenario import TrailWorld
+
+    if len(TrailWorld.load(None).legs) < 3:
+        pytest.skip("needs reconstructed trails in assets/footage/trail")
+    window = MainWindow(trail=True)
+    try:
+        feed = window.camera_feeds["rover"]
+        feed.set_trail_available(True)
+        feed.set_trail(True)
+        unit = window.units["rover"]
+        i = 400
+        unit.pose.x, unit.pose.y = (float(v) for v in window.trail.xy[i])
+        tx, ty = window.trail.tangent[i]
+        unit.pose.heading = math.degrees(math.atan2(tx, ty)) % 360.0
+        seen = window._rover_trail_state()
+        assert seen is not None, "on the track, the tile shows the real place"
+        state, cam = seen
+        spec = window._camera_spec("rover", 640, 300)
+        assert (spec.x, spec.y, spec.z, spec.heading_deg, spec.pitch_down_deg) == pytest.approx((cam.eye[0], cam.eye[1], cam.eye[2], cam.heading_deg, cam.pitch_down_deg))
+        k = window.trail.legs[state.leg].intrinsics
+        assert spec.hfov_deg == pytest.approx(math.degrees(2.0 * math.atan(k.width / (2.0 * k.fx)))), "the lens of the footage, not the simulated rover's 112 degrees"
+        assert abs(spec.hfov_deg - 112.0) > 5.0
+        # what the picture shows of a figure: a box over figure pixels, some of them hidden
+        figure = np.zeros((100, 200), dtype=bool)
+        shown = np.zeros_like(figure)
+        figure[20:80, 50:70] = True
+        shown[20:50, 50:70] = True  # the top half
+        assert window._visible_fraction("rover", (0.2, 0.1, 0.4, 0.9)) is None, "nothing known yet"
+        window._on_figure_visibility("rover", figure, shown)
+        assert window._visible_fraction("rover", (0.2, 0.1, 0.4, 0.9)) == pytest.approx(0.5)
+        assert window._visible_fraction("rover", (0.8, 0.1, 0.9, 0.9)) is None, "no figure pixels in that box: nothing to go by"
+        # off the part of the trail that was walked the tile shows the simulated world, and the detector uses the simulated rover's camera
+        unit.pose.x, unit.pose.y = unit.pose.x + 30.0, unit.pose.y + 30.0
+        assert window._rover_trail_state() is None
+        assert window._camera_spec("rover", 640, 300).hfov_deg == pytest.approx(112.0)
+    finally:
+        window.close()

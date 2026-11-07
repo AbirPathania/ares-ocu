@@ -254,3 +254,74 @@ def test_an_animal_is_reported_as_unknown_because_the_eighth_class_is_an_open_de
     assert pc.THREAT_TYPE["animal"] == "unknown"
     assert all(t in THREAT_CLASSES for t in pc.THREAT_TYPE.values()), "no type outside the spec's enum is ever invented"
     assert "animal" not in THREAT_CLASSES
+
+
+# ---- what a photograph of the real place shows of a figure (the detector may only find what the picture shows)
+
+def _person_ahead(distance=12.0):
+    ent = SurfaceEntity("person", "walker", 1.78, 0.54, 0.63, ((0.0, distance),), heading_deg=90.0, box_offset_m=-0.095)
+    return ent, (0.0, distance, 90.0)
+
+
+def _found(sensor, ent, pose, visibility, frames=400):
+    return sum(any(d.truth == ent.name for d in sensor.observe("rover", rover_cam(), [ent], [pose], FlatRig(), f, visibility=visibility)) for f in range(frames))
+
+
+def test_a_figure_the_picture_hides_is_never_found_and_one_it_shows_is_found_as_before():
+    ent, pose = _person_ahead(10.0)
+    sensor = pc.PerceptionSensor()
+    baseline = _found(sensor, ent, pose, None)
+    assert baseline > 100, "found a good share of the time at this range, with nothing to say about the picture"
+    assert _found(sensor, ent, pose, lambda box: 0.0) == 0, "hidden: not found, however big it looks"
+    assert _found(sensor, ent, pose, lambda box: pc.MIN_VISIBLE_SHARE - 0.01) == 0
+    assert _found(sensor, ent, pose, lambda box: 1.0) == baseline, "fully shown: exactly as with no picture to go by"
+    assert _found(sensor, ent, pose, lambda box: None) == baseline, "nothing to go by (too few pixels): exactly as before"
+
+
+def test_a_figure_the_picture_half_hides_is_found_less_readily():
+    ent, pose = _person_ahead(10.0)
+    sensor = pc.PerceptionSensor()
+    full = _found(sensor, ent, pose, lambda box: 1.0)
+    half = _found(sensor, ent, pose, lambda box: 0.5)
+    assert 0 < half < full, "found, but less often than when it is fully in view"
+
+
+def test_the_picture_is_asked_about_the_box_the_figure_fills():
+    ent, pose = _person_ahead(10.0)
+    asked = []
+
+    def visibility(box):
+        asked.append(box)
+        return 1.0
+
+    pc.PerceptionSensor().observe("rover", rover_cam(), [ent], [pose], FlatRig(), 0, visibility=visibility)
+    ap = pc.appearance(rover_cam(), ent, pose, FlatRig())
+    assert asked == [ap.box]
+
+
+# ---- where a detection is placed when the ground does not say
+
+def test_a_figure_whose_foot_is_above_the_horizon_is_placed_by_its_size_not_at_the_camera():
+    cam = rover_cam()
+    rng = np.random.default_rng(1)
+    # a box 7% of the frame tall whose bottom is above the horizon of flat ground (rising ground ahead): the old answer was the camera's own position
+    box = (0.48, 0.36, 0.52, 0.43)
+    rng_y = pc.size_range(cam, "person", box)
+    assert 10.0 < rng_y < 40.0
+    gx, gy = pc.ground_position(cam, box[3], 0.5, 0.0, rng, rng_y)
+    assert math.hypot(gx - cam.x, gy - cam.y) == pytest.approx(rng_y, rel=0.05) and gy > 0.0, "ahead of the camera, at about the range its size gives"
+    assert pc.ground_position(cam, box[3], 0.5, 0.0, rng) == (cam.x, cam.y), "with nothing but the ground to go by there is still nothing"
+
+
+def test_the_ground_range_is_kept_when_it_agrees_with_the_size_range_and_dropped_when_it_does_not():
+    cam = rover_cam()
+    ent = SurfaceEntity("person", "p", 1.75, 0.5, 0.3, ((0.0, 20.0),))
+    ap = pc.appearance(cam, ent, (0.0, 20.0, 0.0), FlatRig())
+    rng = np.random.default_rng(2)
+    by_ground = [pc.ground_position(cam, ap.box[3], 0.5, 0.0, rng, pc.size_range(cam, "person", ap.box)) for _ in range(40)]
+    assert np.median([math.hypot(x, y) for x, y in by_ground]) == pytest.approx(20.0, rel=0.15)
+    # a size that says ten times the range: the ground range is not believed, the size range is used
+    tiny = (0.499, 0.400, 0.501, 0.4031)
+    far = pc.size_range(cam, "person", tiny)
+    gx, gy = pc.ground_position(cam, tiny[3], 0.5, 0.0, rng, far)
+    assert math.hypot(gx, gy) == pytest.approx(far, rel=0.4)

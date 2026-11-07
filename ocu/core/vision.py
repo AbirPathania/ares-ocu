@@ -49,6 +49,10 @@ PERCEPTION_HZ = 2.0
 #: position. Chosen, not measured; see DECISIONS.md.
 CONFIRM_HITS, CONFIRM_WINDOW, GATE_RADIUS_M = 3, 5, 3.5
 
+#: What the picture shows of a figure: under this share nothing is found; at or above the second it counts as fully in view, and between them the chance of finding it falls in
+#: proportion. Chosen, not measured.
+MIN_VISIBLE_SHARE, FULL_VISIBLE_SHARE = 0.35, 0.70
+
 #: A track survives this many frames without a hit before it is dropped, so that a detector that loses a distant
 #: object for a few seconds does not start a second track for it. Chosen, not measured.
 TRACK_MEMORY_FRAMES = 10
@@ -262,20 +266,44 @@ def _rng(seed: int, *parts) -> np.random.Generator:
     return np.random.default_rng(zlib.crc32(repr((seed, *parts)).encode()))
 
 
-def ground_position(cam: CameraSpec, box_bottom_v: float, u_centre: float, ground_z: float, rng: np.random.Generator) -> tuple[float, float]:
+#: How tall each kind of thing is taken to be when range has to come from how big it looks (a monocular detector has nothing else): a standing person, a deer or ibex, a pickup.
+NOMINAL_HEIGHT_M = {"person": 1.75, "animal": 1.2, "vehicle": 2.0}
+#: Where the ground-plane range and the size range may differ before the ground one is not believed (rising ground puts the foot of a far figure above the flat-ground horizon, or
+#: far below where it is).
+RANGE_AGREEMENT = (0.4, 2.5)
+
+
+def size_range(cam: CameraSpec, kind: str, box: tuple[float, float, float, float]) -> float:
+    """The range at which a thing of the kind's nominal height would fill this box's height."""
+    height_share = max(box[3] - box[1], 1e-4)
+    return NOMINAL_HEIGHT_M.get(kind, 1.5) / (height_share * 2.0 * math.tan(math.radians(cam.vfov_deg) / 2.0))
+
+
+def ground_position(cam: CameraSpec, box_bottom_v: float, u_centre: float, ground_z: float, rng: np.random.Generator, size_range_m: float | None = None) -> tuple[float, float]:
     """Where on the flat ground the bottom of a box is, from its pixel row, with one frame's localisation noise.
 
     A pixel row is a depression angle; with the camera a known height above the ground, range follows. The
-    error grows with the square of range, which is why a distant detection is placed loosely."""
+    error grows with the square of range, which is why a distant detection is placed loosely.
+
+    Where there is no such range (the row is at or above the horizon, as it is for the foot of a figure on rising ground), or it is far from the range the
+    box's size gives (`size_range_m`), the size range is used along the same bearing: the position is never the camera's own, which is where it used to land."""
     v = box_bottom_v + rng.normal(0.0, POSITION_SIGMA_PX / cam.height_px)
     u = u_centre + rng.normal(0.0, POSITION_SIGMA_PX / cam.width_px)
     forward, right, up = cam.axes()
     tx, ty = math.tan(math.radians(cam.hfov_deg) / 2.0), math.tan(math.radians(cam.vfov_deg) / 2.0)
     ray = forward + right * (2.0 * (u - 0.5) * tx) + up * (2.0 * (0.5 - v) * ty)
-    if ray[2] >= -1e-6:
-        return cam.x, cam.y  # at or above the horizon: no ground intersection
-    t = (ground_z - cam.z) / ray[2]
-    return float(cam.x + ray[0] * t), float(cam.y + ray[1] * t)
+    horizontal = math.hypot(ray[0], ray[1])
+    if ray[2] < -1e-6:
+        t = (ground_z - cam.z) / ray[2]
+        gx, gy = float(cam.x + ray[0] * t), float(cam.y + ray[1] * t)
+        if size_range_m is None:
+            return gx, gy
+        ground_range = math.hypot(gx - cam.x, gy - cam.y)
+        if RANGE_AGREEMENT[0] <= ground_range / max(size_range_m, 1e-6) <= RANGE_AGREEMENT[1]:
+            return gx, gy
+    if size_range_m is None or horizontal < 1e-9:
+        return cam.x, cam.y  # nothing to go by at all
+    return float(cam.x + ray[0] / horizontal * size_range_m), float(cam.y + ray[1] / horizontal * size_range_m)
 
 
 class PerceptionSensor:
@@ -291,8 +319,12 @@ class PerceptionSensor:
         self.weapon_floor = float(weapons["operating_threshold"])
         self.weapon_false_per_crop = float(weapons["false_alarms"]["per_image"])
 
-    def observe(self, sensor_id: str, cam: CameraSpec, entities, poses, rig, frame: int) -> list[Detection]:
-        """Everything this camera reports in one frame: found entities, and now and then an invented one."""
+    def observe(self, sensor_id: str, cam: CameraSpec, entities, poses, rig, frame: int, visibility=None) -> list[Detection]:
+        """Everything this camera reports in one frame: found entities, and now and then an invented one.
+
+        `visibility(box)`, when the picture is not the simulated world's (it is a photograph of the real place with figures put in it), says what share of the figure inside a box
+        (fractions of the frame) the picture still shows, or None when it cannot tell. The simulated world's geometry knows nothing of the real bushes in the photographs, so this is
+        what stops a person standing behind one from being found: below `MIN_VISIBLE_SHARE` nothing is found, and below `FULL_VISIBLE_SHARE` it is found less readily."""
         out: list[Detection] = []
         for entity, pose in zip(entities, poses, strict=True):
             ap = appearance(cam, entity, pose, rig)
@@ -300,11 +332,17 @@ class PerceptionSensor:
                 continue
             rng = _rng(self.seed, sensor_id, entity.name, frame)
             p = detection_probability(entity.kind, ap.share, cam.aerial)
+            if visibility is not None:
+                shown = visibility(ap.box)
+                if shown is not None:
+                    if shown < MIN_VISIBLE_SHARE:
+                        continue
+                    p *= min(1.0, shown / FULL_VISIBLE_SHARE)
             if rng.random() >= p:
                 continue
             score = min(max(median_score(entity.kind, ap.share) + rng.uniform(-SCORE_SPREAD, SCORE_SPREAD), self.floor), MAX_CONFIDENCE)
             gz = rig.elevation_at(pose[0], pose[1])
-            gx, gy = ground_position(cam, ap.box[3], (ap.box[0] + ap.box[2]) / 2.0, gz, rng)
+            gx, gy = ground_position(cam, ap.box[3], (ap.box[0] + ap.box[2]) / 2.0, gz, rng, size_range(cam, entity.kind, ap.box))
             out.append(Detection(entity.kind, float(score), gx, gy, ap.box, False, entity.name, self._weapon_call(entity, ap, cam, rng)))
         rng = _rng(self.seed, sensor_id, "false", frame)
         if rng.random() < self.false_per_frame:
