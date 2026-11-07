@@ -100,6 +100,15 @@ def load_weapon_curves(path: str = str(WEAPON_CURVES_PATH)) -> dict:
     return json.loads(Path(path).read_text())
 
 
+@lru_cache(maxsize=256)
+def _axes(heading_deg: float, pitch_down_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The camera's forward, right and up, worked out once per direction rather than once per thing looked at (it was a fifth of a vision tick in `np.cross` alone).
+    `up` is `right` x `forward`, written out: with right = (cos h, -sin h, 0) that comes to (sin h sin p, cos h sin p, cos p)."""
+    h, p = math.radians(heading_deg), math.radians(pitch_down_deg)
+    sh, ch, sp, cp = math.sin(h), math.cos(h), math.sin(p), math.cos(p)
+    return (np.array([sh * cp, ch * cp, -sp]), np.array([ch, -sh, 0.0]), np.array([sh * sp, ch * sp, cp]))
+
+
 @dataclass(frozen=True)
 class CameraSpec:
     """A pinhole camera. Heading in degrees clockwise from +y, pitch down from the horizon, as the renderer."""
@@ -120,11 +129,7 @@ class CameraSpec:
         return math.degrees(2.0 * math.atan(math.tan(math.radians(self.hfov_deg) / 2.0) / aspect))
 
     def axes(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        h, p = math.radians(self.heading_deg), math.radians(self.pitch_down_deg)
-        forward = np.array([math.sin(h) * math.cos(p), math.cos(h) * math.cos(p), -math.sin(p)])
-        right = np.array([math.cos(h), -math.sin(h), 0.0])
-        up = np.cross(right, forward)
-        return forward, right, up
+        return _axes(self.heading_deg, self.pitch_down_deg)
 
     def project(self, points: np.ndarray) -> np.ndarray:
         """(n, 3) world points to (n, 3) of (u, v, depth): u and v in [0, 1] across and down the frame."""
@@ -160,11 +165,10 @@ def entity_box_corners(x: float, y: float, ground_z: float, heading_deg: float, 
     return np.array(pts)
 
 
-def appearance(cam: CameraSpec, entity, pose: tuple[float, float, float], rig) -> Appearance | None:
-    """The entity as the camera sees it, or None if it is out of the frame, too near, or hidden.
+def framing(cam: CameraSpec, entity, pose: tuple[float, float, float], rig) -> Appearance | None:
+    """How big and where in the frame the entity is, or None if it is out of the frame or too near. Geometry only: it does not ask whether anything is in the way.
 
-    `rig` supplies elevation_at(x, y) and line_of_sight(x, y, z, tx, ty, tz), as camera.CameraRig does.
-    """
+    Separate from `line_of_sight` because the raycast is by far the dearer of the two, and most of the things in a frame are not found anyway (see `PerceptionSensor.observe`)."""
     ex, ey, heading = pose
     gz = rig.elevation_at(ex, ey)
     uvd = cam.project(entity_box_corners(ex, ey, gz, heading, entity.height_m, entity.width_m, entity.length_m, entity.box_offset_m))
@@ -173,12 +177,24 @@ def appearance(cam: CameraSpec, entity, pose: tuple[float, float, float], rig) -
     u0, v0, u1, v1 = uvd[:, 0].min(), uvd[:, 1].min(), uvd[:, 0].max(), uvd[:, 1].max()
     if u1 < 0.0 or u0 > 1.0 or v1 < 0.0 or v0 > 1.0:
         return None
-    centre = np.array([ex, ey, gz + entity.height_m / 2.0])
-    if not rig.line_of_sight(cam.x, cam.y, cam.z, ex, ey, gz + entity.height_m * 0.9):
-        return None
-    slant = float(np.linalg.norm(centre - np.array([cam.x, cam.y, cam.z])))
+    slant = float(np.linalg.norm(np.array([ex, ey, gz + entity.height_m / 2.0]) - np.array([cam.x, cam.y, cam.z])))
     # the share of the frame the object would fill, whether or not part of it is cropped by the frame edge
     return Appearance((max(u0, 0.0), max(v0, 0.0), min(u1, 1.0), min(v1, 1.0)), float(v1 - v0), slant, math.hypot(ex - cam.x, ey - cam.y))
+
+
+def in_the_clear(cam: CameraSpec, entity, pose: tuple[float, float, float], rig) -> bool:
+    """Whether the simulated world leaves the camera a clear line to the entity (a hill, a tree, a boulder in the way)."""
+    ex, ey, _ = pose
+    return bool(rig.line_of_sight(cam.x, cam.y, cam.z, ex, ey, rig.elevation_at(ex, ey) + entity.height_m * 0.9))
+
+
+def appearance(cam: CameraSpec, entity, pose: tuple[float, float, float], rig) -> Appearance | None:
+    """The entity as the camera sees it, or None if it is out of the frame, too near, or hidden.
+
+    `rig` supplies elevation_at(x, y) and line_of_sight(x, y, z, tx, ty, tz), as camera.CameraRig does.
+    """
+    ap = framing(cam, entity, pose, rig)
+    return ap if ap is not None and in_the_clear(cam, entity, pose, rig) else None
 
 
 # ---------------------------------------------------------------- the measured curves
@@ -327,7 +343,7 @@ class PerceptionSensor:
         what stops a person standing behind one from being found: below `MIN_VISIBLE_SHARE` nothing is found, and below `FULL_VISIBLE_SHARE` it is found less readily."""
         out: list[Detection] = []
         for entity, pose in zip(entities, poses, strict=True):
-            ap = appearance(cam, entity, pose, rig)
+            ap = framing(cam, entity, pose, rig)
             if ap is None:
                 continue
             rng = _rng(self.seed, sensor_id, entity.name, frame)
@@ -339,6 +355,10 @@ class PerceptionSensor:
                         continue
                     p *= min(1.0, shown / FULL_VISIBLE_SHARE)
             if rng.random() >= p:
+                continue
+            # Only now the raycast through the simulated world, which costs more than everything above it together. Each entity draws from its own stream (seeded by its name and the
+            # frame), so asking after the draw rather than before it finds exactly the same things: it is the same conjunction in a cheaper order.
+            if not in_the_clear(cam, entity, pose, rig):
                 continue
             score = min(max(median_score(entity.kind, ap.share) + rng.uniform(-SCORE_SPREAD, SCORE_SPREAD), self.floor), MAX_CONFIDENCE)
             gz = rig.elevation_at(pose[0], pose[1])

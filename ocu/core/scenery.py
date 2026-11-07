@@ -29,6 +29,10 @@ from ocu.core.terrain import (
 )
 
 #: Gravel: patches of the ground a few metres across (the field's wavelength), covering roughly a tenth of the open ground, a little more of the track.
+#: These patterns run over 14-30 m, so the noise behind them is generated on a grid this many cells coarse and resampled up (see terrain._field). At every half-metre cell it was
+#: three seconds of the launch, for detail at a scale the patterns do not have.
+COARSE = 6
+
 GRAVEL_WAVELENGTH_M = 14.0
 #: (the noise field is centred on zero, about -0.4 to 0.5: its 90th percentile is 0.32, so these put gravel on roughly a tenth of the open ground and a fifth of the track)
 GRAVEL_THRESHOLD = (0.26, 0.38)
@@ -72,7 +76,7 @@ def dress(world: TerrainWorld, protect: Callable[[np.ndarray], np.ndarray] | Non
     counts = {"gravel_cells": 0, "gravel_stones": 0, "cobbles": 0, "boulders": 0, "ledges": 0}
 
     # --- gravel ---------------------------------------------------------------------------------------------------------------------------
-    patch = _field(world.seed + 31, span, extent, cell, GRAVEL_WAVELENGTH_M, 3, coarse=2)
+    patch = _field(world.seed + 31, span, extent, cell, GRAVEL_WAVELENGTH_M, 3, coarse=COARSE)
     gravel = _smoothstep(*GRAVEL_THRESHOLD, patch)
     gravel = np.where(grid == int(Terrain.TRACK), np.maximum(gravel, _smoothstep(*GRAVEL_TRACK_THRESHOLD, patch)), gravel)
     gravel = (gravel * free).astype(np.float32)
@@ -93,7 +97,7 @@ def dress(world: TerrainWorld, protect: Callable[[np.ndarray], np.ndarray] | Non
     counts["gravel_stones"] = len(ids)
 
     # --- cobbles ----------------------------------------------------------------------------------------------------------------------------
-    gather = np.clip(1.0 + 2.0 * _field(world.seed + 53, span, extent, cell, 22.0, 2, coarse=2), 0.05, 3.0)
+    gather = np.clip(1.0 + 2.0 * _field(world.seed + 53, span, extent, cell, 22.0, 2, coarse=COARSE), 0.05, 3.0)
     expected = COBBLES_PER_M2 * gather * cell * cell * free * inside
     n_cobbles = rng.poisson(expected)
     ids = np.repeat(np.arange(n_cobbles.size), n_cobbles.ravel())
@@ -107,7 +111,7 @@ def dress(world: TerrainWorld, protect: Callable[[np.ndarray], np.ndarray] | Non
 
     # --- more rock, where the picture is the simulated world's -------------------------------------------------------------------------------
     if protect is not None:
-        clustering = np.clip(1.0 + 2.5 * _field(world.seed + 71, span, extent, cell, 30.0, 3, coarse=2), 0.05, 3.5)
+        clustering = np.clip(1.0 + 2.5 * _field(world.seed + 71, span, extent, cell, 30.0, 3, coarse=COARSE), 0.05, 3.5)
         expected = EXTRA_BOULDERS_PER_M2 * clustering * cell * cell * free * inside
         n_rocks = rng.poisson(expected)
         ids = np.repeat(np.arange(n_rocks.size), n_rocks.ravel())

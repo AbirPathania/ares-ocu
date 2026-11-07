@@ -1066,23 +1066,24 @@ class MapView(QWidget):
         painter.setRenderHint(QPainter.Antialiasing, False)
 
         alpha = (255.0 * (0.4 + 0.6 * scan.intensities)).astype(np.int64)
+        # Every return turned into a screen position at once. Point by point through `_to_screen` this was 100 000 calls and two QPointF each per scan, half the cost of a
+        # director tick on its own; the arithmetic is the same.
+        centre = self._center()
+        screen_x = (centre.x() + scan.xs * self._scale).tolist()
+        screen_y = (centre.y() - scan.ys * self._scale).tolist()
         for name in ("GROUND", "TRACK", "SCRUB", "TREE", "ROCK", "POTHOLE", "BUSH"):
             mask = scan.kinds == int(Terrain[name])
             if not mask.any():
                 continue
             base = RETURN_COLORS[name]
-            xs, ys, alphas = scan.xs[mask], scan.ys[mask], alpha[mask]
             # Grouped into a few alpha bands, so the pen changes a handful of
             # times per scan rather than once per point.
-            bands = np.clip(alphas // 24, 0, 10)
-            for band in np.unique(bands):
-                in_band = bands == band
+            bands = np.where(mask, np.clip(alpha // 24, 0, 10), -1)
+            for band in np.unique(bands[mask]):
                 colour = QColor(base)
                 colour.setAlpha(int(band * 24 + 12))
                 painter.setPen(QPen(colour))
-                painter.drawPoints(
-                    [self._to_screen(x, y) for x, y in zip(xs[in_band].tolist(), ys[in_band].tolist())]
-                )
+                painter.drawPoints([QPointF(screen_x[i], screen_y[i]) for i in np.nonzero(bands == band)[0].tolist()])
         painter.end()
         self._fresh_layer = layer
         self._fresh_layer_pan = QPointF(self._pan)

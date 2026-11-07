@@ -196,6 +196,10 @@ CAMERA_TICK_MS = 60
 #: live tile is redrawn every tick and the picture moves smoothly, instead of one
 #: tile per tick.
 GPU_CAMERA_TICK_MS = 40
+#: One worker draws every tile, and a trail frame (800 000 splats) costs more than twice a simulated one, so asking for all four every tick shares the worker out evenly and leaves
+#: each at about 5 a second. The rover's tile is the one being watched (and the only photographic one), so it is asked for every tick and the three scout thumbnails every
+#: `SCOUT_FRAME_EVERY` ticks, staggered so that no two fall on the same one. It is what the radio does anyway: one downlink shared between three aircraft and the vehicle.
+SCOUT_FRAME_EVERY = 4
 #: The thermal mosaic is written once a second of mission time, and a thermal tile is redrawn four times a second at most.
 THERMAL_MAP_HZ = 1.0
 IR_FEED_PERIOD_S = 0.25
@@ -1026,7 +1030,10 @@ class MainWindow(QMainWindow):
         if self._gpu_worker is not None and not self._gpu_worker.resolved:
             return  # still building the scene: no stand-in picture while it does
         if self._gpu_worker is not None and self._gpu_worker.available:
+            self._camera_turn += 1
             for unit_id in live:
+                if unit_id != "rover" and self._camera_turn % SCOUT_FRAME_EVERY != TRICOPTER_IDS.index(unit_id) % SCOUT_FRAME_EVERY:
+                    continue
                 self._gpu_worker.submit(unit_id, self._camera_request(unit_id))
             return
         if self.camera_rig.gpu is not None:

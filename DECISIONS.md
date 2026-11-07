@@ -2045,3 +2045,22 @@ non-ferrous "disturbed soil", the heavy deep one "safe object"; every kind of ob
 the frames in which they were in view, animals 40-60%, the truck 6 of 10, 14 false alarms in 502 frames. The scouts over 100 s: people, animals, vehicles (15 of 15 in view), armed people and mines reported, no errors. What it is, so that no one is misled by the
 word: the camera "AI" is a model of a trained detector (geometry for what is in view, recall curves measured from one real model's detections on images it never trained on for whether it finds it, a confirm-over-several-frames gate), not a network
 running on the rendered pixels; the app says so in its log. Running a real network on the frames would need one installed and, to be honest, would mostly measure how unlike the real photographs the rendered figures are.
+
+**Making it fit for a live demonstration.** Measured rather than judged: a cold start, then seven minutes with the four camera tiles, the three scouts, the detectors and the thermal
+system all running. Nothing failed (no uncaught exception, no warning, memory flat at 1.7 GB after the first half-minute, the patrol completing), but two things would have shown on a
+projector: every tile at 4-5 frames a second, and twenty-seven seconds of blank tiles at launch. Both were profiled rather than guessed at, and the guesses were wrong twice.
+  * *The first guess was wrong.* The obvious suspect was the detector's line-of-sight raycast, run for all 29 things in view of all 4 cameras. Deferring it until after the detection draw
+    (each thing draws from its own stream, seeded by its name and the frame, so asking in the cheaper order finds exactly the same things: 600 of 600 camera-frames identical, 41% of the
+    raycasts) was worth nothing at all on the clock. What the profiler then showed was `CameraSpec.axes`, which recomputed the camera's three axis vectors with `np.cross` **once per thing
+    looked at** rather than once per camera: a fifth of a vision tick. It is now worked out analytically and cached by heading and pitch.
+  * *The real cost was in the map.* Half of every director tick was `_build_fresh_layer` turning a 7 800-point LiDAR scan into screen positions through a per-point Python call that
+    built two `QPointF` each time: 101 000 calls per 13 scans. The same arithmetic in one numpy expression took the director tick from 36 ms to 26 ms.
+  * *One worker, four tiles.* A trail frame (800 000 splats) costs twice a simulated one, and asking for all four tiles every tick shared the worker out evenly. The rover's tile is the one
+    being watched and the only photographic one, so it is now asked for every tick and the three scout thumbnails every fourth, staggered (`SCOUT_FRAME_EVERY`). It is what the radio does
+    anyway: one downlink between three aircraft and the vehicle.
+  * *Launch.* The world build was 11 s, of which 4 s was the scenery module's three noise fields evaluated at every half-metre cell for patterns that run over 14-30 m. Generated on a
+    grid six cells coarse and resampled (as the terrain's own fields already were) it is 0.4 s, and the build is 6 s.
+Result: the rover's tile went from 5.1 to about 10 frames a second (median 97 ms, worst case 454 ms against 847), the scouts sit at 2.3, and first picture is about 17 s from launch.
+Mission pace barely moves any of it (10.3 at 1x, 10.6 at 5x, 9.3 at 30x), so the limit is the drawing, not the simulation. Every control a presenter might press (play, pace, launch,
+the TRAIL and IR chips, selecting units, all three map layers, manual control and the driving keys, GO TO, cutting the link, confirming and clearing threats, the threat-class filters,
+return to base, and RESET) was exercised three times over in a running mission: nothing raised, the worker thread survived every reset, and the tiles kept painting.
